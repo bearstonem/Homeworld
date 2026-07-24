@@ -14,7 +14,10 @@ dep_sdl_native = dependency('sdl2', native: true)
 base_deps = [ ]
 
 if host_machine.system() != 'emscripten'
-	if get_option('gles')
+	if get_option('vr')
+		# gl4es provides the GL implementation, added below
+		dep_gl = declare_dependency()
+	elif get_option('gles')
 		if host_machine.system() == 'android'
 			# The NDK ships GLES libraries without pkg-config metadata
 			dep_gl = meson.get_compiler('c').find_library('GLESv1_CM')
@@ -137,6 +140,34 @@ endif
 
 if get_option('gles')
 	c_base_args += ['-DHW_ENABLE_GLES']
+endif
+
+if get_option('vr')
+	if host_machine.system() != 'android'
+		error('The vr option is currently Android-only (Meta Quest via OpenXR)')
+	endif
+	if get_option('gles')
+		error('The vr option uses gl4es (desktop GL over ES) and cannot be combined with -Dgles=true')
+	endif
+
+	cc = meson.get_compiler('c')
+	gl4es_dir = meson.project_source_root() / 'android/gl4es'
+	openxr_dir = meson.project_source_root() / 'android/OpenXR-SDK'
+
+	base_deps += [
+		cc.find_library('GL', dirs: gl4es_dir / 'lib', static: true),
+		cc.find_library('openxr_loader', dirs: meson.project_source_root() / 'android/build-openxr-arm64/src/loader'),
+		cc.find_library('EGL'),
+		cc.find_library('GLESv2'),
+		cc.find_library('dl'),
+		cc.find_library('log'),
+		cc.find_library('android'),
+	]
+	c_base_args += [
+		'-DHW_ENABLE_VR',
+		'-I' + gl4es_dir / 'include',
+		'-I' + openxr_dir / 'include',
+	]
 endif
 
 if get_option('demo')

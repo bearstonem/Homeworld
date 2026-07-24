@@ -10,4 +10,10 @@
 /project/local.properties
 
 # Prebuilt native libs are staged here by the build steps
-/project/app/src/main/jniLibs/
+/project/app/src/*/jniLibs/
+
+# gl4es and OpenXR sources/builds (see README.md)
+/gl4es/
+/OpenXR-SDK/
+/build-gl4es-*/
+/build-openxr-*/

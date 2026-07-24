@@ -297,6 +297,13 @@ static inline void glArrayElement(GLint i) {
 #include <GL/glew.h>
 #include <SDL2/SDL_opengl.h>
 
+#elif defined(HW_ENABLE_VR)
+
+/* gl4es provides the complete GL 1.x API (including the VBO and mipmap
+   entry points below) as real exported functions; nothing to load. */
+#define GL_GLEXT_PROTOTYPES
+#include <SDL2/SDL_opengl.h>
+
 #else
 
 #include <SDL2/SDL_opengl.h>

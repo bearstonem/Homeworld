@@ -82,5 +82,55 @@ Settings, saves and screenshots are written to the same directory.
 ## Meta Quest
 
 The Quest runs standard Android APKs as flat 2D panel apps: enable
-developer mode, connect via adb, then install/push as above. Native
-VR (OpenXR) support is a separate, future step.
+developer mode, connect via adb, then install/push as above.
+
+## VR build (OpenXR theater mode)
+
+The `-Dvr=true` meson option builds an immersive Quest variant: the game
+compiles its desktop GL 1.x path against [gl4es] (GL over ES2) on an
+ES 3.0 context, and each frame is presented on a large virtual screen
+via an OpenXR quad layer (see `src/SDL/vr.c`). A Bluetooth mouse/keyboard
+paired with the headset can control the game; mapping the Touch
+controllers to the cursor is a future step, as is true stereo rendering.
+
+[gl4es]: https://github.com/ptitSeb/gl4es
+
+Build the two extra native dependencies once:
+
+```sh
+cd android
+git clone --depth 1 https://github.com/ptitSeb/gl4es.git
+cmake -S gl4es -B build-gl4es-arm64 -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/<version>/build/cmake/android.toolchain.cmake \
+    -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+    -DNOX11=ON -DDEFAULT_ES=2 -DSTATICLIB=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-gl4es-arm64 -j$(nproc)   # produces gl4es/lib/libGL.a
+
+git clone --depth 1 https://github.com/KhronosGroup/OpenXR-SDK.git
+cmake -S OpenXR-SDK -B build-openxr-arm64 -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/<version>/build/cmake/android.toolchain.cmake \
+    -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release
+cmake --build build-openxr-arm64 -j$(nproc)  # produces libopenxr_loader.so
+```
+
+Then from the repository root:
+
+```sh
+meson setup --cross-file android/aarch64-android.meson-cross-build-definition.txt \
+    --buildtype=release -Db_sanitize=none -Dvr=true -Dmovies=false -Ddemo=true \
+    build.android-vr
+meson compile -C build.android-vr
+```
+
+The gradle project has `flat` and `vr` product flavors (same application
+id, so they share the sideloaded game data but cannot be installed at
+the same time):
+
+```sh
+cp build.android-vr/libmain.so android/sdl-prefix-arm64/lib/libSDL2.so \
+    android/build-openxr-arm64/src/loader/libopenxr_loader.so \
+    android/project/app/src/vr/jniLibs/arm64-v8a/
+cd android/project
+./gradlew assembleVrDebug     # or assembleFlatDebug for the 2D app
+adb install app/build/outputs/apk/vr/debug/app-vr-debug.apk
+```

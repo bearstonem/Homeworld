@@ -75,6 +75,12 @@
 #include "UnivUpdate.h"
 #include "utility.h"
 
+#ifdef HW_ENABLE_VR
+#include <stdlib.h>
+#include "gl4esinit.h"
+#include "vr.h"
+#endif
+
 #if defined _MSC_VER
 	#define isnan(x) _isnan(x)
 #endif
@@ -140,7 +146,7 @@ static sdword rndHint = 0;
 
 SDL_Window *sdlwindow=NULL;
 SDL_GLContext glcontext;
-#ifndef HW_ENABLE_GLES
+#if !defined(HW_ENABLE_GLES) && !defined(HW_ENABLE_VR)
 
 #ifndef __EMSCRIPTEN__
 PFNGLBINDBUFFERPROC glBindBuffer = 0;
@@ -881,7 +887,15 @@ bool32 setupPixelFormat()
     HRESULT hr = SetProcessDPIAware();
 #endif
 
-#ifdef HW_ENABLE_GLES
+#if defined(HW_ENABLE_VR)
+    /* gl4es renders the game's GL 1.x over ES2-compatible calls; an
+       ES 3.0 context satisfies both gl4es and the OpenXR runtime. */
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,   24);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+#elif defined(HW_ENABLE_GLES)
     /* Set attributes. SDL creates the EGL/GLES context itself on every
        platform (X11, Wayland, Android, ...). */
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 1);
@@ -942,6 +956,13 @@ bool32 setupPixelFormat()
 
     SDL_GL_MakeCurrent(sdlwindow, glcontext);
 
+#ifdef HW_ENABLE_VR
+    /* Must run before the first real GL call: gl4es translates the game's
+       GL 1.x onto the ES context that is now current. */
+    setenv("LIBGL_ES", "2", 1);
+    initialize_gl4es();
+#endif
+
 	SDL_ShowCursor(SDL_DISABLE);
 
     // query actual resolution we render into (e.g. in fullscreen desktop mode it may be different from requested)
@@ -949,12 +970,25 @@ bool32 setupPixelFormat()
     printf("UI resolution: %dx%d\n", MAIN_WindowWidth, MAIN_WindowHeight);
     printf("Render resolution: %dx%d\n", MAIN_WindowWidthActual, MAIN_WindowHeightActual);
 
+#ifdef HW_ENABLE_VR
+    if (vrInit(MAIN_WindowWidthActual, MAIN_WindowHeightActual))
+    {
+        /* OpenXR paces frames via xrWaitFrame; do not also block on the
+           (invisible) window surface's vsync. */
+        SDL_GL_SetSwapInterval(0);
+    }
+    else
+    {
+        fprintf(stderr, "VR: OpenXR unavailable, running flat\n");
+    }
+#endif
+
 	lastWidth  = MAIN_WindowWidth;
 	lastHeight = MAIN_WindowHeight;
 	lastDepth  = MAIN_WindowDepth;
 	lastFull   = fullScreen;
 
-#if !defined(__EMSCRIPTEN__) && !defined(HW_ENABLE_GLES)
+#if !defined(__EMSCRIPTEN__) && !defined(HW_ENABLE_GLES) && !defined(HW_ENABLE_VR)
     glBindBuffer = SDL_GL_GetProcAddress("glBindBuffer");
     glDeleteBuffers = SDL_GL_GetProcAddress("glDeleteBuffers");
     glGenBuffers = SDL_GL_GetProcAddress("glGenBuffers");
@@ -1131,6 +1165,9 @@ void rndClose(void)
     Uint32 flags = SDL_WasInit(SDL_INIT_EVERYTHING);
     if (!(flags & SDL_INIT_VIDEO))
         return;
+#ifdef HW_ENABLE_VR
+    vrShutdown();
+#endif
     if (stararray) {
         if (useVBO)
             glDeleteBuffers(1, &vboStars);
@@ -4555,5 +4592,8 @@ void rndFlush(void)
 {
     glFlush();
     primErrorMessagePrint();
+#ifdef HW_ENABLE_VR
+    vrFrame();
+#endif
     SDL_GL_SwapWindow(sdlwindow);
 }

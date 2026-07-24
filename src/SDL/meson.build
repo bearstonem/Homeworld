@@ -19,7 +19,8 @@ src_sdl = files('avi.c',
                 'TimeoutTimer.c',
                 'Titan.c',
                 'TitanInterfaceC.c',
-                'utility.c')
+                'utility.c',
+                'vr.c')
 
 src_sdl += files('fqcodec.c',
                  'fqeffect.c',
