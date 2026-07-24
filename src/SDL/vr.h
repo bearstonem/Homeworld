@@ -31,6 +31,17 @@ void vrFrame(void);
 
 void vrShutdown(void);
 
+/* Stereo world rendering hooks, called from rglu.c during the per-eye
+   passes. Outside an eye pass both are no-ops. */
+
+/* Replaces the symmetric game frustum with the eye's asymmetric one.
+   Returns TRUE when it did (caller returns without building its own). */
+bool32 vrEyeProjection(real32 zNear, real32 zFar);
+
+/* Pre-multiplies the head-tracking eye view onto the modelview stack,
+   so the game's own lookat applies on top of it. */
+void vrEyeApplyView(void);
+
 #endif /* HW_ENABLE_VR */
 
 #endif

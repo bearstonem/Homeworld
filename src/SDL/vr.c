@@ -14,6 +14,7 @@
 
 #include "vr.h"
 
+#include <math.h>
 #include <string.h>
 #include <dlfcn.h>
 
@@ -51,7 +52,19 @@
 #define VR_HAND_RIGHT  1
 #define VR_HAND_COUNT  2
 
+#define VR_EYE_COUNT   2
+
+/* How many game-world units one real-world metre of head movement is
+   worth. Homeworld ships are hundreds of units long; at 1000 the fleet
+   reads as a room-sized hologram. */
+#define VR_WORLD_SCALE 1000.0f
+
 extern SDL_Window *sdlwindow;
+
+#include "Camera.h"
+extern void rndMainViewRenderFunction(Camera *camera);
+extern Camera *mrCamera;
+extern bool32 gameIsRunning;
 
 /* The frame copy must talk to the driver directly: the game's GL calls go
    through gl4es, which keeps its own texture-id namespace, and the
@@ -75,7 +88,18 @@ typedef struct {
     XrSpace      viewSpace;
     bool32       quadPlaced;
     XrPosef      quadPose;
+    XrPosef      anchorPose;        /* head pose the world is anchored to */
+    udword       offScreenFrames;   /* frames the screen has been out of view */
     XrSwapchain  swapchain;
+    XrSwapchain  eyeSwapchain[VR_EYE_COUNT];
+    uint32_t     eyeImageCount[VR_EYE_COUNT];
+    XrSwapchainImageOpenGLESKHR eyeImages[VR_EYE_COUNT][VR_MAX_SWAPCHAIN_IMAGES];
+    sdword       eyeWidth, eyeHeight;
+    bool32       eyeActive;         /* inside a per-eye world render pass */
+    XrFovf       eyeFov;
+    real32       eyeViewMatrix[16];
+    XrCompositionLayerProjectionView projViews[VR_EYE_COUNT];
+    XrCompositionLayerProjection projLayer;
     uint32_t     imageCount;
     XrSwapchainImageOpenGLESKHR images[VR_MAX_SWAPCHAIN_IMAGES];
     sdword       width, height;
@@ -324,9 +348,55 @@ static void vrPlaceQuad(XrTime displayTime)
     vr.quadPose.position.y = location.pose.position.y + offset.y;
     vr.quadPose.position.z = location.pose.position.z + offset.z;
     vr.quadPose.orientation = location.pose.orientation;
+    vr.anchorPose = location.pose;
     vr.quadPlaced = TRUE;
+    vr.offScreenFrames = 0;
     SDL_Log("VR: screen anchored at (%.2f, %.2f, %.2f)",
             vr.quadPose.position.x, vr.quadPose.position.y, vr.quadPose.position.z);
+}
+
+/* Anchor events (donning the headset, recentering) are not reliably
+   delivered, so also re-anchor behaviourally: when the screen has been
+   well outside the user's view for over a second, bring it to them. */
+static void vrCheckScreenVisible(XrTime displayTime)
+{
+    XrSpaceLocation location;
+    XrVector3f forward = {0.0f, 0.0f, -1.0f}, facing, toQuad;
+    real32 mag, dot;
+
+    memset(&location, 0, sizeof(location));
+    location.type = XR_TYPE_SPACE_LOCATION;
+    if (XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &location))
+        || !(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+        || !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+    {
+        return;
+    }
+
+    vrQuatRotate(location.pose.orientation, forward, &facing);
+    toQuad.x = vr.quadPose.position.x - location.pose.position.x;
+    toQuad.y = vr.quadPose.position.y - location.pose.position.y;
+    toQuad.z = vr.quadPose.position.z - location.pose.position.z;
+    mag = sqrtf(toQuad.x * toQuad.x + toQuad.y * toQuad.y + toQuad.z * toQuad.z);
+    if (mag < 0.25f)
+    {
+        return;                                             //head is basically at the screen
+    }
+    dot = (facing.x * toQuad.x + facing.y * toQuad.y + facing.z * toQuad.z) / mag;
+
+    if (dot < 0.35f)                                        //screen > ~70 degrees off gaze
+    {
+        vr.offScreenFrames++;
+        if (vr.offScreenFrames > 90)                        //~1.25s at 72Hz
+        {
+            SDL_Log("VR: screen out of view, re-anchoring");
+            vr.quadPlaced = FALSE;
+        }
+    }
+    else
+    {
+        vr.offScreenFrames = 0;
+    }
 }
 
 static bool32 vrCreateSwapchain(void)
@@ -510,6 +580,10 @@ static void vrQuatUnrotate(XrQuaternionf q, XrVector3f v, XrVector3f* out)
     vrQuatRotate(conj, v, out);
 }
 
+/* The command screen lives in VIEW space (head-relative), so it can never
+   be lost regardless of anchoring/recentering: straight ahead, 2m out. */
+static XrPosef const vrScreenPose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -VR_SCREEN_DISTANCE}};
+
 /* Intersect a hand's aim ray with the virtual screen; returns TRUE and the
    game-window pixel coordinates on hit. */
 static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
@@ -520,7 +594,7 @@ static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
 
     memset(&location, 0, sizeof(location));
     location.type = XR_TYPE_SPACE_LOCATION;
-    if (XR_FAILED(xrLocateSpace(vr.aimSpace[hand], vr.space, time, &location))
+    if (XR_FAILED(xrLocateSpace(vr.aimSpace[hand], vr.viewSpace, time, &location))
         || !(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
         || !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
     {
@@ -529,11 +603,11 @@ static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
 
     /* ray into the quad's local frame (quad plane is z=0) */
     vrQuatRotate(location.pose.orientation, forward, &direction);
-    origin.x = location.pose.position.x - vr.quadPose.position.x;
-    origin.y = location.pose.position.y - vr.quadPose.position.y;
-    origin.z = location.pose.position.z - vr.quadPose.position.z;
-    vrQuatUnrotate(vr.quadPose.orientation, origin, &local);
-    vrQuatUnrotate(vr.quadPose.orientation, direction, &localDir);
+    origin.x = location.pose.position.x - vrScreenPose.position.x;
+    origin.y = location.pose.position.y - vrScreenPose.position.y;
+    origin.z = location.pose.position.z - vrScreenPose.position.z;
+    vrQuatUnrotate(vrScreenPose.orientation, origin, &local);
+    vrQuatUnrotate(vrScreenPose.orientation, direction, &localDir);
 
     if (localDir.z > -1e-5f)                                //parallel or pointing away
     {
@@ -616,7 +690,7 @@ static void vrUpdateInput(XrTime time)
     sdword px, py;
     bool32 select, context, back;
 
-    if (vr.state != XR_SESSION_STATE_FOCUSED || !vr.quadPlaced)
+    if (vr.state != XR_SESSION_STATE_FOCUSED)
     {
         return;
     }
@@ -667,6 +741,308 @@ static void vrUpdateInput(XrTime time)
     }
 }
 
+/*-----------------------------------------------------------------------------
+    Stereo world rendering: the game's world is drawn once per eye with the
+    headset's tracked pose layered on top of the game camera, and submitted
+    as an OpenXR projection layer behind the UI quad.
+----------------------------------------------------------------------------*/
+
+/* q as a 3x3 rotation, R[row][col] flattened row-major */
+static void vrQuatToMat3(XrQuaternionf q, real32 R[9])
+{
+    R[0] = 1.0f - 2.0f * (q.y * q.y + q.z * q.z);
+    R[1] = 2.0f * (q.x * q.y - q.z * q.w);
+    R[2] = 2.0f * (q.x * q.z + q.y * q.w);
+    R[3] = 2.0f * (q.x * q.y + q.z * q.w);
+    R[4] = 1.0f - 2.0f * (q.x * q.x + q.z * q.z);
+    R[5] = 2.0f * (q.y * q.z - q.x * q.w);
+    R[6] = 2.0f * (q.x * q.z - q.y * q.w);
+    R[7] = 2.0f * (q.y * q.z + q.x * q.w);
+    R[8] = 1.0f - 2.0f * (q.x * q.x + q.y * q.y);
+}
+
+/* Column-major model matrix of a pose, translation scaled into game units */
+static void vrPoseToModelMatrix(XrPosef pose, real32 scale, real32 out[16])
+{
+    real32 R[9];
+    sdword r, c;
+
+    vrQuatToMat3(pose.orientation, R);
+    for (c = 0; c < 3; c++)
+    {
+        for (r = 0; r < 3; r++)
+        {
+            out[c * 4 + r] = R[r * 3 + c];
+        }
+        out[c * 4 + 3] = 0.0f;
+    }
+    out[12] = pose.position.x * scale;
+    out[13] = pose.position.y * scale;
+    out[14] = pose.position.z * scale;
+    out[15] = 1.0f;
+}
+
+/* Column-major inverse (view) matrix of a rigid pose */
+static void vrPoseToViewMatrix(XrPosef pose, real32 scale, real32 out[16])
+{
+    real32 R[9], t[3];
+    sdword r, c;
+
+    vrQuatToMat3(pose.orientation, R);
+    t[0] = pose.position.x * scale;
+    t[1] = pose.position.y * scale;
+    t[2] = pose.position.z * scale;
+    for (c = 0; c < 3; c++)
+    {
+        for (r = 0; r < 3; r++)
+        {
+            out[c * 4 + r] = R[c * 3 + r];                  /* R transposed */
+        }
+        out[c * 4 + 3] = 0.0f;
+    }
+    for (r = 0; r < 3; r++)
+    {
+        out[12 + r] = -(R[0 * 3 + r] * t[0] + R[1 * 3 + r] * t[1] + R[2 * 3 + r] * t[2]);
+    }
+    out[15] = 1.0f;
+}
+
+/* C = A * B, all column-major */
+static void vrMatMul(real32 const A[16], real32 const B[16], real32 C[16])
+{
+    sdword r, c, k;
+
+    for (c = 0; c < 4; c++)
+    {
+        for (r = 0; r < 4; r++)
+        {
+            real32 sum = 0.0f;
+            for (k = 0; k < 4; k++)
+            {
+                sum += A[k * 4 + r] * B[c * 4 + k];
+            }
+            C[c * 4 + r] = sum;
+        }
+    }
+}
+
+bool32 vrEyeProjection(real32 zNear, real32 zFar)
+{
+    real32 m[16];
+    real32 l, r, b, t;
+
+    if (!vr.eyeActive)
+    {
+        return FALSE;
+    }
+
+    l = zNear * tanf(vr.eyeFov.angleLeft);
+    r = zNear * tanf(vr.eyeFov.angleRight);
+    b = zNear * tanf(vr.eyeFov.angleDown);
+    t = zNear * tanf(vr.eyeFov.angleUp);
+
+    memset(m, 0, sizeof(m));
+    m[0] = 2.0f * zNear / (r - l);
+    m[5] = 2.0f * zNear / (t - b);
+    m[8] = (r + l) / (r - l);
+    m[9] = (t + b) / (t - b);
+    m[10] = -(zFar + zNear) / (zFar - zNear);
+    m[11] = -1.0f;
+    m[14] = -2.0f * zFar * zNear / (zFar - zNear);
+    glMultMatrixf(m);
+    return TRUE;
+}
+
+void vrEyeApplyView(void)
+{
+    if (vr.eyeActive)
+    {
+        glMultMatrixf(vr.eyeViewMatrix);
+    }
+}
+
+static bool32 vrCreateStereoSwapchains(void)
+{
+    XrViewConfigurationView views[VR_EYE_COUNT];
+    uint32_t viewCount = 0, i, j;
+    XrSwapchainCreateInfo createInfo;
+
+    for (i = 0; i < VR_EYE_COUNT; i++)
+    {
+        memset(&views[i], 0, sizeof(views[i]));
+        views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+    }
+    VR_CHECK("xrEnumerateViewConfigurationViews",
+             xrEnumerateViewConfigurationViews(vr.instance, vr.systemId,
+                                               XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                               VR_EYE_COUNT, &viewCount, views));
+
+    /* The eye views render through the window framebuffer, so they cannot
+       exceed its size */
+    vr.eyeWidth = (sdword)views[0].recommendedImageRectWidth;
+    vr.eyeHeight = (sdword)views[0].recommendedImageRectHeight;
+    if (vr.eyeWidth > vr.width)   vr.eyeWidth = vr.width;
+    if (vr.eyeHeight > vr.height) vr.eyeHeight = vr.height;
+
+    memset(&createInfo, 0, sizeof(createInfo));
+    createInfo.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    createInfo.format = GL_RGBA8;
+    createInfo.sampleCount = 1;
+    createInfo.width = vr.eyeWidth;
+    createInfo.height = vr.eyeHeight;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+    for (i = 0; i < VR_EYE_COUNT; i++)
+    {
+        VR_CHECK("xrCreateSwapchain (eye)",
+                 xrCreateSwapchain(vr.session, &createInfo, &vr.eyeSwapchain[i]));
+        for (j = 0; j < VR_MAX_SWAPCHAIN_IMAGES; j++)
+        {
+            vr.eyeImages[i][j].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
+        }
+        VR_CHECK("xrEnumerateSwapchainImages (eye)",
+                 xrEnumerateSwapchainImages(vr.eyeSwapchain[i], VR_MAX_SWAPCHAIN_IMAGES,
+                                            &vr.eyeImageCount[i],
+                                            (XrSwapchainImageBaseHeader*)vr.eyeImages[i]));
+    }
+    SDL_Log("VR: stereo eye buffers %dx%d", (int)vr.eyeWidth, (int)vr.eyeHeight);
+    return TRUE;
+}
+
+/* Blit the freshly rendered eye view (bottom-left of the window
+   framebuffer) into the eye's swapchain image. */
+static void vrBlitEye(uword eye, uint32_t imageIndex)
+{
+    vr.rawBindFramebuffer(VR_GL_DRAW_FRAMEBUFFER, vr.blitFbo);
+    vr.rawFramebufferTexture2D(VR_GL_DRAW_FRAMEBUFFER, VR_GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, vr.eyeImages[eye][imageIndex].image, 0);
+    vr.rawBindFramebuffer(VR_GL_READ_FRAMEBUFFER, 0);
+    vr.rawBlitFramebuffer(0, 0, vr.eyeWidth, vr.eyeHeight,
+                          0, 0, vr.eyeWidth, vr.eyeHeight,
+                          VR_GL_COLOR_BUFFER_BIT, VR_GL_NEAREST);
+    vr.rawBindFramebuffer(VR_GL_DRAW_FRAMEBUFFER, 0);
+}
+
+/* Render the game world once per eye and fill in the projection layer.
+   Returns TRUE when the layer should be submitted this frame. */
+static bool32 vrRenderEyes(XrTime displayTime)
+{
+    XrViewLocateInfo locateInfo;
+    XrViewState viewState;
+    XrView views[VR_EYE_COUNT];
+    uint32_t viewCount = 0;
+    real32 anchorModel[16], eyeView[16];
+    GLint savedViewport[4];
+    GLboolean hadScissor;
+    uword eye;
+
+    static bool32 stereoFailed = FALSE;
+
+    if (!gameIsRunning || mrCamera == NULL || !vr.quadPlaced || stereoFailed)
+    {
+        return FALSE;
+    }
+
+    /* Eye buffers are created on first use: swapchains that exist but are
+       never presented keep some runtimes stuck on the loading screen. */
+    if (vr.eyeSwapchain[0] == XR_NULL_HANDLE)
+    {
+        if (!vrCreateStereoSwapchains())
+        {
+            stereoFailed = TRUE;
+            return FALSE;
+        }
+    }
+
+    memset(&locateInfo, 0, sizeof(locateInfo));
+    locateInfo.type = XR_TYPE_VIEW_LOCATE_INFO;
+    locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locateInfo.displayTime = displayTime;
+    locateInfo.space = vr.space;
+    memset(&viewState, 0, sizeof(viewState));
+    viewState.type = XR_TYPE_VIEW_STATE;
+    for (eye = 0; eye < VR_EYE_COUNT; eye++)
+    {
+        memset(&views[eye], 0, sizeof(views[eye]));
+        views[eye].type = XR_TYPE_VIEW;
+    }
+    if (XR_FAILED(xrLocateViews(vr.session, &locateInfo, &viewState,
+                                VR_EYE_COUNT, &viewCount, views))
+        || viewCount != VR_EYE_COUNT
+        || !(viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
+    {
+        return FALSE;
+    }
+
+    vrPoseToModelMatrix(vr.anchorPose, VR_WORLD_SCALE, anchorModel);
+
+    glGetIntegerv(GL_VIEWPORT, savedViewport);
+    hadScissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+
+    for (eye = 0; eye < VR_EYE_COUNT; eye++)
+    {
+        XrSwapchainImageAcquireInfo acquireInfo;
+        XrSwapchainImageWaitInfo waitInfo;
+        XrSwapchainImageReleaseInfo releaseInfo;
+        uint32_t imageIndex = 0;
+
+        memset(&acquireInfo, 0, sizeof(acquireInfo));
+        acquireInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+        memset(&waitInfo, 0, sizeof(waitInfo));
+        waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+        waitInfo.timeout = XR_INFINITE_DURATION;
+        memset(&releaseInfo, 0, sizeof(releaseInfo));
+        releaseInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+
+        if (XR_FAILED(xrAcquireSwapchainImage(vr.eyeSwapchain[eye], &acquireInfo, &imageIndex))
+            || XR_FAILED(xrWaitSwapchainImage(vr.eyeSwapchain[eye], &waitInfo)))
+        {
+            glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
+            if (hadScissor) glEnable(GL_SCISSOR_TEST);
+            return FALSE;
+        }
+
+        /* eye view = inverse(eye pose) * anchor pose: identity when the
+           head sits exactly where the world was anchored */
+        vrPoseToViewMatrix(views[eye].pose, VR_WORLD_SCALE, eyeView);
+        vrMatMul(eyeView, anchorModel, vr.eyeViewMatrix);
+        vr.eyeFov = views[eye].fov;
+
+        glViewport(0, 0, vr.eyeWidth, vr.eyeHeight);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        vr.eyeActive = TRUE;
+        rndMainViewRenderFunction(mrCamera);
+        vr.eyeActive = FALSE;
+        glFlush();
+
+        vrBlitEye(eye, imageIndex);
+        xrReleaseSwapchainImage(vr.eyeSwapchain[eye], &releaseInfo);
+
+        memset(&vr.projViews[eye], 0, sizeof(vr.projViews[eye]));
+        vr.projViews[eye].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+        vr.projViews[eye].pose = views[eye].pose;
+        vr.projViews[eye].fov = views[eye].fov;
+        vr.projViews[eye].subImage.swapchain = vr.eyeSwapchain[eye];
+        vr.projViews[eye].subImage.imageRect.extent.width = vr.eyeWidth;
+        vr.projViews[eye].subImage.imageRect.extent.height = vr.eyeHeight;
+    }
+
+    glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
+    if (hadScissor) glEnable(GL_SCISSOR_TEST);
+
+    memset(&vr.projLayer, 0, sizeof(vr.projLayer));
+    vr.projLayer.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
+    vr.projLayer.space = vr.space;
+    vr.projLayer.viewCount = VR_EYE_COUNT;
+    vr.projLayer.views = vr.projViews;
+    return TRUE;
+}
+
 bool32 vrInit(sdword width, sdword height)
 {
     memset(&vr, 0, sizeof(vr));
@@ -709,6 +1085,10 @@ static void vrHandleSessionState(XrEventDataSessionStateChanged const* event)
                 SDL_Log("VR: session running");
             }
             break;
+        case XR_SESSION_STATE_FOCUSED:
+            /* User (re)entered the app - put the screen in front of them */
+            vr.quadPlaced = FALSE;
+            break;
         case XR_SESSION_STATE_STOPPING:
             xrEndSession(vr.session);
             vr.sessionRunning = FALSE;
@@ -740,6 +1120,12 @@ static void vrPollEvents(void)
         {
             case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED:
                 vrHandleSessionState((XrEventDataSessionStateChanged const*)&event);
+                break;
+            case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
+                /* Tracking space recentered (headset donned, Meta-button
+                   recenter, ...) - the old anchor is meaningless now */
+                vr.quadPlaced = FALSE;
+                SDL_Log("VR: reference space changed, re-anchoring");
                 break;
             case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
                 vr.sessionRunning = FALSE;
@@ -792,7 +1178,7 @@ void vrFrame(void)
     XrFrameBeginInfo beginInfo;
     XrFrameEndInfo endInfo;
     XrCompositionLayerQuad quad;
-    XrCompositionLayerBaseHeader const* layers[1];
+    XrCompositionLayerBaseHeader const* layers[2];
     uint32_t layerCount = 0;
 
     if (!vr.active)
@@ -831,7 +1217,7 @@ void vrFrame(void)
 
         if (!vr.quadPlaced)
         {
-            vrPlaceQuad(frameState.predictedDisplayTime);
+            vrPlaceQuad(frameState.predictedDisplayTime);   //world anchor only
         }
         vrUpdateInput(frameState.predictedDisplayTime);
 
@@ -849,26 +1235,25 @@ void vrFrame(void)
             vrCopyFrame(imageIndex);
             xrReleaseSwapchainImage(vr.swapchain, &releaseInfo);
 
+            /* stereo world behind the UI screen (in-game only; the window
+               framebuffer is reused per eye, which is why the quad blit
+               above must happen first) */
+            if (vrRenderEyes(frameState.predictedDisplayTime))
+            {
+                layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&vr.projLayer;
+            }
+
             memset(&quad, 0, sizeof(quad));
             quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
-            quad.space = vr.space;
+            quad.space = vr.viewSpace;                      //head-locked: cannot be lost
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = vr.swapchain;
             quad.subImage.imageRect.extent.width = vr.width;
             quad.subImage.imageRect.extent.height = vr.height;
-            if (vr.quadPlaced)
-            {
-                quad.pose = vr.quadPose;
-            }
-            else
-            {
-                quad.pose.orientation.w = 1.0f;
-                quad.pose.position.z = -VR_SCREEN_DISTANCE;
-            }
+            quad.pose = vrScreenPose;
             quad.size.width = VR_SCREEN_WIDTH;
             quad.size.height = VR_SCREEN_WIDTH * (real32)vr.height / (real32)vr.width;
-            layers[0] = (XrCompositionLayerBaseHeader const*)&quad;
-            layerCount = 1;
+            layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&quad;
         }
     }
 
@@ -919,6 +1304,13 @@ void vrShutdown(void)
     if (vr.swapchain != XR_NULL_HANDLE)
     {
         xrDestroySwapchain(vr.swapchain);
+    }
+    for (i = 0; i < VR_EYE_COUNT; i++)
+    {
+        if (vr.eyeSwapchain[i] != XR_NULL_HANDLE)
+        {
+            xrDestroySwapchain(vr.eyeSwapchain[i]);
+        }
     }
     if (vr.viewSpace != XR_NULL_HANDLE)
     {

@@ -12,6 +12,10 @@
 #include "Shader.h"
 #include "FastMath.h"
 
+#ifdef HW_ENABLE_VR
+#include "vr.h"
+#endif
+
 
 #ifndef M_PI
 #define M_PI 3.14159265358979324
@@ -69,6 +73,13 @@ void v4_projectd(GLfloat u[4], GLfloat const v[4], GLfloat const m[16])
 void rgluPerspective(GLfloat fovy, GLfloat aspect, GLfloat zNear, GLfloat zFar)
 {
     GLfloat xmin, xmax, ymin, ymax;
+
+#ifdef HW_ENABLE_VR
+    if (vrEyeProjection(zNear, zFar))
+    {
+        return;
+    }
+#endif
 
     ymax = zNear * tan(fovy * M_PI / 360.0);
     ymin = -ymax;
@@ -155,6 +166,10 @@ void rgluLookAt(GLfloat eyex, GLfloat eyey, GLfloat eyez,
     GLfloat m[16];
     GLfloat x[3], y[3], z[3];
     GLfloat mag;
+
+#ifdef HW_ENABLE_VR
+    vrEyeApplyView();
+#endif
 
     z[0] = eyex - centerx;
     z[1] = eyey - centery;
