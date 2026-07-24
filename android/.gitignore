@@ -1,0 +1,13 @@
+# SDL2 sources and build artifacts (see README.md)
+/SDL/
+/build-sdl-*/
+/sdl-prefix-*/
+
+# Gradle/Android build outputs
+/project/.gradle/
+/project/build/
+/project/app/build/
+/project/local.properties
+
+# Prebuilt native libs are staged here by the build steps
+/project/app/src/main/jniLibs/

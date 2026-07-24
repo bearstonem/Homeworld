@@ -8,12 +8,19 @@ if get_option('b_sanitize') != 'none'
 endif
 
 dep_sdl = dependency('sdl2')
+# Build-machine SDL for native tools (kas2c) in cross builds
+dep_sdl_native = dependency('sdl2', native: true)
 
 base_deps = [ ]
 
 if host_machine.system() != 'emscripten'
 	if get_option('gles')
-		dep_gl = dependency('glesv1_cm')
+		if host_machine.system() == 'android'
+			# The NDK ships GLES libraries without pkg-config metadata
+			dep_gl = meson.get_compiler('c').find_library('GLESv1_CM')
+		else
+			dep_gl = dependency('glesv1_cm')
+		endif
 	else
 		dep_gl = dependency('gl')
 	endif
@@ -78,7 +85,8 @@ c_base_args = [
 	'-Wno-unused-result',
 ]
 
-if host_machine.system() == 'emscripten'
+if host_machine.system() in ['emscripten', 'android']
+	# clang-based toolchains
 	c_base_args += [
 		# TODO: fix warnings
 		'-Wno-unknown-warning-option',
@@ -122,6 +130,8 @@ elif host_machine.system() == 'windows'
 	c_base_args += ['-D_LINUX_FIX_ME', '-D_GNU_SOURCE', '-D_WIN32', '-DWIN32', '-DWINDOWS']
 elif host_machine.system() == 'emscripten'
 	base_deps += [subproject('demo-assets').get_variable('demo_assets_dep')]
+	c_base_args += ['-D_LINUX_FIX_ME', '-D_GNU_SOURCE']
+elif host_machine.system() == 'android'
 	c_base_args += ['-D_LINUX_FIX_ME', '-D_GNU_SOURCE']
 endif
 
@@ -201,6 +211,16 @@ if host_machine.system() == 'emscripten'
 			src,
 			include_directories: inc_src,
 			link_with: [lib_sdl],
+			c_args: c_args,
+			install: true)
+elif host_machine.system() == 'android'
+	# On Android the game is a shared library; SDL's Java activity loads
+	# libmain.so and calls its SDL_main entry point.
+	shared_library('main',
+			src,
+			include_directories: inc_src,
+			link_with: [lib_sdl],
+			dependencies: base_deps,
 			c_args: c_args,
 			install: true)
 else

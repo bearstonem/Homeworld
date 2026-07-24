@@ -20,5 +20,5 @@ exe_tools_kas2c = executable('kas2c',
 		                     gen_output_lexer,
 							 native: true,
 		                     implicit_include_directories: true,
-		                     dependencies: dep_sdl,
+		                     dependencies: dep_sdl_native,
 		                     c_args: c_base_args)

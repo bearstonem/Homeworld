@@ -10,6 +10,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef __ANDROID__
+#include <unistd.h>
+#endif
+
 #include <SDL2/SDL.h>
 
 #include "AIPlayer.h"
@@ -2172,6 +2176,19 @@ int main (int argc, char* argv[])
         }
     }
 #endif  /* Support for other platforms? */
+
+#ifdef __ANDROID__
+    // Run the game out of the app's external-storage directory: the game
+    // data (.big files) is sideloaded there, and with no $HOME set the
+    // settings/saves end up alongside it (see utility.c).
+    {
+        const char *storagePath = SDL_AndroidGetExternalStoragePath();
+        if (storagePath != NULL)
+        {
+            chdir(storagePath);
+        }
+    }
+#endif
 
     // set audio resampling to highest quality
     SDL_SetHint(SDL_HINT_AUDIO_RESAMPLING_MODE, "3");
