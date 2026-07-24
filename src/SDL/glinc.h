@@ -3,11 +3,63 @@
 
 #ifdef HW_ENABLE_GLES
 
-#include <GLES/egl.h>
+#include <stdio.h>
+
+#include <GLES/gl.h>
 #include <GLES/glext.h>
 
 #define GL_QUADS                0x0007
 #define GL_POLYGON              0x0009
+
+/* Desktop-GL-only enums, referenced by the debug state dump table and the
+   wireframe debug mode. Querying/enabling them on ES is a harmless
+   GL_INVALID_ENUM. */
+#define GL_CURRENT_RASTER_COLOR     0x0B04
+#define GL_CURRENT_RASTER_POSITION  0x0B07
+#define GL_POINT_SIZE_GRANULARITY   0x0B13
+#define GL_LINE_WIDTH_GRANULARITY   0x0B23
+#define GL_LINE_STIPPLE             0x0B24
+#define GL_POLYGON_MODE             0x0B40
+#define GL_POLYGON_SMOOTH           0x0B41
+#define GL_POLYGON_STIPPLE          0x0B42
+#define GL_COLOR_MATERIAL_FACE      0x0B55
+#define GL_RED_BIAS                 0x0D15
+#define GL_GREEN_BIAS               0x0D19
+#define GL_BLUE_BIAS                0x0D1B
+#define GL_LINE                     0x1B01
+#define GL_FILL                     0x1B02
+#define GL_INDEX_ARRAY              0x8077
+#define GL_EDGE_FLAG_ARRAY          0x8079
+
+/* Not available in ES: only used by debug wireframe visualisation. */
+static inline void glPolygonMode(GLenum face, GLenum mode) {
+    (void)face; (void)mode;
+}
+static inline void glLineStipple(GLint factor, GLushort pattern) {
+    (void)factor; (void)pattern;
+}
+
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT 0x84FE
+#endif
+
+/* ES 1.1 has no glGenerateMipmap; mipmaps are generated automatically at
+   upload via the GL_GENERATE_MIPMAP texture parameter (set in the
+   glTexImage2D wrapper below). */
+static inline void glGenerateMipmap(GLenum target) {
+    (void)target;
+}
+
+/* ES 1.1 requires internalformat == format, unlike desktop GL which
+   converts (e.g. RGBA data into a GL_RGB texture). */
+static inline void gles_TexImage2D(GLenum target, GLint level, GLint internalformat,
+                                   GLsizei width, GLsizei height, GLint border,
+                                   GLenum format, GLenum type, const GLvoid *pixels) {
+    if (level == 0) glTexParameteri(target, GL_GENERATE_MIPMAP, GL_TRUE);
+    glTexImage2D(target, level, (GLint)format, width, height, border, format, type, pixels);
+}
+#define glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels) \
+    gles_TexImage2D(target, level, internalformat, width, height, border, format, type, pixels)
 
 static unsigned int gles_immediate = 0;
 static GLenum gles_mode;
@@ -212,6 +264,31 @@ static inline void glVertex3fv(const GLfloat *v) {
 #define glColor4ub(R, G, B, A) glesColor4ub(R, G, B, A)
 #define glColor4f(R, G, B, A) glesColor4f(R, G, B, A)
 #define glNormal3f(X, Y, Z) glesNormal3f(X, Y, Z)
+
+/* ES only has the float/fixed fog entry points. */
+static inline void glFogi(GLenum pname, GLint param) {
+    glFogf(pname, (GLfloat)param);
+}
+
+/* glArrayElement emulation: Mesh.c indexes into its vertex list per polygon
+   inside glBegin/glEnd. Track the client vertex-array pointer (float arrays
+   only, which is all the game uses) and feed elements through the
+   immediate-mode emulation above. */
+static const GLfloat *gles_array_ptr = 0;
+static GLsizei gles_array_stride_floats = 3;
+
+static inline void gles_VertexPointer(GLint size, GLenum type, GLsizei stride, const void *pointer) {
+    gles_array_ptr = (const GLfloat *)pointer;
+    gles_array_stride_floats = stride ? stride / (GLsizei)sizeof(GLfloat) : size;
+    glVertexPointer(size, type, stride, pointer);
+}
+
+static inline void glArrayElement(GLint i) {
+    const GLfloat *v = gles_array_ptr + i * gles_array_stride_floats;
+    glVertex3f(v[0], v[1], v[2]);
+}
+
+#define glVertexPointer(size, type, stride, pointer) gles_VertexPointer(size, type, stride, pointer)
 
 #else
 

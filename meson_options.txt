@@ -13,6 +13,13 @@ option(
 )
 
 option(
+	'gles',
+	description: 'Toggle HW_ENABLE_GLES. Render using OpenGL ES 1.1 (for mobile/Android and other embedded targets) instead of desktop OpenGL.',
+	type: 'boolean',
+	value: false,
+)
+
+option(
 	'movies',
 	description: 'Toggle HW_ENABLE_MOVIES. Enable support for bink video cutscenes playback. Note that this requires additional dependencies (usually provided by FFMPEG).',
 	type: 'boolean',

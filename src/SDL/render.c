@@ -74,9 +74,6 @@
 #include "Universe.h"
 #include "UnivUpdate.h"
 #include "utility.h"
-#ifdef HW_ENABLE_GLES
-#include "SDL_syswm.h"
-#endif
 
 #if defined _MSC_VER
 	#define isnan(x) _isnan(x)
@@ -143,12 +140,7 @@ static sdword rndHint = 0;
 
 SDL_Window *sdlwindow=NULL;
 SDL_GLContext glcontext;
-#ifdef HW_ENABLE_GLES
-static EGLDisplay *egl_display = EGL_NO_DISPLAY;
-static EGLSurface egl_surface = EGL_NO_SURFACE;
-static EGLContext egl_context = EGL_NO_CONTEXT;
-static EGLConfig egl_config;
-#else
+#ifndef HW_ENABLE_GLES
 
 #ifndef __EMSCRIPTEN__
 PFNGLBINDBUFFERPROC glBindBuffer = 0;
@@ -859,18 +851,6 @@ bool32 setupPixelFormat()
 	static Uint32 lastDepth  = 0;
 	static bool32   lastFull   = FALSE;
 	int MSAA = 0;
-#ifdef HW_ENABLE_GLES
-    SDL_SysWMinfo info;
-    EGLint num_config = 1;
-    EGLint attribs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES_BIT,
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_DEPTH_SIZE, 16,
-        EGL_NONE
-    };
-    EGLContext new_context = EGL_NO_CONTEXT;
-    EGLSurface new_surface = EGL_NO_SURFACE;
-#endif
 
     // don't bother doing anything if nothing's actually changed
 	if(lastWidth  == MAIN_WindowWidth
@@ -901,7 +881,15 @@ bool32 setupPixelFormat()
     HRESULT hr = SetProcessDPIAware();
 #endif
 
-#ifndef HW_ENABLE_GLES
+#ifdef HW_ENABLE_GLES
+    /* Set attributes. SDL creates the EGL/GLES context itself on every
+       platform (X11, Wayland, Android, ...). */
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 1);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,   16);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+#else
     /* Set attributes. */
     SDL_GL_SetAttribute(SDL_GL_BUFFER_SIZE,  MAIN_WindowDepth);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,   24);
@@ -916,64 +904,6 @@ bool32 setupPixelFormat()
     flags |= SDL_WINDOW_RESIZABLE;
 #endif
 
-#ifdef HW_ENABLE_GLES
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    if (!(sdlwindow=SDL_CreateWindow("HomeworldSDL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        MAIN_WindowWidth, MAIN_WindowHeight, flags)))
-        return FALSE;
-
-    if(!(glcontext = SDL_GL_CreateContext(sdlwindow)))
-        return FALSE;
-
-    SDL_VERSION(&info.version);
-    if (SDL_GetWMInfo(&info) != 1) {
-        fprintf(stderr, "EGL cannot use this SDL version\n");
-        return FALSE;
-    }
-
-    egl_display = eglGetDisplay((EGLNativeDisplayType)info.info.x11.gfxdisplay);
-    if (egl_display == EGL_NO_DISPLAY) {
-        fprintf(stderr, "EGL found no available displays\n");
-        return FALSE;
-    }
-
-    if (!eglInitialize(egl_display, NULL, NULL)) {
-        fprintf(stderr, "EGL failed to initialize: code 0x%x\n", eglGetError());
-        return FALSE;
-    }
-
-    if (!eglChooseConfig(egl_display, attribs, &egl_config, 1, &num_config) || num_config < 1) {
-        fprintf(stderr, "EGL failed to find any valid config with required attributes: code 0x%x\n", eglGetError());
-        return FALSE;
-    }
-
-    new_context = eglCreateContext(egl_display, egl_config, EGL_NO_CONTEXT, NULL);
-    if (new_context == EGL_NO_CONTEXT) {
-        fprintf(stderr, "EGL failed to create context: code 0x%x\n", eglGetError());
-        return FALSE;
-    }
-    
-    new_surface = eglCreateWindowSurface(egl_display, egl_config, (EGLNativeWindowType)info.info.x11.window, NULL);
-    if (new_surface == EGL_NO_SURFACE) {
-        fprintf(stderr, "EGL failed to create a window surface: 0x%x\n", eglGetError());
-        return FALSE;
-    }
-
-    if (!eglMakeCurrent(egl_display, new_surface, new_surface, new_context)) {
-        fprintf(stderr, "EGL failed to change current surface: 0x%x\n", eglGetError());
-        return FALSE;
-    }
-
-    if (egl_context != EGL_NO_CONTEXT) {
-        eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroyContext(egl_display, egl_context);
-        eglDestroySurface(egl_display, egl_surface);
-    }
-    egl_context = new_context;
-    egl_surface = new_surface;
-#else
 	if (enableMSAA) {
         MSAA = 8;
 	    SDL_GL_SetAttribute( SDL_GL_MULTISAMPLEBUFFERS, 1 );
@@ -1007,7 +937,6 @@ bool32 setupPixelFormat()
 
     if(!(glcontext = SDL_GL_CreateContext(sdlwindow)))
         return FALSE;
-#endif
 
     SDL_GL_SetSwapInterval(1);
 
@@ -1025,7 +954,7 @@ bool32 setupPixelFormat()
 	lastDepth  = MAIN_WindowDepth;
 	lastFull   = fullScreen;
 
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) && !defined(HW_ENABLE_GLES)
     glBindBuffer = SDL_GL_GetProcAddress("glBindBuffer");
     glDeleteBuffers = SDL_GL_GetProcAddress("glDeleteBuffers");
     glGenBuffers = SDL_GL_GetProcAddress("glGenBuffers");
@@ -1099,15 +1028,6 @@ sdword rndSmallInit(rndinitdata* initData, bool32 GL)
     {
         /* Kill the window we created. */
         flags = SDL_WasInit(SDL_INIT_EVERYTHING);
-#ifdef HW_ENABLE_GLES
-        eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroyContext(egl_display, egl_context);
-        egl_config = EGL_NO_CONTEXT;
-        eglDestroySurface(egl_display, egl_surface);
-        egl_surface = EGL_NO_SURFACE;
-        eglTerminate(egl_display);
-        egl_display = EGL_NO_DISPLAY;
-#endif
         if (flags & ~SDL_INIT_VIDEO)
             SDL_QuitSubSystem(SDL_INIT_VIDEO);
         else
@@ -1217,15 +1137,6 @@ void rndClose(void)
         else
             memFree(stararray);
     }
-#ifdef HW_ENABLE_GLES
-    eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    eglDestroyContext(egl_display, egl_context);
-    egl_config = EGL_NO_CONTEXT;
-    eglDestroySurface(egl_display, egl_surface);
-    egl_surface = EGL_NO_SURFACE;
-    eglTerminate(egl_display);
-    egl_display = EGL_NO_DISPLAY;
-#endif
     if (flags ^ SDL_INIT_VIDEO)
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
     else
@@ -4644,9 +4555,5 @@ void rndFlush(void)
 {
     glFlush();
     primErrorMessagePrint();
-#ifdef HW_ENABLE_GLES
-    eglSwapBuffers(egl_display, egl_surface);
-#else
     SDL_GL_SwapWindow(sdlwindow);
-#endif
 }

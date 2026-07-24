@@ -12,8 +12,14 @@ dep_sdl = dependency('sdl2')
 base_deps = [ ]
 
 if host_machine.system() != 'emscripten'
+	if get_option('gles')
+		dep_gl = dependency('glesv1_cm')
+	else
+		dep_gl = dependency('gl')
+	endif
+
 	base_deps += [
-		dependency('gl'),
+		dep_gl,
 		dep_sdl,
 		meson.get_compiler('c').find_library('m', required: false),
 	]
@@ -117,6 +123,10 @@ elif host_machine.system() == 'windows'
 elif host_machine.system() == 'emscripten'
 	base_deps += [subproject('demo-assets').get_variable('demo_assets_dep')]
 	c_base_args += ['-D_LINUX_FIX_ME', '-D_GNU_SOURCE']
+endif
+
+if get_option('gles')
+	c_base_args += ['-DHW_ENABLE_GLES']
 endif
 
 if get_option('demo')

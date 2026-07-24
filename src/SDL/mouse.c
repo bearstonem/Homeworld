@@ -1087,7 +1087,7 @@ void mouseDraw(void)
         }
         else
         {   
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) && !defined(HW_ENABLE_GLES)
             glRasterPos2f(primScreenToGLX(mouseCursorXPosition),
                           primScreenToGLY(mouseCursorYPosition + texture->height));
             glDrawPixels(texture->width, texture->height, GL_RGBA, GL_UNSIGNED_BYTE, texture->data);
