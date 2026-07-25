@@ -68,6 +68,10 @@ extern bool32 gameIsRunning;                                //Globals.c
                                        ships one aim-cone at a time */
 #define VRW_SWEEP_MARGIN   1.60f    /* collision inflation while sweeping */
 #define VRW_SWEEP_TRAIL    48       /* samples of the swept path to remember */
+#define VRW_MAX_SWEEP_TARGETS 256   /* well under COMMAND_MAX_SHIPS: commit runs
+                                       MakeShipMastersIncludeSlaves, which GROWS
+                                       the list, so filling it here first would
+                                       overflow the array */
 #define VRW_RAY_LENGTH     100000.0f
 #define VRW_CURSOR_MIN     400.0f   /* nearest the cursor may sit: 50 units is
                                        5cm of hologram, i.e. inside the hand */
@@ -530,8 +534,15 @@ bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
             }
             capable = selSelected;
             return MakeSelectionKamikazeCapable((SelectCommand*)&capable) != 0;
-        case VRW_CMD_HALT:
-        case VRW_CMD_SPECIAL:           return !vrwOrdersBlocked();
+        case VRW_CMD_SPECIAL:
+            if (vrwOrdersBlocked())
+            {
+                return FALSE;
+            }
+            capable = selSelected;
+            MakeShipsSpecialActivateCapable((SelectCommand*)&capable);
+            return capable.numShips > 0;
+        case VRW_CMD_HALT:              return !vrwOrdersBlocked();
         default:                        return FALSE;
     }
 }
@@ -636,14 +647,29 @@ bool32 vrWorldCommand(vrworldcommand cmd, sdword arg)
         case VRW_CMD_TACTIC_NEUTRAL:    mrNeutralTactics(NULL, NULL);   break;
         case VRW_CMD_TACTIC_AGGRESSIVE: mrAgressiveTactics(NULL, NULL); break;
 
+        /* Both of these run makeShipsControllable on the selection they are
+           given, which TRIMS IT IN PLACE - so they get a copy, or issuing the
+           order would quietly delete ships from the player's own selection. */
         case VRW_CMD_HALT:
-            clWrapHalt(&universe.mainCommandLayer,
-                       (SelectCommand*)&selSelected);
+            capable = selSelected;
+            clWrapHalt(&universe.mainCommandLayer, (SelectCommand*)&capable);
             break;
         case VRW_CMD_SPECIAL:
-            /* NULL targets is the self-activate form, matching Z-release */
-            clWrapSpecial(&universe.mainCommandLayer,
-                          (SelectCommand*)&selSelected, NULL);
+            /* Self-activate, as Z-release does - and exactly as it does it.
+               Passing the raw selection with NULL targets segfaulted inside
+               clWrapSpecial: ships with no special ability reached
+               ability-specific code. The keyboard path copies and then filters
+               with MakeShipsSpecialActivateCapable for precisely that reason,
+               and checks again afterwards because the filter can empty it. */
+            capable = selSelected;
+            MakeShipsSpecialActivateCapable((SelectCommand*)&capable);
+            if (capable.numShips == 0)
+            {
+                return FALSE;
+            }
+            tutGameMessage("KB_Special");
+            clWrapSpecial(&universe.mainCommandLayer, (SelectCommand*)&capable,
+                          NULL);
             break;
         case VRW_CMD_KAMIKAZE:
             capable = selSelected;
@@ -993,7 +1019,7 @@ static void vrwTargetSweepAccumulate(vrwray const* ray)
 
     vrwSweepTrailRecord(ray);
     for (node = universe.RenderList.head;
-         node != NULL && vrw.targetSweep.numTargets < COMMAND_MAX_SHIPS;
+         node != NULL && vrw.targetSweep.numTargets < VRW_MAX_SWEEP_TARGETS;
          node = node->next)
     {
         SpaceObjRotImpTarg* obj = (SpaceObjRotImpTarg*)listGetStructOfNode(node);
