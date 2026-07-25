@@ -92,7 +92,6 @@
 #define VR_CARD_STATUS_WIN_W     300
 #define VR_CARD_STATUS_WIN_H     200
 #define VR_CARD_STATUS_WIDTH     0.22f
-#define VR_CARD_TEX_SCALE        2      /* swapchain px per logical UI px */
 #define VR_CARD_GAP              0.02f  /* metres between panel and card */
 #define VR_CARD_CONTROLS_SIDE   -1.0f   /* which side of the wrist panel */
 
@@ -1501,8 +1500,17 @@ static bool32 vrCardSwapchain(sdword index)
     {
         return FALSE;
     }
-    card->texWidth = card->winWidth * VR_CARD_TEX_SCALE;
-    card->texHeight = card->winHeight * VR_CARD_TEX_SCALE;
+    /* Size the swapchain to the framebuffer-space footprint of the layout so
+       the blit out of it is exactly 1:1. It used to downscale (4x source into
+       a 2x texture) with a LINEAR filter, which GLES forbids when the read
+       buffer is multisampled - so MSAA would have silently broken every card. */
+    if (MAIN_WindowWidth <= 0 || MAIN_WindowHeight <= 0)
+    {
+        card->failed = TRUE;
+        return FALSE;
+    }
+    card->texWidth = card->winWidth * vr.width / MAIN_WindowWidth;
+    card->texHeight = card->winHeight * vr.height / MAIN_WindowHeight;
 
     memset(&createInfo, 0, sizeof(createInfo));
     createInfo.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
@@ -2126,15 +2134,17 @@ static void vrCardRender(sdword index, uint32_t imageIndex)
     /* prim2d's origin is top-left in logical UI pixels; GL row 0 is the
        bottom of the framebuffer, so the laid-out block is the top-left
        corner scaled up by the framebuffer/UI ratio. */
-    srcX1 = card->winWidth * vr.width / MAIN_WindowWidth;
-    srcY0 = vr.height - card->winHeight * vr.height / MAIN_WindowHeight;
+    /* 1:1 and NEAREST - see vrCardSwapchain. A scaled or filtered blit is
+       illegal from a multisampled read buffer. */
+    srcX1 = card->texWidth;
+    srcY0 = vr.height - card->texHeight;
     vr.rawBindFramebuffer(VR_GL_DRAW_FRAMEBUFFER, vr.blitFbo);
     vr.rawFramebufferTexture2D(VR_GL_DRAW_FRAMEBUFFER, VR_GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_2D, card->images[imageIndex].image, 0);
     vr.rawBindFramebuffer(VR_GL_READ_FRAMEBUFFER, 0);
     vr.rawBlitFramebuffer(0, srcY0, srcX1, vr.height,
                           0, 0, card->texWidth, card->texHeight,
-                          VR_GL_COLOR_BUFFER_BIT, VR_GL_LINEAR);
+                          VR_GL_COLOR_BUFFER_BIT, VR_GL_NEAREST);
     vr.rawBindFramebuffer(VR_GL_DRAW_FRAMEBUFFER, 0);
 }
 

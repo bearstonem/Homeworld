@@ -896,6 +896,15 @@ bool32 setupPixelFormat()
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,   24);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    /* Ask for a full RGBA8 window. Frames reach the runtime's RGBA8 swapchain
+       textures by glBlitFramebuffer, and once the window is multisampled that
+       blit is a resolve - which ES requires to be between identical formats,
+       unlike an ordinary blit, which will convert. An RGBX window would make
+       every copy fail with INVALID_OPERATION the moment MSAA came on. */
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE,     8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,   8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,    8);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE,   8);
 #elif defined(HW_ENABLE_GLES)
     /* Set attributes. SDL creates the EGL/GLES context itself on every
        platform (X11, Wayland, Android, ...). */
@@ -919,6 +928,22 @@ bool32 setupPixelFormat()
     flags |= SDL_WINDOW_RESIZABLE;
 #endif
 
+#ifdef HW_ENABLE_VR
+    /* Aliasing costs far more in a headset than on a monitor: thin hulls,
+       engine trails and the VR overlay lines all shimmer as the head moves.
+       The eye passes render into this framebuffer and vrBlitEye copies out
+       1:1 with NEAREST, so a multisampled window resolves for free on that
+       blit. 4x rather than the 8x below - at 4128x2208 the extra samples buy
+       little and cost bandwidth we would rather spend on mesh detail. */
+    if (!enableMSAA)
+    {
+        enableMSAA = TRUE;
+        MSAA = 4;
+        SDL_GL_SetAttribute( SDL_GL_MULTISAMPLEBUFFERS, 1 );
+        SDL_GL_SetAttribute( SDL_GL_MULTISAMPLESAMPLES, MSAA );
+    }
+    else
+#endif
 	if (enableMSAA) {
         MSAA = 8;
 	    SDL_GL_SetAttribute( SDL_GL_MULTISAMPLEBUFFERS, 1 );
@@ -1266,6 +1291,32 @@ void rndBackgroundRender(real32 radius, Camera* camera, bool32 bDrawStars)
                     rndNear(camera->clipPlaneNear), camera->clipPlaneFar);
     glMatrixMode(GL_MODELVIEW);
 
+#ifdef HW_ENABLE_VR
+    /* Backgrounds are meant to be infinitely far away, and switching the depth
+       test off achieves that on a flat screen but not in stereo. The stars sit
+       on a shell at universe.radius, 20000 units, which at VR_WORLD_SCALE is
+       20 metres - close enough that the eye separation gives it real parallax
+       (about 0.09 degrees, roughly ten times stereo acuity), so "deep space"
+       reads as a painted dome an arm's reach beyond the fleet, and walking a
+       metre swings it several degrees.
+
+       Dropping the translation from the modelview centres the background on
+       the eye itself, which is what infinity actually means: both eyes then
+       see it identically, and head movement cannot shift it. Rotation is kept
+       so it still turns correctly with the view. */
+    if (vrEyePassActive())
+    {
+        GLfloat view[16];
+
+        glGetFloatv(GL_MODELVIEW_MATRIX, view);
+        view[12] = 0.0f;
+        view[13] = 0.0f;
+        view[14] = 0.0f;
+        glPushMatrix();
+        glLoadMatrixf(view);
+    }
+#endif
+
     if (showBackgrounds && gameIsRunning)
     {
         btgRender();
@@ -1352,6 +1403,13 @@ void rndBackgroundRender(real32 radius, Camera* camera, bool32 bDrawStars)
     }
 
     rndAdditiveBlends(FALSE);
+#ifdef HW_ENABLE_VR
+    if (vrEyePassActive())
+    {
+        glMatrixMode(GL_MODELVIEW);
+        glPopMatrix();                                  //balance the skybox push
+    }
+#endif
     glMatrixMode(GL_PROJECTION);
     glLoadMatrixf(projection);
     glMatrixMode(GL_MODELVIEW);

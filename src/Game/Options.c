@@ -413,7 +413,17 @@ sdword opSaveDetailThresholdVal;
 udword opDetailThresholdVal = 100;
 sdword opSaveBrightnessVal;
 sdword opBrightnessVal = 30;
+#ifdef HW_ENABLE_VR
+/* Homeworld's LOD budget is a 1999 one - AutoLOD claws detail back to keep a
+   frame under 2000 polygons. A Quest 3 renders the game at around half its GPU
+   budget, so that trades away hull detail for nothing. This is the engine's own
+   supported way to say "always use the best mesh" (LOD.c forces currentLOD 0),
+   it stays user-toggleable in the options screen, and it needs no new tuning
+   constants. Turn it off there if a very large battle ever needs the relief. */
+sdword opNoLODVal = 1;
+#else
 sdword opNoLODVal = 0;
+#endif
 sdword opSaveNoLODVal;
 
 sdword opSaveMAIN_WindowWidth;
