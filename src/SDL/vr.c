@@ -1789,41 +1789,178 @@ static bool32 vrWheelSlotEnabled(vrwheelslot const* slot, bool32 storeModifier)
     return vrWorldCommandEnabled(slot->cmd, slot->arg);
 }
 
+/* Radial helpers. Everything is built from filled triangles and thick lines
+   in plain logical-UI coordinates, which are the primitives whose conventions
+   are already proven by the other cards - no guessing at arc angle bases.
+   Slot 0 is straight up and they run clockwise, matching
+   vrWheelSlotFromStick. */
+static void vrWheelPointAt(sdword cx, sdword cy, real32 angle, real32 radius,
+                           sdword* x, sdword* y)
+{
+    *x = cx + (sdword)(sinf(angle) * radius);
+    *y = cy - (sdword)(cosf(angle) * radius);
+}
+
+/* Filled annular sector, as a strip of triangles */
+static void vrWheelSector(sdword cx, sdword cy, real32 from, real32 to,
+                          real32 innerR, real32 outerR, color c)
+{
+    sdword const steps = 10;
+    sdword step;
+
+    for (step = 0; step < steps; step++)
+    {
+        real32 a0 = from + (to - from) * (real32)step / (real32)steps;
+        real32 a1 = from + (to - from) * (real32)(step + 1) / (real32)steps;
+        triangle tri;
+        sdword i0x, i0y, o0x, o0y, i1x, i1y, o1x, o1y;
+
+        vrWheelPointAt(cx, cy, a0, innerR, &i0x, &i0y);
+        vrWheelPointAt(cx, cy, a0, outerR, &o0x, &o0y);
+        vrWheelPointAt(cx, cy, a1, innerR, &i1x, &i1y);
+        vrWheelPointAt(cx, cy, a1, outerR, &o1x, &o1y);
+
+        tri.x0 = i0x; tri.y0 = i0y;
+        tri.x1 = o0x; tri.y1 = o0y;
+        tri.x2 = o1x; tri.y2 = o1y;
+        primTriSolid2(&tri, c);
+        tri.x0 = i0x; tri.y0 = i0y;
+        tri.x1 = o1x; tri.y1 = o1y;
+        tri.x2 = i1x; tri.y2 = i1y;
+        primTriSolid2(&tri, c);
+    }
+}
+
+/* Arc drawn as short chords, so no arc-primitive angle convention is assumed */
+static void vrWheelArc(sdword cx, sdword cy, real32 from, real32 to,
+                       real32 radius, sdword thickness, color c)
+{
+    sdword const steps = 14;
+    sdword step, px = 0, py = 0;
+
+    for (step = 0; step <= steps; step++)
+    {
+        real32 a = from + (to - from) * (real32)step / (real32)steps;
+        sdword x, y;
+
+        vrWheelPointAt(cx, cy, a, radius, &x, &y);
+        if (step > 0)
+        {
+            primLineThick2(px, py, x, y, thickness, c);
+        }
+        px = x;
+        py = y;
+    }
+}
+
 static void vrCardDrawWheel(vrcard const* card)
 {
     vrwheelpage const* page = vrWheelCurrentPage();
     bool32 storeModifier = vrActionPressedHand(vr.gripAction, VR_HAND_LEFT);
-    color const rim = colRGB(60, 150, 190);
-    color const on = colRGB(255, 235, 150);
-    color const off = colRGB(95, 105, 115);
-    color const marked = colRGB(120, 255, 170);
-    color const titleCol = colRGB(120, 230, 255);
-    sdword centreX = card->winWidth / 2;
-    sdword centreY = card->winHeight / 2;
-    sdword radius = (card->winWidth < card->winHeight ? card->winWidth
-                                                      : card->winHeight) / 2 - 34;
+    color const band     = colRGB(17, 27, 38);
+    color const bandEdge = colRGB(38, 66, 86);
+    color const spoke    = colRGB(30, 52, 68);
+    color const selFill  = colRGB(30, 74, 104);
+    color const selEdge  = colRGB(120, 214, 255);
+    color const hubFill  = colRGB(12, 20, 29);
+    color const needle   = colRGB(90, 190, 235);
+    color const textOn   = colRGB(228, 238, 246);
+    color const textOff  = colRGB(78, 90, 102);
+    color const textSel  = colRGB(255, 238, 165);
+    color const textMark = colRGB(120, 255, 170);
+    color const titleCol = colRGB(120, 214, 255);
+    color const hint     = colRGB(96, 112, 126);
+    color const shadowC  = colRGB(3, 6, 10);
+    sdword cx = card->winWidth / 2;
+    sdword cy = card->winHeight / 2;
+    sdword span = (card->winWidth < card->winHeight ? card->winWidth
+                                                   : card->winHeight);
+    real32 outerR = (real32)span * 0.44f;
+    real32 innerR = (real32)span * 0.30f;
+    real32 labelR = (innerR + outerR) * 0.5f;
+    sdword hubR = (sdword)((real32)span * 0.155f);
     sdword lineHeight = fontHeight("Ay");
+    real32 half;
+    real32 lx, ly, stickMag;
+    FontShadowType oldShadow = fontShadowGet();
     sdword i;
 
     if (lineHeight <= 0)
     {
         lineHeight = 12;
     }
-    primGLCircleOutline2((real32)centreX, (real32)centreY, (real32)radius + 16.0f,
-                         48, rim);
-    fontPrint(centreX - fontWidth((char*)page->title) / 2,
-              centreY - lineHeight / 2, titleCol, (char*)page->title);
+    if (page->slotCount <= 0)
+    {
+        return;
+    }
+    half = 3.14159265f / (real32)page->slotCount;
+
+    /* the band the labels live on, then the selected sector on top of it */
+    primCircleBorder(cx, cy, (sdword)innerR, (sdword)outerR, 64, band);
+    if (vr.wheelSlot >= 0 && vr.wheelSlot < page->slotCount)
+    {
+        real32 centre = 6.2831853f * (real32)vr.wheelSlot
+                      / (real32)page->slotCount;
+
+        vrWheelSector(cx, cy, centre - half, centre + half, innerR, outerR,
+                      selFill);
+        vrWheelArc(cx, cy, centre - half, centre + half, outerR, 3, selEdge);
+        vrWheelArc(cx, cy, centre - half, centre + half, innerR, 2, selEdge);
+    }
+
+    /* spokes on the wedge boundaries make the angular mapping visible, which
+       is what lets the wheel become a flick rather than a read */
+    for (i = 0; i < page->slotCount; i++)
+    {
+        real32 edge = 6.2831853f * ((real32)i + 0.5f) / (real32)page->slotCount;
+        sdword ix, iy, ox, oy;
+
+        vrWheelPointAt(cx, cy, edge, innerR, &ix, &iy);
+        vrWheelPointAt(cx, cy, edge, outerR, &ox, &oy);
+        primLineThick2(ix, iy, ox, oy, 1, spoke);
+    }
+    vrWheelArc(cx, cy, 0.0f, 6.2831853f, outerR, 2, bandEdge);
+    vrWheelArc(cx, cy, 0.0f, 6.2831853f, innerR, 1, bandEdge);
+
+    /* live stick needle: proves the stick is registering even in the deadzone */
+    vrActionStick(VR_HAND_LEFT, &lx, &ly);
+    stickMag = sqrtf(lx * lx + ly * ly);
+    if (stickMag > 0.08f)
+    {
+        real32 angle = atan2f(lx, ly);
+        real32 reach = (real32)hubR + 4.0f
+                     + (innerR - (real32)hubR - 8.0f)
+                       * (stickMag > 1.0f ? 1.0f : stickMag);
+        sdword nx, ny;
+
+        vrWheelPointAt(cx, cy, angle, reach, &nx, &ny);
+        primLineThick2(cx, cy, nx, ny, 3,
+                       stickMag >= VR_WHEEL_DEADZONE ? selEdge : needle);
+    }
+
+    /* hub: page title, and the group wheel's live recall/store mode */
+    primCircleSolid2(cx, cy, hubR, 28, hubFill);
+    vrWheelArc(cx, cy, 0.0f, 6.2831853f, (real32)hubR, 2, bandEdge);
+    fontShadowSet(FS_SE, shadowC);
+    fontPrint(cx - fontWidth((char*)page->title) / 2, cy - lineHeight,
+              titleCol, (char*)page->title);
+    if (page->slot[0].cmd == VRW_CMD_GROUP_RECALL)
+    {
+        char const* mode = storeModifier ? "STORE" : "recall";
+
+        fontPrint(cx - fontWidth((char*)mode) / 2, cy + 2,
+                  storeModifier ? textMark : hint, (char*)mode);
+    }
 
     for (i = 0; i < page->slotCount; i++)
     {
         vrwheelslot const* slot = &page->slot[i];
         real32 angle = 6.2831853f * (real32)i / (real32)page->slotCount;
-        sdword x = centreX + (sdword)(sinf(angle) * (real32)radius);
-        sdword y = centreY - (sdword)(cosf(angle) * (real32)radius);
         bool32 enabled = vrWheelSlotEnabled(slot, storeModifier);
-        bool32 selected = (i == vr.wheelSlot);
+        bool32 active = vrWorldCommandActive(slot->cmd);
         char const* label = slot->label;
         char text[32];
+        sdword x, y;
         color c;
 
         if (slot->cmd == VRW_CMD_GROUP_RECALL)
@@ -1832,41 +1969,43 @@ static void vrCardDrawWheel(vrcard const* card)
 
             if (size > 0)
             {
-                sprintf(text, "%s:%d", slot->label, (int)size);
+                sprintf(text, "%s\xb7%d", slot->label, (int)size);
             }
             else
             {
-                sprintf(text, "%s:-", slot->label);
+                sprintf(text, "%s", slot->label);
             }
             label = text;
         }
-        c = !enabled ? off : (vrWorldCommandActive(slot->cmd) ? marked : on);
-
-        if (selected)
-        {
-            rectangle box;
-
-            box.x0 = x - fontWidth((char*)label) / 2 - 5;
-            box.y0 = y - lineHeight / 2 - 3;
-            box.x1 = x + fontWidth((char*)label) / 2 + 5;
-            box.y1 = y + lineHeight / 2 + 3;
-            primRectSolid2(&box, colRGB(30, 60, 85));
-            primRectOutline2(&box, 2, enabled ? on : off);
-        }
+        vrWheelPointAt(cx, cy, angle, labelR, &x, &y);
+        c = !enabled ? textOff
+                     : (i == vr.wheelSlot ? textSel
+                                          : (active ? textMark : textOn));
         fontPrint(x - fontWidth((char*)label) / 2, y - lineHeight / 2, c,
                   (char*)label);
+        /* a category wedge says so, so nobody waits for a command that is
+           really a submenu */
+        if (slot->page >= 0 && enabled)
+        {
+            fontPrint(x - fontWidth("...") / 2, y + lineHeight / 2 + 1,
+                      i == vr.wheelSlot ? textSel : hint, "...");
+        }
+        else if (active)
+        {
+            primCircleSolid2(x - fontWidth((char*)label) / 2 - 7, y, 3, 10,
+                             textMark);
+        }
     }
 
-    /* the group page is the one place the modifier changes what commits, so
-       say which it will be rather than making the player remember */
-    if (page->slot[0].cmd == VRW_CMD_GROUP_RECALL)
+    /* what the buttons do from here */
     {
-        char const* mode = storeModifier ? "L-grip: STORE" : "recall";
+        char const* back = vr.wheelPage != VR_WHEEL_PAGE_ROOT
+                         ? "B/Y back" : "B/Y close";
 
-        fontPrint(centreX - fontWidth((char*)mode) / 2,
-                  centreY + lineHeight, storeModifier ? marked : off,
-                  (char*)mode);
+        fontPrint(cx - fontWidth((char*)back) / 2,
+                  card->winHeight - lineHeight - 4, hint, (char*)back);
     }
+    fontShadowSet(oldShadow, shadowC);
 }
 
 static void vrCardDrawStatus(vrcard const* card)

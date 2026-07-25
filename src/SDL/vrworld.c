@@ -1564,6 +1564,7 @@ static void vrwPathFollow(void)
 {
     vector centre;
     sdword i, alive = 0;
+    real32 invAlive, toLeg;
     bool32 reached, timedOut;
 
     if (!vrw.pathActive)
@@ -1596,14 +1597,20 @@ static void vrwPathFollow(void)
         vrWorldPathCancel();
         return;
     }
-    vecDivideByScalar(centre, (real32)alive, i);
+    vecDivideByScalar(centre, (real32)alive, invAlive);
 
-    reached = vrwDistance(&centre, &vrw.pathPoint[vrw.pathLeg])
-              <= vrw.pathArriveDist;
+    toLeg = vrwDistance(&centre, &vrw.pathPoint[vrw.pathLeg]);
+    reached = toLeg <= vrw.pathArriveDist;
     timedOut = (universe.totaltimeelapsed - vrw.pathLegStart)
                > VRW_PATH_LEG_TIMEOUT;
     if (!reached && !timedOut)
     {
+        if (vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
+        {
+            SDL_Log("VR: path leg %d/%d, %d ship(s) %.0f away, arrive at %.0f",
+                    (int)vrw.pathLeg, (int)vrw.pathCount, (int)alive, toLeg,
+                    vrw.pathArriveDist);
+        }
         return;
     }
     if (timedOut && !reached)
