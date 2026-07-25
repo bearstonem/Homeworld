@@ -109,6 +109,7 @@ static struct {
     sdword  moveHand;
     vector  moveDestination;        /* point on the ray at cursorDist */
     real32  cursorDist;             /* depth along the ray, game units */
+    bool32  cursorManual;           /* stick has overridden the auto depth */
 
     /* freehand path: raw stroke */
     bool32  pathDrawing;
@@ -466,12 +467,20 @@ sdword vrWorldGroupSize(sdword group)
 bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
 {
     udword mask;
+    MaxSelection capable;
 
     if (!vrw.worldValid)
     {
         return FALSE;
     }
-    /* selection-independent navigation stays available at all times */
+    /* Navigation, and the full-screen managers, stay available at all times.
+       The managers are deliberately NOT gated on the MAM_* action mask: those
+       bits describe what a right-click on one particular ship should offer,
+       where that ship is the context. A global wheel has no such context, and
+       the keyboard equivalents prove the point - mrResearch takes no selection
+       at all, and mrBuildShips and mrLaunch both fall back to the player's own
+       mothership. Masking them meant Research simply could not be opened with
+       a fighter selected. */
     switch (cmd)
     {
         case VRW_CMD_SELECT_ALL:
@@ -481,6 +490,10 @@ bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
         case VRW_CMD_SENSORS:
         case VRW_CMD_UNDO:
             return TRUE;
+        case VRW_CMD_BUILD:
+        case VRW_CMD_LAUNCH:
+        case VRW_CMD_RESEARCH:
+            return !vrwOrdersBlocked();
         case VRW_CMD_GROUP_RECALL:
             return vrWorldGroupSize(arg) > 0;
         case VRW_CMD_GROUP_STORE:
@@ -504,17 +517,29 @@ bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
         case VRW_CMD_TACTIC_EVASIVE:
         case VRW_CMD_TACTIC_NEUTRAL:
         case VRW_CMD_TACTIC_AGGRESSIVE: return (mask & MAM_Tactics) != 0;
-        case VRW_CMD_HARVEST:           return (mask & MAM_Harvest) != 0;
-        case VRW_CMD_DOCK:              return (mask & MAM_Dock) != 0;
+        /* Ask the same question the order itself asks, rather than trusting
+           the ship-type menu bits as a proxy. MAM_Harvest is set for exactly
+           one hull in mrMenuActionsByShipType, so anything else that can
+           collect would have been dimmed despite the order being legal. */
+        case VRW_CMD_HARVEST:
+            return MakeShipsHarvestCapable((SelectCommand*)&capable,
+                                           (SelectCommand*)&selSelected) != 0;
+        case VRW_CMD_DOCK:
+            capable = selSelected;
+            makeShipsDockCapable((SelectCommand*)&capable);
+            return capable.numShips > 0;
         case VRW_CMD_RETIRE:            return (mask & MAM_Retire) != 0;
         case VRW_CMD_SCUTTLE:           return (mask & MAM_Scuttle) != 0;
-        case VRW_CMD_BUILD:             return (mask & MAM_Build) != 0;
-        case VRW_CMD_LAUNCH:            return (mask & MAM_Launch) != 0;
-        case VRW_CMD_RESEARCH:          return (mask & MAM_Research) != 0;
         case VRW_CMD_HYPERSPACE:        return (mask & MAM_Hyperspace) != 0;
+        case VRW_CMD_KAMIKAZE:
+            if (vrwOrdersBlocked())
+            {
+                return FALSE;
+            }
+            capable = selSelected;
+            return MakeSelectionKamikazeCapable((SelectCommand*)&capable) != 0;
         case VRW_CMD_HALT:
-        case VRW_CMD_SPECIAL:
-        case VRW_CMD_KAMIKAZE:          return !vrwOrdersBlocked();
+        case VRW_CMD_SPECIAL:           return !vrwOrdersBlocked();
         default:                        return FALSE;
     }
 }
@@ -939,6 +964,16 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
        angle where the projection flies off across the map. */
     if (vrw.moveActive && hand == vrw.moveHand)
     {
+        /* Point at something and the order goes there, whatever the zoom.
+           Without this the reach is stuck near the seeded depth, which tracks
+           camera distance - so close in, a beam pointing at a distant rock
+           would drop the order a few hundred units from the hand. Drawing a
+           path is exempt: a curve that snapped to passing ships would kink. */
+        if (!vrw.cursorManual && !vrw.pathDrawing
+            && ray->hover != NULL && ray->hoverT > VRW_CURSOR_MIN)
+        {
+            vrw.cursorDist = ray->hoverT;
+        }
         vrwMoveRecompute(hand);
     }
     return ray->hover != NULL && ray->hover != oldHover;
@@ -1238,6 +1273,7 @@ bool32 vrWorldMoveBegin(sdword hand)
     selCentrePointCompute();
     vrw.moveActive = TRUE;
     vrw.moveHand = hand;
+    vrw.cursorManual = FALSE;
 
     /* Seed the depth at the fleet's own, measured ALONG the ray rather than
        straight-line to the centroid. Straight-line puts the cursor on a
@@ -1277,6 +1313,7 @@ void vrWorldMoveUpdate(sdword hand, real32 depthDelta)
     }
     if (depthDelta != 0.0f)
     {
+        vrw.cursorManual = TRUE;                //manual beats snapping now
         vrw.cursorDist *= 1.0f + depthDelta;
         if (vrw.cursorDist < VRW_CURSOR_MIN)
         {
@@ -1858,6 +1895,13 @@ void vrWorldDrawOverlays(void)
             /* Input routing has already decided that the panel owns this
                ray. Do not let a projection-layer world pick shorten it. */
             length = ray->limitT;
+        }
+        else if (vrw.moveActive && hand == vrw.moveHand)
+        {
+            /* End the beam at the destination. Otherwise it runs to a fixed
+               2.5m and, zoomed in closer than that, visibly overshoots where
+               the order would actually land. */
+            length = vrw.cursorDist;
         }
         else
         {

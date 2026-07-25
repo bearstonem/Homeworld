@@ -117,6 +117,8 @@
 #define VR_DOUBLE_TRIGGER_NS 350000000LL
 #define VR_MOVE_DEPTH_DEADZONE 0.20f
 #define VR_MOVE_DEPTH_RATE     1.20f   /* ~3.3x cursor depth per second at full stick */
+#define VR_MOVE_DEPTH_ACCEL    2.40f   /* rate multiplier gained per second held */
+#define VR_MOVE_DEPTH_ACCEL_MAX 6.0f   /* ceiling on that multiplier */
 
 /* How many game-world units one real-world metre of head movement is
    worth. Homeworld ships are hundreds of units long; at 1000 the fleet
@@ -249,6 +251,7 @@ typedef struct {
     bool32       worldInteractive;  /* game world exists; native 3D interaction on */
     real32       panelHitT;         /* metres to the panel along the pointer ray */
     real32       moveDepthInput;    /* right-stick deflection driving order depth */
+    real32       moveDepthHeld;     /* seconds the depth stick has been held */
     XrTime       lastInputTime;
     bool32       panelHidden;       /* wrist panel toggled off in-game */
     vrcard       card[VR_CARD_COUNT];
@@ -2888,6 +2891,8 @@ static void vrUpdateInput(XrTime time)
                     {
                         vr.contextGestureMode = VR_CONTEXT_MOVE;
                         vr.moveDepthInput = 0.0f;
+                        vr.moveDepthHeld = 0.0f;
+            vr.moveDepthHeld = 0.0f;
                         vrHapticPulse(hand, 0.24f, 26000000);
                         SDL_Log("VR: hand %u move preview begin", (unsigned)hand);
                     }
@@ -2953,6 +2958,7 @@ static void vrUpdateInput(XrTime time)
             vr.contextGestureHand = -1;
             vr.contextGestureMode = VR_GESTURE_NONE;
             vr.moveDepthInput = 0.0f;
+            vr.moveDepthHeld = 0.0f;
         }
         vr.prevContext[hand] = context[hand];
     }
@@ -2975,9 +2981,28 @@ static void vrUpdateInput(XrTime time)
                 vr.moveDepthInput = -vr.moveDepthInput;
             }
         }
-        /* time-based so depth speed does not follow the frame rate */
-        vrWorldMoveUpdate(vr.contextGestureHand,
-                          vr.moveDepthInput * VR_MOVE_DEPTH_RATE * deltaSeconds);
+        /* Time-based so depth speed does not follow the frame rate, and
+           accelerating while held: the useful depth range spans two orders of
+           magnitude, so a single rate is either too coarse to aim with or too
+           slow to cross it. */
+        if (vr.moveDepthInput != 0.0f)
+        {
+            vr.moveDepthHeld += deltaSeconds;
+        }
+        else
+        {
+            vr.moveDepthHeld = 0.0f;
+        }
+        {
+            real32 ramp = 1.0f + vr.moveDepthHeld * VR_MOVE_DEPTH_ACCEL;
+
+            if (ramp > VR_MOVE_DEPTH_ACCEL_MAX)
+            {
+                ramp = VR_MOVE_DEPTH_ACCEL_MAX;
+            }
+            vrWorldMoveUpdate(vr.contextGestureHand, vr.moveDepthInput
+                              * VR_MOVE_DEPTH_RATE * ramp * deltaSeconds);
+        }
         /* after the destination has been recomputed for this frame, so the
            stroke records the depth the stick is currently dialling in */
         vrWorldPathSample(vr.contextGestureHand);
@@ -3312,6 +3337,7 @@ static void vrReleaseInputCapture(void)
     vr.pointerValid = FALSE;
     vr.pointerHand = -1;
     vr.moveDepthInput = 0.0f;
+    vr.moveDepthHeld = 0.0f;
     vr.lastInputTime = 0;
 }
 
