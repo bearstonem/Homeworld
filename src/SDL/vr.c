@@ -2747,13 +2747,33 @@ static void vrUpdateInput(XrTime time)
                     (int)(lx * lx + ly * ly > 0.04f));
         }
         traversing = grip[VR_HAND_RIGHT] && !managerActive;
-        if (!managerActive && !vr.wheelOpen && lx * lx + ly * ly > 0.04f)
+
+        /* The Sensors Manager is a 3D strategic map, not a flat screen, and
+           it is where long-range moves and hyperspace are issued - so it has
+           to be navigable. Its own camera takes the sticks while it is open;
+           without this the sticks were simply suppressed along with every
+           other manager's, leaving a strategic view that could be pointed at
+           but never moved. Selection there already works, since dragging the
+           ray band-boxes exactly as dragging a mouse does. */
+        if (vrWorldSensorsActive() && !vr.wheelOpen)
+        {
+            if (lx * lx + ly * ly > 0.04f)
+            {
+                vrWorldSensorsOrbit(-lx * 0.030f, ly * 0.022f);
+            }
+            if (ry > 0.25f || ry < -0.25f)
+            {
+                vrWorldSensorsZoom(1.0f - ry * 0.030f);
+            }
+        }
+        else if (!managerActive && !vr.wheelOpen && lx * lx + ly * ly > 0.04f)
         {
             vrWorldCameraOrbit(-lx * 0.035f, ly * 0.025f);
         }
         /* while the grip claims the right stick, it steers the fleet and
            nothing else: a diagonal flick must not also drive the zoom */
-        if (!managerActive && !traversing && (ry > 0.25f || ry < -0.25f)
+        if (!managerActive && !traversing && !vrWorldSensorsActive()
+            && (ry > 0.25f || ry < -0.25f)
             && !vrWorldMoveActive())
         {
             vrWorldCameraZoom(1.0f - ry * 0.02f);

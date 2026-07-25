@@ -133,6 +133,24 @@ real32 vrWorldCameraOrbit(real32 deltaYaw, real32 deltaPitch);
 real32 vrWorldCameraZoom(real32 ratio);
 void vrWorldCameraFocusSelection(void);
 
+/*-----------------------------------------------------------------------------
+    Sensors Manager
+
+    Unlike Build or Research this is not a flat 2D screen but a 3D strategic
+    map with its own camera, and it is where long-range moves and hyperspace
+    are issued - the game opens it automatically for a move beyond
+    MAX_MOVE_DISTANCE - so it has to be navigable, not merely visible.
+
+    Selection there already works through the panel pointer: dragging the ray
+    makes a band box exactly as dragging a mouse does. What was missing was any
+    way to move the view, because the sticks are suppressed while a manager
+    owns input. These drive smCamera directly rather than through the camJoy*
+    globals, which the main camera's own cameraControl would otherwise consume
+    first. Deltas are radians / a zoom ratio, as for the main camera. */
+bool32 vrWorldSensorsActive(void);
+void vrWorldSensorsOrbit(real32 deltaYaw, real32 deltaPitch);
+void vrWorldSensorsZoom(real32 ratio);
+
 /* Cycle the camera focus through the player's fleet (+1 next / -1 prev) */
 void vrWorldFocusCycle(sdword step);
 

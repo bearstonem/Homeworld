@@ -144,7 +144,14 @@ Touch controls in the 3D world:
   held. Left-stick click means "bring me back to my fleet": it focuses the
   camera on your selection and re-places the hologram in front of you, which
   is also how you recover if you have walked away from it or it ended up at
-  the wrong height. Right-stick click opens Sensors, and B/Y closes it again.
+  the wrong height. Right-stick click opens Sensors, and B closes it again.
+- The Sensors Manager is a 3D strategic map rather than a flat screen, and it
+  is where long-range moves and hyperspace are issued - the game opens it by
+  itself for a move beyond its maximum range - so it is navigable rather than
+  merely visible. While it is open the left stick orbits its camera and
+  right-stick Y zooms it, driving that view's own camera directly. Selection
+  works as it does on any panel: drag the ray to band-box ships, exactly as
+  dragging a mouse would.
 - Ships render at true physical scale. Homeworld's N-LIPS scaling, which
   inflates a ship in proportion to its camera depth to keep small craft
   readable on a flat monitor, is disabled in VR: nothing cancels it through

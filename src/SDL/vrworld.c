@@ -53,6 +53,7 @@
 #include "Options.h"
 
 extern Camera *mrCamera;                                    //mainrgn.c
+extern Camera smCamera;                                     //Sensors.c
 extern bool32 gameIsRunning;                                //Globals.c
 
 #define VRW_HAND_COUNT     2
@@ -1930,6 +1931,34 @@ void vrWorldCameraFocusSelection(void)
         ccFocus(&universe.mainCameraCommand, (FocusCommand*)&selSelected);
         tutGameMessage("KB_Focus");
     }
+}
+
+bool32 vrWorldSensorsActive(void)
+{
+    /* not during the zoom transition either way - smViewportProcess ignores
+       input then, and steering a camera mid-flight fights the animation */
+    return smSensorsActive && !smZoomingIn && !smZoomingOut;
+}
+
+void vrWorldSensorsOrbit(real32 deltaYaw, real32 deltaPitch)
+{
+    if (!vrWorldSensorsActive())
+    {
+        return;
+    }
+    cameraRotAngle(&smCamera, deltaYaw);
+    cameraRotDeclination(&smCamera, deltaPitch);
+}
+
+void vrWorldSensorsZoom(real32 ratio)
+{
+    if (!vrWorldSensorsActive() || ratio <= 0.0f)
+    {
+        return;
+    }
+    /* FALSE: the strategic view is not bound by ship distances the way the
+       main camera is, which is the whole point of it */
+    cameraZoom(&smCamera, ratio, FALSE);
 }
 
 /* Cycle the camera focus through the player's fleet (step = +1 / -1).
