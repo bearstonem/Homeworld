@@ -36,8 +36,12 @@ rendering. The tell is a log with `pass=mono` frames and no
 
 ## Device facts worth not rediscovering
 
-- Wireless adb endpoint `192.168.1.92:44159`. The port changes each time
-  wireless debugging is re-enabled.
+- Wireless adb endpoint `192.168.1.92:40561` (was 44159). The port changes each
+  time wireless debugging is re-enabled, and **`adb mdns services` can keep
+  advertising the dead one**, which makes a stale port look correct. If
+  `adb connect` says "Connection refused" while the headset pings fine, the
+  port has moved: check Settings, or find it with a quick TCP scan of
+  30000-65535 - only the live adbd port answers.
 - **The log tag is `SDL/APP`, not `SDL`.** Capture with
   `adb logcat -v time "SDL/APP:V" VrApi:I "*:S"`. `VrApi:I` gives the
   per-second frame report (`FPS`, `Stale`, `App` ms, `LCnt` layer count),
