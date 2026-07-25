@@ -114,7 +114,17 @@
 //default memory heap size
 #define MEM_HeapSizeDefault     (64 * 1024 * 1024)
 #define MEM_HeapDefaultScalar   0.40f
+#ifdef HW_ENABLE_VR
+/* 128MB was the 1999 cap. The Quest 3 has ~7.5GB, and the VR build asks more
+   of this fixed heap than the original ever did (LOD forced to full detail,
+   3x render distance). Exhaustion here is not graceful: memAllocFunctionANV
+   returns NULL silently - its diagnostic is behind MEM_VERBOSE_LEVEL, off in
+   a distribution build - and callers like etgEffectCreate dereference the
+   result immediately. */
+#define MEM_HeapDefaultMax      (256 * 1024 * 1024)
+#else
 #define MEM_HeapDefaultMax      (128 * 1024 * 1024)
+#endif
 
 //default name strings
 #define MEM_NameHeap            "HeapLow(free)"

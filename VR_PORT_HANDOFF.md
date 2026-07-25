@@ -117,6 +117,19 @@ These are non-obvious and cost real time to find:
 - `vecDivideByScalar(vec, k, tmp)` assigns `1.0f / k` into its **third**
   argument. Passing an integer truncates the reciprocal to zero. This silently
   broke the flight-path follower for any group of two or more.
+- **The game runs in one fixed heap, and running out of it is a silent
+  segfault.** `memAllocFunctionANV` returns NULL when no block is big enough;
+  its diagnostic is behind `MEM_VERBOSE_LEVEL`, compiled out in a distribution
+  build. Callers do not check - `etgEffectCreate` dereferences the result on
+  the very next line. So exhaustion presents as an unexplained SIGSEGV with no
+  tombstone, no message, and nothing in the crash buffer. It is deterministic
+  after enough play and absent on a freshly loaded save, which is the
+  fingerprint to recognise. The heap is sized once at startup from physical
+  RAM and then clamped to `MEM_HeapDefaultMax` - 128MB in the original, now
+  256MB under `HW_ENABLE_VR`, because forcing full mesh detail and 3x render
+  distance asks more of it than the 1999 game ever did. If
+  `HWMEM etgEffectCreate: heap exhausted` ever appears, 256MB is not enough
+  either and something is leaking.
 - **A target-less `clWrapSpecial` must not include Salvage Corvettes.** The
   function NULL-checks `targets` for the ship-flash and then dereferences it
   unguarded in the salvage branch (`targets->TargetPtr[0]->objtype`), as do

@@ -4264,6 +4264,13 @@ static void vrFrameInner(void)
         return;
     }
 
+#ifdef __ANDROID__
+    /* Take SIGSEGV back if the OpenXR runtime or SDL has claimed it. Done
+       here because a crash handler that has been silently displaced reports
+       nothing, which is exactly how a whole debugging session was lost. */
+    mainCrashHandlerKeep();
+#endif
+
     vrPollEvents();
     if (!vr.sessionRunning)
     {

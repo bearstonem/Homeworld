@@ -6,6 +6,9 @@
 // =============================================================================
 
 #include "SalCapCorvette.h"
+#ifdef __ANDROID__
+    #include <SDL2/SDL.h>       /* SDL_Log, for the salvage breadcrumbs */
+#endif
 
 #include <math.h>
 
@@ -251,11 +254,41 @@ void startTractorBeam(Ship *ship, SpaceObjRotImpTargGuidanceShipDerelict *target
     if (stat != NULL && !etgFrequencyExceeded(stat))
     #endif
     {
+#ifdef __ANDROID__
+        SDL_Log("SALVAGE tractor: creating effect stat=%p LOD=%d nLips=%f",
+                (void*)stat, (int)ship->currentLOD, ship->magnitudeSquared);
+        etgTraceCreate = 1;             //trace this one creation, see ETG.c
+#endif
         ship->rceffect = etgEffectCreate(stat, ship, NULL, NULL, NULL, ship->magnitudeSquared, SOF_AttachPosition|SOF_AttachCoordsys|SOF_AttachNLips, 0);
+#ifdef __ANDROID__
+        etgTraceCreate = 0;
+#endif
+#ifdef __ANDROID__
+        SDL_Log("SALVAGE tractor: effect=%p", (void*)ship->rceffect);
+        if (ship->rceffect == NULL)
+        {
+            /* The original dereferences this unconditionally on the next
+               line. etgEffectCreate has no NULL return path today, so this
+               should never fire - but if it ever does, say so rather than
+               fault. */
+            SDL_Log("SALVAGE tractor: effect creation FAILED - skipping");
+            ((SalCapCorvetteSpec *)ship->ShipSpecifics)->tractorBeam = TRUE;
+            return;
+        }
+#endif
         ship->rceffect->posinfo.velocity.x = ship->rceffect->posinfo.velocity.y = ship->rceffect->posinfo.velocity.z = 0.0f;
         ((SalCapCorvetteSpec *)ship->ShipSpecifics)->tractorBeam = TRUE;
+#ifdef __ANDROID__
+        SDL_Log("SALVAGE tractor: univUpdateObjRotInfo");
+#endif
         univUpdateObjRotInfo((SpaceObjRot *)ship->rceffect);
+#ifdef __ANDROID__
+        SDL_Log("SALVAGE tractor: soundEvent");
+#endif
         ship->soundevent.specialHandle = soundEvent(ship, Ship_Salvage);
+#ifdef __ANDROID__
+        SDL_Log("SALVAGE tractor: complete");
+#endif
     }
     else
     {
@@ -1626,6 +1659,36 @@ bool32 SalCapCorvetteSpecialTarget(Ship *ship, void *custom)
     SelectCommand selection;
     sdword waittarget;
     targets = (SelectAnyCommand *)custom;
+
+#ifdef __ANDROID__
+    /* Breadcrumbs for the salvage crash: the process dies ~24s after the
+       order with SIGSEGV, and no backtrace has been recoverable - tombstoned
+       stopped writing them on this device and the in-process handler has so
+       far reported nothing. State transitions are logged instead, with the
+       pointers this code dereferences unguarded in several places, so the
+       last line before the death names the state that crashed even if
+       nothing else survives. Logged only on change: this runs per corvette
+       per frame. */
+    {
+        static sdword salvageLastState = -1;
+
+        if ((sdword)spec->salvageState != salvageLastState)
+        {
+            salvageLastState = (sdword)spec->salvageState;
+            SDL_Log("SALVAGE state=%d ship=%p target=%p salvageInfo=%p "
+                    "clampInfo=%p targets=%d",
+                    (int)salvageLastState,
+                    (void*)ship,
+                    (void*)spec->target,
+                    (spec->target != NULL) ? (void*)spec->target->salvageInfo
+                                           : NULL,
+                    (spec->target != NULL) ? (void*)spec->target->clampInfo
+                                           : NULL,
+                    (int)targets->numTargets);
+        }
+    }
+#endif
+
     if(targets->numTargets == 0
         && spec->target == NULL)
     {
@@ -1852,6 +1915,16 @@ reachedit:
                 //unreliable
                 //
                 //now clamp object to salcap and tell it to dock for targetDeposit
+#ifdef __ANDROID__
+                /* Statement-level breadcrumbs: the crash lands in this block
+                   (state 5 entered, state 8 never reached) and the in-process
+                   signal handler has reported nothing, so narrow it by
+                   elimination instead. Whichever line is last in the log is
+                   the one that did not return. */
+                SDL_Log("SALVAGE clamp-begin range=%.1f rceffect=%p race=%d LOD=%d",
+                        range, (void*)ship->rceffect,
+                        (int)ship->shiprace, (int)ship->currentLOD);
+#endif
                 if(ship->shiptype == JunkYardDawg)
                 {
                     clampObjToObj((SpaceObjRotImpTargGuidance *)spec->target,(SpaceObjRotImpTargGuidance *)ship);
@@ -1861,8 +1934,15 @@ reachedit:
                     //clampObjToObj((SpaceObjRotImpTargGuidance *)ship,(SpaceObjRotImpTargGuidance *)spec->target);
                     clampObjToObj((SpaceObjRotImpTargGuidance *)spec->target,(SpaceObjRotImpTargGuidance *)ship);
                 }
+#ifdef __ANDROID__
+                SDL_Log("SALVAGE clamped ok, starting tractor beam");
+#endif
                 dbgAssertOrIgnore(ship->rceffect == NULL);
                 startTractorBeam(ship,spec->target);
+#ifdef __ANDROID__
+                SDL_Log("SALVAGE tractor ok rceffect=%p -> SAL_CLAMPED",
+                        (void*)ship->rceffect);
+#endif
                 spec->salvageState = SAL_CLAMPED;
             }
         }

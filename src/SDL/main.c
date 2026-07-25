@@ -16,6 +16,14 @@
 
 #include <SDL2/SDL.h>
 
+#ifdef __ANDROID__
+    /* for the self-reported crash backtrace, see mainInstallCrashHandler */
+    #include <android/log.h>
+    #include <dlfcn.h>
+    #include <signal.h>
+    #include <unwind.h>
+#endif
+
 #include "AIPlayer.h"
 #include "AutoLOD.h"
 #include "avi.h"
@@ -2039,6 +2047,208 @@ void mainCleanupAfterVideo(void)
     }
 }
 
+#ifdef __ANDROID__
+/*-----------------------------------------------------------------------------
+    Self-reported crash backtraces.
+
+    tombstoned on this Quest build has stopped copying backtraces into the
+    logcat crash buffer, so a segfault presents as a silent process death:
+    `dumpsys activity exit-info` reports reason=2 (SIGNALED) status=11 and
+    nothing else, the crash buffer is empty, and no tombstone is readable
+    without root. That leaves a crash with no call stack at all, which cost
+    a whole debugging session.
+
+    So unwind and log it ourselves. Strict async-signal-safety is not
+    achievable here - SDL_Log allocates, and dladdr takes a lock - but the
+    process is already dying, and a best-effort backtrace beats none. The
+    default handler is restored and the signal re-raised afterwards so the
+    OS still records the death exactly as before.
+-----------------------------------------------------------------------------*/
+#define MAIN_CrashMaxFrames 48
+
+typedef struct
+{
+    void** frames;
+    sdword count;
+    sdword max;
+} maincrashunwind;
+
+static _Unwind_Reason_Code mainCrashUnwindFrame(struct _Unwind_Context* context,
+                                                void* arg)
+{
+    maincrashunwind* state = (maincrashunwind*)arg;
+    uintptr_t pc = _Unwind_GetIP(context);
+
+    if (pc == 0)
+    {
+        return _URC_NO_REASON;
+    }
+    if (state->count >= state->max)
+    {
+        return _URC_END_OF_STACK;
+    }
+    state->frames[state->count++] = (void*)pc;
+    return _URC_NO_REASON;
+}
+
+/* The handler must not run on the faulting stack: if the crash IS a stack
+   overflow - which a silent SIGSEGV with no output is a prime suspect for -
+   there is no room left to run it in, and it never reports anything. That is
+   exactly what happened on the first attempt: SA_ONSTACK was set but no
+   alternate stack had been established, so the flag did nothing. */
+#define MAIN_CrashStackSize (64 * 1024)
+static char mainCrashStack[MAIN_CrashStackSize];
+
+/* Log through liblog rather than SDL_Log: fewer layers between a dying
+   process and the buffer, and no formatting allocation inside SDL. */
+#define mainCrashLog(...) \
+    __android_log_print(ANDROID_LOG_ERROR, "SDL/APP", __VA_ARGS__)
+
+/* Shared by the real handler and the startup self-test, so proving this
+   works at startup proves the crash path will report something too. */
+static void mainCrashBacktrace(char const* tag)
+{
+    void* frames[MAIN_CrashMaxFrames];
+    maincrashunwind state;
+    sdword i;
+
+    state.frames = frames;
+    state.count  = 0;
+    state.max    = MAIN_CrashMaxFrames;
+
+    _Unwind_Backtrace(mainCrashUnwindFrame, &state);
+    mainCrashLog("%s frames=%d", tag, (int)state.count);
+
+    for (i = 0; i < state.count; i++)
+    {
+        Dl_info dl;
+        const char* lib = "?";
+        const char* sym = "?";
+        unsigned long off = 0;
+
+        if (dladdr(frames[i], &dl) != 0)
+        {
+            if (dl.dli_fname != NULL)
+            {
+                lib = dl.dli_fname;
+            }
+            if (dl.dli_sname != NULL)
+            {
+                sym = dl.dli_sname;
+                off = (unsigned long)((uintptr_t)frames[i]
+                                    - (uintptr_t)dl.dli_saddr);
+            }
+        }
+        mainCrashLog("%s   #%02d pc %p  %s+%lu  (%s)",
+                     tag, i, frames[i], sym, off, lib);
+    }
+}
+
+static void mainCrashHandler(int sig, siginfo_t* info, void* context)
+{
+    sdword onStack = 0;
+
+    (void)context;
+
+    /* Report the signal BEFORE unwinding. If the stack is too damaged for
+       _Unwind_Backtrace to walk it, at least the signal and fault address
+       survive - and for a stack overflow the fault address alone (adjacent
+       to the thread's stack guard) identifies the failure. */
+    mainCrashLog("HWCRASH signal=%d code=%d addr=%p sp=%p altstack=%d",
+                 sig,
+                 info ? info->si_code : 0,
+                 info ? info->si_addr : NULL,
+                 (void*)&onStack,
+                 (int)((char*)&onStack >= mainCrashStack
+                    && (char*)&onStack <  mainCrashStack + MAIN_CrashStackSize));
+
+    mainCrashBacktrace("HWCRASH");
+
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void mainInstallCrashHandler(void)
+{
+    static sdword installs = 0;
+    struct sigaction sa;
+    stack_t ss;
+
+    ss.ss_sp    = mainCrashStack;
+    ss.ss_size  = sizeof(mainCrashStack);
+    ss.ss_flags = 0;
+    if (sigaltstack(&ss, NULL) != 0)
+    {
+        mainCrashLog("HWCRASH sigaltstack failed - overflow crashes will be silent");
+    }
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = mainCrashHandler;
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGILL,  &sa, NULL);
+    sigaction(SIGFPE,  &sa, NULL);
+
+    if (installs < 4)                           //bounded: reclaim can be per-frame
+    {
+        installs++;
+        mainCrashLog("HWCRASH handler installed (altstack %d bytes) [%d]",
+                     (int)sizeof(mainCrashStack), (int)installs);
+        if (installs == 1)
+        {
+            /* Prove the reporting path end to end at startup, so a crash
+               that reports nothing can be told apart from a reporting path
+               that never worked. If HWSELFTEST shows named frames below,
+               unwinding, symbolication and logging are all functional. */
+            mainCrashBacktrace("HWSELFTEST");
+        }
+    }
+}
+
+/*-----------------------------------------------------------------------------
+    Keep the handler ours.
+
+    Installing once at startup was not enough: the handler was demonstrably
+    registered (it logs when it installs) and still produced not one line for
+    a SIGSEGV, not even the message written before any unwinding. The
+    remaining explanation is that something installed later in startup - the
+    OpenXR runtime and SDL both bring their own crash reporting - replaced
+    it. Rather than assume that, check every call: if the registered handler
+    is no longer ours, say so (naming the address that took it) and take it
+    back. Called from the frame loop; one sigaction() read per frame is a
+    few microseconds against a 13.9 ms budget.
+-----------------------------------------------------------------------------*/
+void mainCrashHandlerKeep(void)
+{
+    static sdword complaints = 0;
+    struct sigaction cur;
+
+    if (sigaction(SIGSEGV, NULL, &cur) != 0)
+    {
+        return;
+    }
+    if (cur.sa_sigaction == mainCrashHandler && (cur.sa_flags & SA_SIGINFO))
+    {
+        return;                                 //still ours, nothing to do
+    }
+    if (complaints < 8)                         //bounded: never spam the log
+    {
+        complaints++;
+        mainCrashLog("HWCRASH handler was replaced by %p (flags 0x%x) - reclaiming (%d)",
+                     (cur.sa_flags & SA_SIGINFO)
+                         ? (void*)cur.sa_sigaction
+                         : (void*)cur.sa_handler,
+                     (unsigned)cur.sa_flags,
+                     (int)complaints);
+    }
+    mainInstallCrashHandler();
+}
+#endif  /* __ANDROID__ */
+
 #ifdef __EMSCRIPTEN__
 void main_loop() {
     int i;
@@ -2149,6 +2359,10 @@ int main (int argc, char* argv[])
     static HANDLE hMapping;
 #endif
     static bool32 preInit;
+
+#ifdef __ANDROID__
+    mainInstallCrashHandler();      //before anything can crash
+#endif
 
 #ifdef _WIN32
     //check to see if a copy of the program already running and just exit if so.

@@ -3771,8 +3771,21 @@ char* utyGameSystemsPreInit(void)
 #else
         long phys_pages = sysconf(_SC_PHYS_PAGES);
         long page_size = sysconf (_SC_PAGE_SIZE);
-        newSize = (sdword)((real32)phys_pages * (real32)page_size
-            * MEM_HeapDefaultScalar);
+        /* Clamp in 64-bit BEFORE narrowing: on a 7.5GB device this product is
+           ~3GB, which does not fit in the sdword newSize. It survived only
+           because ARM64 float->int saturates rather than wrapping; on a
+           target that wraps it would go negative and silently leave the heap
+           at the 64MB default. */
+        {
+            real64 want = (real64)phys_pages * (real64)page_size
+                        * (real64)MEM_HeapDefaultScalar;
+
+            if (want > (real64)MEM_HeapDefaultMax)
+            {
+                want = (real64)MEM_HeapDefaultMax;
+            }
+            newSize = (sdword)want;
+        }
 #endif
         if (newSize > MEM_HeapSizeDefault)
         {
@@ -3785,6 +3798,11 @@ char* utyGameSystemsPreInit(void)
 #else
     utyMemoryHeap = mmap(0, MemoryHeapSize + sizeof(memcookie) * 4,
         PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+#endif
+#ifdef __ANDROID__
+    SDL_Log("HWMEM heap %d bytes (%d MB) at %p",
+            (int)MemoryHeapSize, (int)(MemoryHeapSize / (1024*1024)),
+            utyMemoryHeap);
 #endif
 
     if (utyMemoryHeap == NULL)

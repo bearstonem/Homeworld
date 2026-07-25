@@ -7,6 +7,10 @@
 
 #include "Debug.h"
 
+#ifdef __ANDROID__
+    #include <SDL2/SDL.h>       /* dbgMessage mirrors to the log, see below */
+#endif
+
 #include "File.h"
 #include "utility.h"
 
@@ -111,6 +115,14 @@ void dbgMessage(char *string)
     /*return(dbwPrint(0, string));*/
     printf("%s\n", string);
     fflush(NULL);
+#ifdef __ANDROID__
+    /* Android discards stdout, so every dbgMessage went nowhere - including
+       the file, line and reason that dbgFatal prints immediately before it
+       exits. A fatal error therefore looked like an unexplained death with
+       no diagnostic at all. Mirror it into the log the rest of the port
+       uses so it is actually readable. */
+    SDL_Log("%s", string);
+#endif
 }
 
 /*-----------------------------------------------------------------------------

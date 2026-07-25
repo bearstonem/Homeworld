@@ -8,6 +8,9 @@
 =============================================================================*/
 
 #include "ETG.h"
+#ifdef __ANDROID__
+    #include <SDL2/SDL.h>
+#endif
 
 #include <math.h>
 #include <string.h>
@@ -7456,6 +7459,17 @@ void etgCreateEffects(Effect *effect, etgeffectstatic *stat, sdword number, sdwo
     Outputs     :
     Return      : Newly allocated and started effect.
 ----------------------------------------------------------------------------*/
+#ifdef __ANDROID__
+/* Set by a caller that wants one creation traced statement by statement.
+   etgEffectCreate runs for every bullet and explosion, so tracing it
+   unconditionally would drown the log; the salvage tractor beam arms this
+   around its own call only. See startTractorBeam in SalCapCorvette.c. */
+sdword etgTraceCreate = 0;
+#define etgTrace(...) do { if (etgTraceCreate) SDL_Log(__VA_ARGS__); } while (0)
+#else
+#define etgTrace(...) ((void)0)
+#endif
+
 Effect* etgEffectCreate(etgeffectstatic* stat, Ship* owner, vector* pos, vector* vel, matrix* coordsys, real32 nLips,
                         udword flags, sdword nParams, ...) {
     sdword index;
@@ -7463,7 +7477,30 @@ Effect* etgEffectCreate(etgeffectstatic* stat, Ship* owner, vector* pos, vector*
     smemsize arg[ETG_NumberParameters];
     Effect *newEffect;
 
+    etgTrace("ETGC 1 alloc size=%d", (int)stat->effectSize);
     newEffect = memAlloc(stat->effectSize, "GE(GenEffect)", Pyrophoric);//allocate the new effect
+    etgTrace("ETGC 2 alloc ok effect=%p specialOps=0x%x", (void*)newEffect, (unsigned)stat->specialOps);
+#ifdef __ANDROID__
+    if (newEffect == NULL)
+    {
+        /* memAllocFunctionANV returns NULL silently when the fixed heap has
+           no block big enough - its own diagnostic sits behind
+           MEM_VERBOSE_LEVEL, which is off in a distribution build. The line
+           below used to dereference this straight away, turning heap
+           exhaustion into an unexplained SIGSEGV with no message anywhere.
+           Say so instead, and let the caller cope. */
+        static sdword complaints = 0;
+
+        if (complaints < 16)
+        {
+            complaints++;
+            SDL_Log("HWMEM etgEffectCreate: heap exhausted, wanted %d bytes "
+                    "(failure %d) - effect skipped",
+                    (int)stat->effectSize, (int)complaints);
+        }
+        return NULL;
+    }
+#endif
 
     newEffect->objtype = OBJ_EffectType;                    //type of spaceobj
     newEffect->flags = SOF_Rotatable | flags;               //basic flags
@@ -7534,14 +7571,17 @@ Effect* etgEffectCreate(etgeffectstatic* stat, Ship* owner, vector* pos, vector*
 
     //!!! note: if this is general enough, may be able to unroll etgEffectCodeStart
     //right in this function.  Would save us some parameter voodoo.
+    etgTrace("ETGC 3 pre codeStart nParams=%d", (int)nParams);
     etgEffectCodeStart(stat, newEffect, nParams,            //get the code a-runnin'
             arg[0], arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7]);
+    etgTrace("ETGC 4 codeStart ok");
     if (bitTest(stat->specialOps, ESO_SortForward))
     {                                                       //make it sort forward, if applicable
         bitSet(newEffect->flags, SOF_AlwaysSortFront);
     }
     listAddNode(&universe.SpaceObjList,&(newEffect->objlink),newEffect);
     listAddNode(&universe.effectList,&(newEffect->effectLink),newEffect);
+    etgTrace("ETGC 5 lists ok owner=%p", (void*)owner);
     if (((Ship *)owner) != NULL)
     {
         if (bitTest(stat->specialOps, ESO_WorldRender))
@@ -7551,7 +7591,9 @@ Effect* etgEffectCreate(etgeffectstatic* stat, Ship* owner, vector* pos, vector*
         }
         else
         {
+            etgTrace("ETGC 6 pre univAddObjToRenderListIf");
             univAddObjToRenderListIf((SpaceObj *)newEffect,(SpaceObj *)owner);      // add to render list if parent ((Ship *)owner) is in render list
+            etgTrace("ETGC 7 renderList ok");
         }
     }
     else
@@ -7571,6 +7613,7 @@ Effect* etgEffectCreate(etgeffectstatic* stat, Ship* owner, vector* pos, vector*
         bitSet(newEffect->flags, SOF_AlwaysSortFront);
     }
 
+    etgTrace("ETGC 8 returning %p", (void*)newEffect);
     return newEffect;
 }
 

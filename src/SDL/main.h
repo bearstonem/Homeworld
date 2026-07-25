@@ -29,6 +29,12 @@
     Switches:
 =============================================================================*/
 
+#ifdef __ANDROID__
+/* Re-arms the self-reporting crash handler if something else has taken over
+   SIGSEGV; called once per frame. See mainCrashHandlerKeep in main.c. */
+void mainCrashHandlerKeep(void);
+#endif
+
 /* Window/application title. The VR build ships as "Homeworld: Unbound"; the
    Quest library label is set separately in the vr flavour's strings.xml.
    Note this is NOT the multiplayer protocol string - see networkVersion. */
