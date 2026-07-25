@@ -63,6 +63,7 @@
 extern SDL_Window *sdlwindow;
 
 #include "Camera.h"
+#include "render.h"
 extern void rndMainViewRenderFunction(Camera *camera);
 extern Camera *mrCamera;
 extern bool32 gameIsRunning;
@@ -1541,6 +1542,7 @@ static bool32 vrRenderEyes(XrTime displayTime)
     XrView views[VR_EYE_COUNT];
     uint32_t viewCount = 0;
     real32 anchorModel[16], eyeView[16];
+    real32 savedCameraMatrix[16], savedProjectionMatrix[16];
     GLint savedViewport[4];
     GLboolean hadScissor;
     uword eye;
@@ -1594,6 +1596,12 @@ static bool32 vrRenderEyes(XrTime displayTime)
         vrPoseToModelMatrix(adjusted, VR_WORLD_SCALE, anchorModel);
     }
 
+    /* the eye renders overwrite the rndCamera/ProjectionMatrix globals with
+       head-composed matrices; the rest of the engine (billboards, selection
+       circles, tutorial pointers) must keep seeing the pure mono camera */
+    memcpy(savedCameraMatrix, (void const*)&rndCameraMatrix, sizeof(savedCameraMatrix));
+    memcpy(savedProjectionMatrix, (void const*)&rndProjectionMatrix, sizeof(savedProjectionMatrix));
+
     glGetIntegerv(GL_VIEWPORT, savedViewport);
     hadScissor = glIsEnabled(GL_SCISSOR_TEST);
     glDisable(GL_SCISSOR_TEST);
@@ -1618,6 +1626,8 @@ static bool32 vrRenderEyes(XrTime displayTime)
         {
             glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
             if (hadScissor) glEnable(GL_SCISSOR_TEST);
+            memcpy((void*)&rndCameraMatrix, savedCameraMatrix, sizeof(savedCameraMatrix));
+            memcpy((void*)&rndProjectionMatrix, savedProjectionMatrix, sizeof(savedProjectionMatrix));
             return FALSE;
         }
 
@@ -1651,6 +1661,8 @@ static bool32 vrRenderEyes(XrTime displayTime)
 
     glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
     if (hadScissor) glEnable(GL_SCISSOR_TEST);
+    memcpy((void*)&rndCameraMatrix, savedCameraMatrix, sizeof(savedCameraMatrix));
+    memcpy((void*)&rndProjectionMatrix, savedProjectionMatrix, sizeof(savedProjectionMatrix));
 
     memset(&vr.projLayer, 0, sizeof(vr.projLayer));
     vr.projLayer.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
