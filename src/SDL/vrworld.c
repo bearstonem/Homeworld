@@ -28,6 +28,7 @@
 #include "InfoOverlay.h"
 #include "Matrix.h"
 #include "ObjTypes.h"
+#include "prim2d.h"
 #include "prim3d.h"
 #include "render.h"
 #include "Select.h"
@@ -623,6 +624,12 @@ void vrWorldDrawOverlays(void)
     {
         return;
     }
+
+    /* the world render leaves lighting/texturing on, which blacks out
+       unlit primitives - same preamble as the pie plate drawing */
+    primModeClear2();
+    rndLightingEnable(FALSE);
+    rndTextureEnable(FALSE);
 
     for (hand = 0; hand < VRW_HAND_COUNT; hand++)
     {

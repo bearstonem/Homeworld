@@ -147,6 +147,11 @@ typedef struct {
     real32       pinchPrevDist;
     real32       pinchPrevAzimuth;
     real32       pinchPrevElev;
+    XrVector3f   crawlVel;          /* throw-glide velocity, metres/frame */
+    XrVector3f   worldOffset;       /* free hologram translation, metres (the
+                                       game camera cannot pan: it is focus-
+                                       locked, so drags translate the world
+                                       in LOCAL space instead) */
     rawGlGetIntegerv_t          rawGetIntegerv;
     rawGlGetError_t             rawGetError;
     rawGlGenFramebuffers_t      rawGenFramebuffers;
@@ -985,14 +990,18 @@ static void vrUpdateInput(XrTime time)
             vr.pinchPrevElev = elev;
             vr.pinchValid = TRUE;
             vr.grabValid[VR_HAND_LEFT] = vr.grabValid[VR_HAND_RIGHT] = FALSE;
+            vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
         }
         else
         {
+            bool32 anyGrab = FALSE;
+
             vr.pinchValid = FALSE;
             for (hand = 0; hand < VR_HAND_COUNT; hand++)
             {
                 if (grip[hand] && tracked[hand])
                 {
+                    anyGrab = TRUE;
                     if (vr.grabValid[hand])
                     {
                         real32 delta[3] = {pos[hand][0] - vr.grabPrev[hand].x,
@@ -1003,8 +1012,18 @@ static void vrUpdateInput(XrTime time)
 
                         if (magSqr > 4e-6f)                 //2mm dead-zone
                         {
-                            vrWorldCameraPan(delta);
+                            vr.worldOffset.x += delta[0];
+                            vr.worldOffset.y += delta[1];
+                            vr.worldOffset.z += delta[2];
                         }
+                        /* remember the pull velocity for the throw-glide */
+                        vr.crawlVel.x = vr.crawlVel.x * 0.6f + delta[0] * 0.4f;
+                        vr.crawlVel.y = vr.crawlVel.y * 0.6f + delta[1] * 0.4f;
+                        vr.crawlVel.z = vr.crawlVel.z * 0.6f + delta[2] * 0.4f;
+                    }
+                    else
+                    {
+                        vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
                     }
                     vr.grabPrev[hand].x = pos[hand][0];
                     vr.grabPrev[hand].y = pos[hand][1];
@@ -1014,6 +1033,29 @@ static void vrUpdateInput(XrTime time)
                 else
                 {
                     vr.grabValid[hand] = FALSE;
+                }
+            }
+
+            /* hand-over-hand traversal: released throws keep the world
+               gliding, decaying over ~2s; any new grab retakes control */
+            if (!anyGrab)
+            {
+                real32 magSqr = vr.crawlVel.x * vr.crawlVel.x
+                              + vr.crawlVel.y * vr.crawlVel.y
+                              + vr.crawlVel.z * vr.crawlVel.z;
+
+                if (magSqr > 1e-8f)
+                {
+                    vr.worldOffset.x += vr.crawlVel.x;
+                    vr.worldOffset.y += vr.crawlVel.y;
+                    vr.worldOffset.z += vr.crawlVel.z;
+                    vr.crawlVel.x *= 0.965f;
+                    vr.crawlVel.y *= 0.965f;
+                    vr.crawlVel.z *= 0.965f;
+                }
+                else
+                {
+                    vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
                 }
             }
         }
@@ -1271,8 +1313,11 @@ static void vrUpdateInput(XrTime time)
                 {
                     if (vr.worldInteractive)
                     {
-                        /* F equivalent: focus the camera on the selection */
+                        /* F equivalent: focus the camera on the selection,
+                           and bring the hologram back home */
                         vrWorldCameraFocusSelection();
+                        vr.worldOffset.x = vr.worldOffset.y = vr.worldOffset.z = 0.0f;
+                        vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
                         vr.prevStickClick[hand] = pressed;
                         vr.stickClickKey[hand] = 0;
                         continue;
@@ -1536,7 +1581,16 @@ static bool32 vrRenderEyes(XrTime displayTime)
         return FALSE;
     }
 
-    vrPoseToModelMatrix(vr.anchorPose, VR_WORLD_SCALE, anchorModel);
+    {
+        XrPosef adjusted = vr.anchorPose;
+
+        /* free hologram translation composes as a LOCAL-space shift of
+           the anchor (grip drags / crawl glide) */
+        adjusted.position.x += vr.worldOffset.x;
+        adjusted.position.y += vr.worldOffset.y;
+        adjusted.position.z += vr.worldOffset.z;
+        vrPoseToModelMatrix(adjusted, VR_WORLD_SCALE, anchorModel);
+    }
 
     glGetIntegerv(GL_VIEWPORT, savedViewport);
     hadScissor = glIsEnabled(GL_SCISSOR_TEST);
@@ -1780,9 +1834,9 @@ void vrFrame(void)
         /* capture the pure game camera matrix (the eye passes overwrite
            rndCameraMatrix later) and refresh the LOCAL->world transforms */
         {
-            real32 anchorPos[3] = {vr.anchorPose.position.x,
-                                   vr.anchorPose.position.y,
-                                   vr.anchorPose.position.z};
+            real32 anchorPos[3] = {vr.anchorPose.position.x + vr.worldOffset.x,
+                                   vr.anchorPose.position.y + vr.worldOffset.y,
+                                   vr.anchorPose.position.z + vr.worldOffset.z};
             real32 anchorQuat[4] = {vr.anchorPose.orientation.x,
                                     vr.anchorPose.orientation.y,
                                     vr.anchorPose.orientation.z,
