@@ -108,13 +108,14 @@ static void vrwRigidInverse(real32 const R[9], real32 const t[3], real32 out[16]
     {
         for (r = 0; r < 3; r++)
         {
-            out[c * 4 + r] = R[r * 3 + c];                  /* transpose */
+            out[c * 4 + r] = R[c * 3 + r];                  /* R^T: element (r,c) = R[c][r] */
         }
         out[c * 4 + 3] = 0.0f;
     }
     for (r = 0; r < 3; r++)
     {
-        out[12 + r] = -(R[r * 3 + 0] * t[0] + R[r * 3 + 1] * t[1] + R[r * 3 + 2] * t[2]);
+        /* -(R^T t): note the transposed indexing, k*3+r */
+        out[12 + r] = -(R[0 * 3 + r] * t[0] + R[1 * 3 + r] * t[1] + R[2 * 3 + r] * t[2]);
     }
     out[15] = 1.0f;
 }

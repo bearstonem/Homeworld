@@ -672,7 +672,7 @@ static bool32 vrUpdateWristPanel(XrTime displayTime)
         || XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &head))
         || !(head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
     {
-        if (vr.frameCount % 300 == 1)
+        if (vr.frameCount % 3600 == 1)
         {
             SDL_Log("VR: wrist panel: left aim not tracked (flags 0x%x)",
                     (unsigned)grip.locationFlags);
@@ -1892,7 +1892,7 @@ void vrFrame(void)
     }
 
     vr.frameCount++;
-    if (vr.frameCount % 300 == 1)
+    if (vr.frameCount % 3600 == 1)
     {
         SDL_Log("VR: frame %u, state %d, shouldRender %d, layers %u",
                 (unsigned)vr.frameCount, (int)vr.state,
