@@ -1,4 +1,21 @@
-# Quest 3 VR port — working notes
+# Homeworld: Unbound — Quest 3 VR port, working notes
+
+The VR build ships as **Homeworld: Unbound** (the Bentusi are "the Unbound";
+also unbound from the monitor). Three things carry a name and only two of them
+were renamed:
+
+- `app/src/vr/res/values/strings.xml` → `app_name`, the Quest library label.
+  It lives in the **vr flavour**, so the flat Android build keeps "Homeworld".
+- `HW_WINDOW_TITLE` in `src/SDL/main.h` → the SDL window title, `#ifdef
+  HW_ENABLE_VR`. Used by `main.c`'s `windowTitle` and both `SDL_CreateWindow`
+  sites in `render.c`.
+- **`networkVersion` in `main.c` is deliberately still `"HomeworldSDL"`.** It is
+  the multiplayer protocol version string, matched against other clients;
+  renaming it would silently make this build unable to play with anything else.
+
+`applicationId` also stays `org.gardensofkadesh.homeworld`: it is the asset path
+under `/sdcard/Android/data/`, so changing it orphans the install, its settings
+and its assets. The meson project name (`homeworld`) is likewise internal.
 
 State as of commit `d3f4f50` on `master-tenhauser` (fork
 `github.com/bearstonem/Homeworld`, upstream `GardensOfKadesh/Homeworld`).
@@ -115,19 +132,18 @@ command wheel), and true physical ship scale (N-LIPS disabled).
 
 ## Outstanding
 
-- **Not yet validated on device by the user**: the redrawn command wheel and
-  its deadzone/dwell/legibility constants, the 3D depth cursor, hologram
-  recentring, and multi-ship flight paths since the centroid fix.
-- **Known open bug**: zoomed in close to the fleet, move orders only reach a
-  short distance even though the ray points further out. The depth cursor is
-  seeded from the fleet's depth along the ray, which is small when the camera
-  is close, and the multiplicative rate then takes seconds to push out.
-- **Planned, not started** (plan approved, see the session plan file): finish
-  the button-map restructure so no input carries more than two meanings —
-  right grip still holds the Build chord and fleet cycling, left grip is still
-  both Shift and half the pinch — and make `VR_WORLD_SCALE` a runtime control
-  (three use sites, already a parameter to `vrWorldFrameBegin`) for a
-  tabletop-model to life-size range.
+- **Validated on device by the user**: the command wheel, the 3D depth cursor
+  and its zoomed-in reach, hologram recentring, multi-ship flight paths since
+  the centroid fix, the button-map restructure, runtime world scale, sensors
+  navigation and its toggle, the 3x draw distance, multi-target attack, and the
+  skybox hole fix. Nothing in the interaction layer is currently unverified.
+- **Parked by decision, not blocked** (2026-07-25): the graphics work. MSAA
+  needs the eye passes to render into their own FBOs first — 4x MSAA on the
+  window blacked out every wrist card, because an ES multisample *resolve* blit
+  requires identical source and destination rectangles and the card blit reads
+  `srcY0` while writing 0. The world is also still drawn three times a frame
+  (mono pass plus two eyes). There is headroom for all of it; the user chose to
+  spend it elsewhere for now.
 - Optional: the residual "X" transform for pitch and zoom beyond the game
   camera's clamps. `vrWorldCameraOrbit` and `vrWorldCameraZoom` already return
   the refused residual; all call sites discard it. Acceptance test already
