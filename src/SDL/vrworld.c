@@ -50,6 +50,7 @@ extern bool32 gameIsRunning;                                //Globals.c
 #define VRW_PICK_MARGIN    1.4f     /* collision sphere inflation for picking */
 #define VRW_SWEEP_RADIUS   0.12f    /* LOCAL-space metres around the ray */
 #define VRW_RAY_LENGTH     100000.0f
+#define VRW_DEBUG_INTERVAL 120
 
 typedef struct {
     bool32  valid;
@@ -190,32 +191,38 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
 
     vrw.worldValid = TRUE;
 
-    /* periodic diagnostics: camera matrix health + ray roundtrip */
+    /* periodic diagnostics: camera matrix health. Ray roundtrips are logged
+       in vrWorldSetRay, after the current frame's ray has been transformed. */
     vrw.debugFrame++;
-    if (vrw.debugFrame % 600 == 1)
+    if (vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
     {
+        real32 lookDet;
+        real32 anchorDet;
+
+        lookDet = look[0] * (look[5] * look[10] - look[9] * look[6])
+                - look[4] * (look[1] * look[10] - look[9] * look[2])
+                + look[8] * (look[1] * look[6] - look[5] * look[2]);
+        anchorDet = vrw.anchorFwd[0] * (vrw.anchorFwd[5] * vrw.anchorFwd[10]
+                  - vrw.anchorFwd[9] * vrw.anchorFwd[6])
+                  - vrw.anchorFwd[4] * (vrw.anchorFwd[1] * vrw.anchorFwd[10]
+                  - vrw.anchorFwd[9] * vrw.anchorFwd[2])
+                  + vrw.anchorFwd[8] * (vrw.anchorFwd[1] * vrw.anchorFwd[6]
+                  - vrw.anchorFwd[5] * vrw.anchorFwd[2]);
         SDL_Log("VRDBG L: rot0=(%.3f %.3f %.3f) t=(%.1f %.1f %.1f) camEye=(%.1f %.1f %.1f)",
                 look[0], look[4], look[8], look[12], look[13], look[14],
                 mrCamera->eyeposition.x, mrCamera->eyeposition.y, mrCamera->eyeposition.z);
-        if (vrw.ray[1].valid)
-        {
-            vector backCam, backLocal;
-
-            /* roundtrip the stored world origin through the forward chain */
-            vrwTransformPoint(vrw.lookatFwd, &vrw.ray[1].origin, &backCam);
-            vrwTransformPoint(vrw.anchorFwd, &backCam, &backLocal);
-            SDL_Log("VRDBG R-hand: local=(%.3f %.3f %.3f) dirL=(%.2f %.2f %.2f)",
-                    vrw.dbgLocalPos[1].x, vrw.dbgLocalPos[1].y, vrw.dbgLocalPos[1].z,
-                    vrw.dbgLocalDir[1].x, vrw.dbgLocalDir[1].y, vrw.dbgLocalDir[1].z);
-            SDL_Log("VRDBG R-hand: world=(%.1f %.1f %.1f) dirW=(%.2f %.2f %.2f) hover=%d",
-                    vrw.ray[1].origin.x, vrw.ray[1].origin.y, vrw.ray[1].origin.z,
-                    vrw.ray[1].dir.x, vrw.ray[1].dir.y, vrw.ray[1].dir.z,
-                    vrw.ray[1].hover != NULL);
-            SDL_Log("VRDBG roundtrip: local*S=(%.1f %.1f %.1f) back=(%.1f %.1f %.1f)",
-                    vrw.dbgLocalPos[1].x * vrw.scale, vrw.dbgLocalPos[1].y * vrw.scale,
-                    vrw.dbgLocalPos[1].z * vrw.scale,
-                    backLocal.x, backLocal.y, backLocal.z);
-        }
+        SDL_Log("VRDBG CHAIN frame=%u lookDet=%.5f anchorDet=%.5f "
+                "anchorPosM=(%.4f %.4f %.4f) q=(%.4f %.4f %.4f %.4f)",
+                (unsigned)vrw.debugFrame, lookDet, anchorDet,
+                anchorPos[0], anchorPos[1], anchorPos[2],
+                anchorQuat[0], anchorQuat[1], anchorQuat[2], anchorQuat[3]);
+        SDL_Log("VRDBG CAMERA frame=%u angle=%.6f decl=%.6f distance=%.2f "
+                "userFlags=0x%x look=(%.1f %.1f %.1f)",
+                (unsigned)vrw.debugFrame, mrCamera->angle,
+                mrCamera->declination, mrCamera->distance,
+                (unsigned)universe.mainCameraCommand.UserControlled,
+                mrCamera->lookatpoint.x, mrCamera->lookatpoint.y,
+                mrCamera->lookatpoint.z);
     }
     return TRUE;
 }
@@ -292,7 +299,7 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly, rea
     {
         SpaceObjRotImpTarg* obj = (SpaceObjRotImpTarg*)listGetStructOfNode(node);
         vector toObj;
-        real32 radius, tCentre, distSqr, discr;
+        real32 radius, tCentre, distSqr, discr, root, candidateT;
 
         if (obj->objtype != OBJ_ShipType && obj->objtype != OBJ_AsteroidType
             && obj->objtype != OBJ_DustType && obj->objtype != OBJ_GasType
@@ -327,9 +334,18 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly, rea
         {
             continue;
         }
-        if (tCentre - fsqrt(discr) < bestT)
+        root = fsqrt(discr);
+        candidateT = tCentre - root;
+        if (candidateT < 0.0f)
         {
-            bestT = tCentre - fsqrt(discr);
+            /* The controller can begin inside a large ship's inflated pick
+               sphere. Use the forward exit point rather than returning a
+               negative distance that draws the ray back through the hand. */
+            candidateT = tCentre + root;
+        }
+        if (candidateT >= 0.0f && candidateT < bestT)
+        {
+            bestT = candidateT;
             best = obj;
         }
     }
@@ -361,6 +377,41 @@ void vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], boo
     vrwLocalToWorld(origin, &ray->origin);
     vrwLocalDirToWorld(dir, &ray->dir);
     ray->hover = vrwPick(ray, FALSE, &ray->hoverT);
+    if (hand == 1 && vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
+    {
+        vector backCam, backLocal, backCamDir, backLocalDir;
+        real32 backMag, dirDot;
+
+        vrwTransformPoint(vrw.lookatFwd, &ray->origin, &backCam);
+        vrwTransformPoint(vrw.anchorFwd, &backCam, &backLocal);
+        vrwTransformDir(vrw.lookatFwd, &ray->dir, &backCamDir);
+        vrwTransformDir(vrw.anchorFwd, &backCamDir, &backLocalDir);
+        backMag = fsqrt(backLocalDir.x * backLocalDir.x
+                      + backLocalDir.y * backLocalDir.y
+                      + backLocalDir.z * backLocalDir.z);
+        if (backMag > 0.0f)
+        {
+            backLocalDir.x /= backMag;
+            backLocalDir.y /= backMag;
+            backLocalDir.z /= backMag;
+        }
+        dirDot = backLocalDir.x * vrw.dbgLocalDir[1].x
+               + backLocalDir.y * vrw.dbgLocalDir[1].y
+               + backLocalDir.z * vrw.dbgLocalDir[1].z;
+        SDL_Log("VRDBG RAY frame=%u local=(%.4f %.4f %.4f) "
+                "minusZ=(%.4f %.4f %.4f) world=(%.1f %.1f %.1f) "
+                "dirW=(%.4f %.4f %.4f) hover=%d hitT=%.2f",
+                (unsigned)vrw.debugFrame, origin[0], origin[1], origin[2],
+                dir[0], dir[1], dir[2], ray->origin.x, ray->origin.y,
+                ray->origin.z, ray->dir.x, ray->dir.y, ray->dir.z,
+                ray->hover != NULL, ray->hover != NULL ? ray->hoverT : -1.0f);
+        SDL_Log("VRDBG ROUNDTRIP frame=%u local*S=(%.2f %.2f %.2f) "
+                "back=(%.2f %.2f %.2f) dirBack=(%.5f %.5f %.5f) dot=%.7f",
+                (unsigned)vrw.debugFrame, origin[0] * vrw.scale,
+                origin[1] * vrw.scale, origin[2] * vrw.scale,
+                backLocal.x, backLocal.y, backLocal.z,
+                backLocalDir.x, backLocalDir.y, backLocalDir.z, dirDot);
+    }
 
     /* while sweeping, accumulate player ships near the ray */
     if (vrw.sweepActive && hand == vrw.sweepHand)
@@ -746,6 +797,11 @@ void vrWorldFocusCycle(sdword step)
 void vrWorldDrawOverlays(void)
 {
     sdword hand, i;
+    sdword oldLighting, oldTexture;
+    GLint oldMatrixMode, modelDepthBefore, projectionDepthBefore;
+    GLint modelDepthAfter, projectionDepthAfter;
+    GLboolean oldFog;
+    GLenum entryError, exitError;
     color const rayColor = colRGB(80, 160, 255);
     color const hoverColor = colRGB(255, 200, 60);
     color const selColor = colRGB(90, 255, 120);
@@ -759,6 +815,14 @@ void vrWorldDrawOverlays(void)
     /* Trust nothing about the state the world render ended in: load the
        per-eye matrices captured during this eye's render explicitly, and
        force the fixed-function state the primitives need. */
+    entryError = glGetError();
+    glGetIntegerv(GL_MATRIX_MODE, &oldMatrixMode);
+    glGetIntegerv(GL_MODELVIEW_STACK_DEPTH, &modelDepthBefore);
+    glGetIntegerv(GL_PROJECTION_STACK_DEPTH, &projectionDepthBefore);
+    oldFog = glIsEnabled(GL_FOG);
+    oldLighting = rndLightingEnable(FALSE);
+    oldTexture = rndTextureEnable(FALSE);
+
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadMatrixf((GLfloat const*)&rndProjectionMatrix);
@@ -768,8 +832,6 @@ void vrWorldDrawOverlays(void)
     glDisable(GL_LIGHTING);
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_FOG);
-    rndLightingEnable(FALSE);
-    rndTextureEnable(FALSE);
 
     for (hand = 0; hand < VRW_HAND_COUNT; hand++)
     {
@@ -834,6 +896,31 @@ void vrWorldDrawOverlays(void)
         primLine3(&selCentrePoint, &vrw.movePlanePoint, moveColor);
         primCircleOutline3(&vrw.moveDestination, selAverageSize > 0.0f ? selAverageSize : 100.0f,
                            16, 0, hoverColor, Z_AXIS);
+    }
+
+    rndTextureEnable(oldTexture);
+    rndLightingEnable(oldLighting);
+    if (oldFog) glEnable(GL_FOG); else glDisable(GL_FOG);
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode((GLenum)oldMatrixMode);
+
+    glGetIntegerv(GL_MODELVIEW_STACK_DEPTH, &modelDepthAfter);
+    glGetIntegerv(GL_PROJECTION_STACK_DEPTH, &projectionDepthAfter);
+    exitError = glGetError();
+    if (vrw.debugFrame % VRW_DEBUG_INTERVAL == 1
+        || modelDepthBefore != modelDepthAfter
+        || projectionDepthBefore != projectionDepthAfter
+        || entryError != GL_NO_ERROR || exitError != GL_NO_ERROR)
+    {
+        SDL_Log("VRDBG OVERLAY frame=%u stacks=%d/%d->%d/%d "
+                "mode=0x%x entryErr=0x%x exitErr=0x%x blue=-Z",
+                (unsigned)vrw.debugFrame, (int)modelDepthBefore,
+                (int)projectionDepthBefore, (int)modelDepthAfter,
+                (int)projectionDepthAfter, (unsigned)oldMatrixMode,
+                (unsigned)entryError, (unsigned)exitError);
     }
 }
 

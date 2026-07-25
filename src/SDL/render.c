@@ -2424,6 +2424,15 @@ void rndMainViewRenderFunction(Camera *camera)
     //get local copy of matrices
     glGetFloatv(GL_MODELVIEW_MATRIX, (GLfloat *)(&rndCameraMatrix));
     glGetFloatv(GL_PROJECTION_MATRIX, (GLfloat *)(&rndProjectionMatrix));
+#ifdef HW_ENABLE_VR
+    {
+        real32 eye[3] = {camera->eyeposition.x, camera->eyeposition.y, camera->eyeposition.z};
+        real32 lookat[3] = {camera->lookatpoint.x, camera->lookatpoint.y, camera->lookatpoint.z};
+
+        vrDebugRenderPass((real32 const*)&rndCameraMatrix,
+                          (real32 const*)&rndProjectionMatrix, eye, lookat);
+    }
+#endif
 
     //position light(s) in world
     lightPositionSet();
@@ -2621,6 +2630,11 @@ dontdraw:
                                 hmatMakeHMatFromMat(&coordMatrixForGL,&((SpaceObjRot *)spaceobj)->rotinfo.coordsys);
                                 hmatPutVectIntoHMatrixCol4(spaceobj->posinfo.position,coordMatrixForGL);
                                 glMultMatrixf((float *)&coordMatrixForGL);//ship's rotation matrix
+#ifdef HW_ENABLE_VR
+                                vrDebugRenderObject(OBJ_ShipType,
+                                                    (real32 const*)&spaceobj->posinfo.position,
+                                                    (sdword)spaceobj->currentLOD);
+#endif
                                 shPushLightMatrix(&coordMatrixForGL);
                                 if (selCameraSpace.z < 0.0f)
                                 {
@@ -3007,6 +3021,14 @@ dontdraw:
                             hmatMakeHMatFromMat(&coordMatrixForGL,&((SpaceObjRot *)spaceobj)->rotinfo.coordsys);
                             hmatPutVectIntoHMatrixCol4(spaceobj->posinfo.position,coordMatrixForGL);
                             glMultMatrixf((float *)&coordMatrixForGL);//ship's rotation matrix
+#ifdef HW_ENABLE_VR
+                            if (spaceobj->objtype == OBJ_AsteroidType)
+                            {
+                                vrDebugRenderObject(OBJ_AsteroidType,
+                                                    (real32 const*)&spaceobj->posinfo.position,
+                                                    (sdword)spaceobj->currentLOD);
+                            }
+#endif
                             shPushLightMatrix(&coordMatrixForGL);
 
                             if (spaceobj->objtype == OBJ_AsteroidType)

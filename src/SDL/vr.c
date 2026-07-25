@@ -55,6 +55,8 @@
 
 #define VR_EYE_COUNT   2
 
+#define VR_DEBUG_INTERVAL 120
+
 /* How many game-world units one real-world metre of head movement is
    worth. Homeworld ships are hundreds of units long; at 1000 the fleet
    reads as a room-sized hologram. */
@@ -110,6 +112,10 @@ typedef struct {
     bool32       active;
     udword       frameCount;
     udword       errorsLogged;
+    sdword       debugEye;         /* -1 mono, 0 left eye, 1 right eye */
+    udword       debugPassFrame[3];
+    udword       debugObjectFrame[3][2]; /* first ship/asteroid in each pass */
+    XrPosef      debugAimPose[VR_HAND_COUNT];
     unsigned int blitFbo;
     XrActionSet  actionSet;
     XrAction     aimAction;
@@ -448,7 +454,7 @@ static bool32 vrCreateActions(void)
 {
     XrActionSetCreateInfo setInfo;
     XrActionCreateInfo actionInfo;
-    XrActionSuggestedBinding bindings[14];
+    XrActionSuggestedBinding bindings[16];
     XrInteractionProfileSuggestedBinding suggested;
     XrSessionActionSetsAttachInfo attachInfo;
     XrActionSpaceCreateInfo spaceInfo;
@@ -535,7 +541,7 @@ static bool32 vrCreateActions(void)
     memset(&suggested, 0, sizeof(suggested));
     suggested.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
     suggested.interactionProfile = profilePath;
-    suggested.countSuggestedBindings = 14;
+    suggested.countSuggestedBindings = 16;
     suggested.suggestedBindings = bindings;
     VR_CHECK("xrSuggestInteractionProfileBindings",
              xrSuggestInteractionProfileBindings(vr.instance, &suggested));
@@ -952,6 +958,7 @@ static bool32 vrHandAimLocal(uword hand, XrTime time, real32 pos[3], real32 dir[
     pos[0] = location.pose.position.x;
     pos[1] = location.pose.position.y;
     pos[2] = location.pose.position.z;
+    vr.debugAimPose[hand] = location.pose;
     vrQuatRotate(location.pose.orientation, forward, &d);
     dir[0] = d.x;
     dir[1] = d.y;
@@ -991,11 +998,26 @@ static void vrUpdateInput(XrTime time)
         bool32 tracked[VR_HAND_COUNT];
         bool32 grip[VR_HAND_COUNT];
 
+        memset(pos, 0, sizeof(pos));
+        memset(dir, 0, sizeof(dir));
         for (hand = 0; hand < VR_HAND_COUNT; hand++)
         {
             tracked[hand] = vrHandAimLocal(hand, time, pos[hand], dir[hand]);
             grip[hand] = vrActionPressedHand(vr.gripAction, hand);
             vrWorldSetRay((sdword)hand, pos[hand], dir[hand], tracked[hand]);
+        }
+        if (vr.frameCount % VR_DEBUG_INTERVAL == 1)
+        {
+            XrPosef const* aim = &vr.debugAimPose[VR_HAND_RIGHT];
+
+            SDL_Log("VRDBG AIM frame=%u R tracked=%d pos=(%.4f %.4f %.4f) "
+                    "q=(%.4f %.4f %.4f %.4f) minusZ=(%.4f %.4f %.4f)",
+                    (unsigned)vr.frameCount, (int)tracked[VR_HAND_RIGHT],
+                    pos[VR_HAND_RIGHT][0], pos[VR_HAND_RIGHT][1], pos[VR_HAND_RIGHT][2],
+                    aim->orientation.x, aim->orientation.y,
+                    aim->orientation.z, aim->orientation.w,
+                    dir[VR_HAND_RIGHT][0], dir[VR_HAND_RIGHT][1],
+                    dir[VR_HAND_RIGHT][2]);
         }
         vr.activeHand = vrWorldHandHasTarget(VR_HAND_RIGHT) ? VR_HAND_RIGHT
                       : vrWorldHandHasTarget(VR_HAND_LEFT) ? VR_HAND_LEFT
@@ -1016,11 +1038,19 @@ static void vrUpdateInput(XrTime time)
             if (vr.pinchValid && dist > 0.05f && vr.pinchPrevDist > 0.05f)
             {
                 real32 dAz = azimuth - vr.pinchPrevAzimuth;
+                real32 dElev = elev - vr.pinchPrevElev;
 
                 if (dAz > 3.14159f)  dAz -= 6.28318f;
                 if (dAz < -3.14159f) dAz += 6.28318f;
+                if (vr.frameCount % VR_DEBUG_INTERVAL == 1)
+                {
+                    SDL_Log("VRDBG INPUT frame=%u source=pinch grips=1/1 "
+                            "distance=%.4f zoom=%.6f orbit=(%.6f %.6f)",
+                            (unsigned)vr.frameCount, dist,
+                            vr.pinchPrevDist / dist, dAz, dElev);
+                }
                 vrWorldCameraZoom(vr.pinchPrevDist / dist);
-                vrWorldCameraOrbit(dAz, elev - vr.pinchPrevElev);
+                vrWorldCameraOrbit(dAz, dElev);
             }
             vr.pinchPrevDist = dist;
             vr.pinchPrevAzimuth = azimuth;
@@ -1074,11 +1104,18 @@ static void vrUpdateInput(XrTime time)
         sdword cycleDir;
 
         vrActionStick(VR_HAND_LEFT, &lx, &ly);
+        vrActionStick(VR_HAND_RIGHT, &rx, &ry);
+        if (vr.frameCount % VR_DEBUG_INTERVAL == 1)
+        {
+            SDL_Log("VRDBG INPUT frame=%u source=sticks L=(%.5f %.5f) "
+                    "R=(%.5f %.5f) deadzoneL=%d",
+                    (unsigned)vr.frameCount, lx, ly, rx, ry,
+                    (int)(lx * lx + ly * ly > 0.04f));
+        }
         if (lx * lx + ly * ly > 0.04f)
         {
             vrWorldCameraOrbit(-lx * 0.035f, ly * 0.025f);
         }
-        vrActionStick(VR_HAND_RIGHT, &rx, &ry);
         if ((ry > 0.25f || ry < -0.25f) && !vrWorldMoveActive())
         {
             vrWorldCameraZoom(1.0f - ry * 0.02f);
@@ -1469,6 +1506,124 @@ bool32 vrEyePassActive(void)
     return vr.eyeActive;
 }
 
+static sdword vrDebugPassIndex(void)
+{
+    return vr.eyeActive ? vr.debugEye + 1 : 0;
+}
+
+static char const* vrDebugPassName(sdword pass)
+{
+    static char const* names[3] = {"mono", "left", "right"};
+
+    return (pass >= 0 && pass < 3) ? names[pass] : "unknown";
+}
+
+static real32 vrDebugRotationDeterminant(real32 const m[16])
+{
+    return m[0] * (m[5] * m[10] - m[9] * m[6])
+         - m[4] * (m[1] * m[10] - m[9] * m[2])
+         + m[8] * (m[1] * m[6] - m[5] * m[2]);
+}
+
+void vrDebugRenderPass(real32 const view[16], real32 const projection[16],
+                       real32 const eye[3], real32 const lookat[3])
+{
+    sdword pass = vrDebugPassIndex();
+    GLint matrixMode = 0, modelDepth = 0, projectionDepth = 0;
+
+    if (!vr.active || vr.frameCount % VR_DEBUG_INTERVAL != 1
+        || vr.debugPassFrame[pass] == vr.frameCount)
+    {
+        return;
+    }
+    vr.debugPassFrame[pass] = vr.frameCount;
+    glGetIntegerv(GL_MATRIX_MODE, &matrixMode);
+    glGetIntegerv(GL_MODELVIEW_STACK_DEPTH, &modelDepth);
+    glGetIntegerv(GL_PROJECTION_STACK_DEPTH, &projectionDepth);
+    SDL_Log("VRDBG PASS frame=%u pass=%s eye=(%.1f %.1f %.1f) "
+            "look=(%.1f %.1f %.1f) det=%.5f mode=0x%x stacks=%d/%d",
+            (unsigned)vr.frameCount, vrDebugPassName(pass),
+            eye[0], eye[1], eye[2], lookat[0], lookat[1], lookat[2],
+            vrDebugRotationDeterminant(view), (unsigned)matrixMode,
+            (int)modelDepth, (int)projectionDepth);
+    SDL_Log("VRDBG VIEW %s r0=(%.4f %.4f %.4f %.2f) "
+            "r1=(%.4f %.4f %.4f %.2f) r2=(%.4f %.4f %.4f %.2f)",
+            vrDebugPassName(pass),
+            view[0], view[4], view[8], view[12],
+            view[1], view[5], view[9], view[13],
+            view[2], view[6], view[10], view[14]);
+    SDL_Log("VRDBG PROJ %s diag=(%.4f %.4f %.4f %.4f) offset=(%.4f %.4f)",
+            vrDebugPassName(pass), projection[0], projection[5],
+            projection[10], projection[14], projection[8], projection[9]);
+}
+
+void vrDebugRenderObject(sdword objtype, real32 const worldPos[3], sdword lod)
+{
+    sdword pass = vrDebugPassIndex();
+    sdword kind;
+    GLfloat actual[16];
+    real32 camera[4], clip[4];
+    real32 ndcX = 0.0f, ndcY = 0.0f, ndcZ = 0.0f;
+    real32 delta;
+    real32 const* view = (real32 const*)&rndCameraMatrix;
+    real32 const* projection = (real32 const*)&rndProjectionMatrix;
+
+    if (objtype == OBJ_ShipType)
+    {
+        kind = 0;
+    }
+    else if (objtype == OBJ_AsteroidType)
+    {
+        kind = 1;
+    }
+    else
+    {
+        return;
+    }
+    if (!vr.active || vr.frameCount % VR_DEBUG_INTERVAL != 1
+        || vr.debugObjectFrame[pass][kind] == vr.frameCount)
+    {
+        return;
+    }
+    vr.debugObjectFrame[pass][kind] = vr.frameCount;
+
+    camera[0] = view[0] * worldPos[0] + view[4] * worldPos[1]
+              + view[8] * worldPos[2] + view[12];
+    camera[1] = view[1] * worldPos[0] + view[5] * worldPos[1]
+              + view[9] * worldPos[2] + view[13];
+    camera[2] = view[2] * worldPos[0] + view[6] * worldPos[1]
+              + view[10] * worldPos[2] + view[14];
+    camera[3] = 1.0f;
+    clip[0] = projection[0] * camera[0] + projection[4] * camera[1]
+            + projection[8] * camera[2] + projection[12];
+    clip[1] = projection[1] * camera[0] + projection[5] * camera[1]
+            + projection[9] * camera[2] + projection[13];
+    clip[2] = projection[2] * camera[0] + projection[6] * camera[1]
+            + projection[10] * camera[2] + projection[14];
+    clip[3] = projection[3] * camera[0] + projection[7] * camera[1]
+            + projection[11] * camera[2] + projection[15];
+    if (fabsf(clip[3]) > 1e-6f)
+    {
+        ndcX = clip[0] / clip[3];
+        ndcY = clip[1] / clip[3];
+        ndcZ = clip[2] / clip[3];
+    }
+
+    /* Called immediately after glMultMatrixf(objectTransform): the model
+       origin must land at the same camera-space point as view * worldPos. */
+    glGetFloatv(GL_MODELVIEW_MATRIX, actual);
+    delta = fabsf(actual[12] - camera[0]) + fabsf(actual[13] - camera[1])
+          + fabsf(actual[14] - camera[2]);
+    SDL_Log("VRDBG OBJ frame=%u pass=%s kind=%s lod=%d "
+            "world=(%.1f %.1f %.1f) cam=(%.1f %.1f %.1f) "
+            "actual=(%.1f %.1f %.1f) delta=%.4f ndc=(%.3f %.3f %.3f)",
+            (unsigned)vr.frameCount, vrDebugPassName(pass),
+            kind == 0 ? "ship" : "asteroid", (int)lod,
+            worldPos[0], worldPos[1], worldPos[2],
+            camera[0], camera[1], camera[2],
+            actual[12], actual[13], actual[14], delta, ndcX, ndcY, ndcZ);
+}
+
 static bool32 vrCreateStereoSwapchains(void)
 {
     XrViewConfigurationView views[VR_EYE_COUNT];
@@ -1543,8 +1698,11 @@ static bool32 vrRenderEyes(XrTime displayTime)
     uint32_t viewCount = 0;
     real32 anchorModel[16], eyeView[16];
     real32 savedCameraMatrix[16], savedProjectionMatrix[16];
-    GLint savedViewport[4];
-    GLboolean hadScissor;
+    GLfloat savedGlModelView[16], savedGlProjection[16];
+    GLint savedViewport[4], savedMatrixMode;
+    GLint savedModelDepth, savedProjectionDepth;
+    GLboolean hadScissor, hadLighting, hadTexture, hadFog;
+    GLboolean hadDepth, hadBlend, hadCull;
     uword eye;
 
     static bool32 stereoFailed = FALSE;
@@ -1602,9 +1760,36 @@ static bool32 vrRenderEyes(XrTime displayTime)
     memcpy(savedCameraMatrix, (void const*)&rndCameraMatrix, sizeof(savedCameraMatrix));
     memcpy(savedProjectionMatrix, (void const*)&rndProjectionMatrix, sizeof(savedProjectionMatrix));
 
+    glGetIntegerv(GL_MATRIX_MODE, &savedMatrixMode);
+    glGetIntegerv(GL_MODELVIEW_STACK_DEPTH, &savedModelDepth);
+    glGetIntegerv(GL_PROJECTION_STACK_DEPTH, &savedProjectionDepth);
+    glMatrixMode(GL_MODELVIEW);
+    glGetFloatv(GL_MODELVIEW_MATRIX, savedGlModelView);
+    glMatrixMode(GL_PROJECTION);
+    glGetFloatv(GL_PROJECTION_MATRIX, savedGlProjection);
+    glMatrixMode((GLenum)savedMatrixMode);
     glGetIntegerv(GL_VIEWPORT, savedViewport);
     hadScissor = glIsEnabled(GL_SCISSOR_TEST);
+    hadLighting = glIsEnabled(GL_LIGHTING);
+    hadTexture = glIsEnabled(GL_TEXTURE_2D);
+    hadFog = glIsEnabled(GL_FOG);
+    hadDepth = glIsEnabled(GL_DEPTH_TEST);
+    hadBlend = glIsEnabled(GL_BLEND);
+    hadCull = glIsEnabled(GL_CULL_FACE);
     glDisable(GL_SCISSOR_TEST);
+
+    if (vr.frameCount % VR_DEBUG_INTERVAL == 1)
+    {
+        SDL_Log("VRDBG XR frame=%u anchor pos=(%.4f %.4f %.4f) "
+                "q=(%.4f %.4f %.4f %.4f) offset=(%.4f %.4f %.4f) "
+                "entry stacks=%d/%d",
+                (unsigned)vr.frameCount,
+                vr.anchorPose.position.x, vr.anchorPose.position.y, vr.anchorPose.position.z,
+                vr.anchorPose.orientation.x, vr.anchorPose.orientation.y,
+                vr.anchorPose.orientation.z, vr.anchorPose.orientation.w,
+                vr.worldOffset.x, vr.worldOffset.y, vr.worldOffset.z,
+                (int)savedModelDepth, (int)savedProjectionDepth);
+    }
 
     for (eye = 0; eye < VR_EYE_COUNT; eye++)
     {
@@ -1636,6 +1821,19 @@ static bool32 vrRenderEyes(XrTime displayTime)
         vrPoseToViewMatrix(views[eye].pose, VR_WORLD_SCALE, eyeView);
         vrMatMul(eyeView, anchorModel, vr.eyeViewMatrix);
         vr.eyeFov = views[eye].fov;
+        vr.debugEye = (sdword)eye;
+        if (vr.frameCount % VR_DEBUG_INTERVAL == 1)
+        {
+            SDL_Log("VRDBG EYE frame=%u eye=%u pos=(%.4f %.4f %.4f) "
+                    "q=(%.4f %.4f %.4f %.4f) relT=(%.2f %.2f %.2f) det=%.5f",
+                    (unsigned)vr.frameCount, (unsigned)eye,
+                    views[eye].pose.position.x, views[eye].pose.position.y,
+                    views[eye].pose.position.z, views[eye].pose.orientation.x,
+                    views[eye].pose.orientation.y, views[eye].pose.orientation.z,
+                    views[eye].pose.orientation.w, vr.eyeViewMatrix[12],
+                    vr.eyeViewMatrix[13], vr.eyeViewMatrix[14],
+                    vrDebugRotationDeterminant(vr.eyeViewMatrix));
+        }
 
         glViewport(0, 0, vr.eyeWidth, vr.eyeHeight);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1645,6 +1843,7 @@ static bool32 vrRenderEyes(XrTime displayTime)
         rndMainViewRenderFunction(mrCamera);
         vrWorldDrawOverlays();                              //rays, rings, move disc
         vr.eyeActive = FALSE;
+        vr.debugEye = -1;
         glFlush();
 
         vrBlitEye(eye, imageIndex);
@@ -1659,8 +1858,38 @@ static bool32 vrRenderEyes(XrTime displayTime)
         vr.projViews[eye].subImage.imageRect.extent.height = vr.eyeHeight;
     }
 
+    {
+        GLint endModelDepth = 0, endProjectionDepth = 0;
+
+        glGetIntegerv(GL_MODELVIEW_STACK_DEPTH, &endModelDepth);
+        glGetIntegerv(GL_PROJECTION_STACK_DEPTH, &endProjectionDepth);
+        if (vr.frameCount % VR_DEBUG_INTERVAL == 1
+            || endModelDepth != savedModelDepth || endProjectionDepth != savedProjectionDepth)
+        {
+            SDL_Log("VRDBG GL frame=%u eye-pass stacks before=%d/%d after=%d/%d "
+                    "error=0x%x",
+                    (unsigned)vr.frameCount, (int)savedModelDepth,
+                    (int)savedProjectionDepth, (int)endModelDepth,
+                    (int)endProjectionDepth, (unsigned)glGetError());
+        }
+    }
+
+    /* The eye passes render through the game's global fixed-function
+       context. Restore both actual GL state and the globals so no head pose
+       can leak into the next mono frame copied to the wrist quad. */
+    glMatrixMode(GL_PROJECTION);
+    glLoadMatrixf(savedGlProjection);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadMatrixf(savedGlModelView);
+    glMatrixMode((GLenum)savedMatrixMode);
     glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
-    if (hadScissor) glEnable(GL_SCISSOR_TEST);
+    if (hadScissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+    rndLightingEnable(hadLighting);
+    rndTextureEnable(hadTexture);
+    if (hadFog) glEnable(GL_FOG); else glDisable(GL_FOG);
+    if (hadDepth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (hadBlend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    if (hadCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
     memcpy((void*)&rndCameraMatrix, savedCameraMatrix, sizeof(savedCameraMatrix));
     memcpy((void*)&rndProjectionMatrix, savedProjectionMatrix, sizeof(savedProjectionMatrix));
 
@@ -1674,10 +1903,21 @@ static bool32 vrRenderEyes(XrTime displayTime)
 
 bool32 vrInit(sdword width, sdword height)
 {
+    sdword pass, kind;
+
     memset(&vr, 0, sizeof(vr));
     vr.width = width;
     vr.height = height;
     vr.quadWidth = VR_SCREEN_WIDTH;
+    vr.debugEye = -1;
+    for (pass = 0; pass < 3; pass++)
+    {
+        vr.debugPassFrame[pass] = (udword)-1;
+        for (kind = 0; kind < 2; kind++)
+        {
+            vr.debugObjectFrame[pass][kind] = (udword)-1;
+        }
+    }
     vr.state = XR_SESSION_STATE_UNKNOWN;
 
     if (!vrLoadRawGles() || !vrInitLoader() || !vrCreateInstance() || !vrCreateSession()
