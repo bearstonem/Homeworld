@@ -29,6 +29,10 @@ void vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], boo
 /* TRUE when the given hand's ray currently points at a targetable object */
 bool32 vrWorldHandHasTarget(sdword hand);
 
+/* Clip the drawn ray at this distance (metres) - set when the pointer is
+   on the wrist panel so the beam visually ends at the panel surface. */
+void vrWorldSetRayLimit(sdword hand, real32 metres);
+
 /* Selection: click select the hovered ship of this hand (additive with
    shift semantics when additive is TRUE). */
 void vrWorldSelectClick(sdword hand, bool32 additive);

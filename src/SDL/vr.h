@@ -42,6 +42,10 @@ bool32 vrEyeProjection(real32 zNear, real32 zFar);
    so the game's own lookat applies on top of it. */
 void vrEyeApplyView(void);
 
+/* TRUE while a per-eye world render pass is running. Frame statistics
+   (AutoLOD polygon counts etc.) must only accumulate in the mono pass. */
+bool32 vrEyePassActive(void);
+
 #endif /* HW_ENABLE_VR */
 
 #endif

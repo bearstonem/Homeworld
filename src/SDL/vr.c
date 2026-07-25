@@ -138,6 +138,7 @@ typedef struct {
     sdword       pointerX, pointerY;
     bool32       pointerValid;
     bool32       worldInteractive;  /* game world exists; native 3D interaction on */
+    real32       panelHitT;         /* metres to the panel along the pointer ray */
     sdword       activeHand;
     real32       moveHeight;        /* metres of vertical offset in a move order */
     bool32       panelHidden;       /* wrist panel toggled off in-game */
@@ -862,6 +863,7 @@ static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
 
     *px = (sdword)(u * (real32)vr.width);
     *py = (sdword)(v * (real32)vr.height);
+    vr.panelHitT = t;                                       //ray clip distance, metres
     return TRUE;
 }
 
@@ -1124,13 +1126,25 @@ static void vrUpdateInput(XrTime time)
         && !(vr.worldInteractive && !vrWorldManagerActive()
              && (vrWorldHandHasTarget(vr.activeHand) || vr.panelHidden)))
     {
-        if (vrPointerFromHand(VR_HAND_RIGHT, time, &px, &py)
-            || vrPointerFromHand(VR_HAND_LEFT, time, &px, &py))
+        uword pHand = VR_HAND_RIGHT;
+        bool32 hit = vrPointerFromHand(VR_HAND_RIGHT, time, &px, &py);
+
+        if (!hit)
+        {
+            pHand = VR_HAND_LEFT;
+            hit = vrPointerFromHand(VR_HAND_LEFT, time, &px, &py);
+        }
+        if (hit)
         {
             vr.pointerX = px;
             vr.pointerY = py;
             vr.pointerValid = TRUE;
             SDL_WarpMouseInWindow(sdlwindow, (int)px, (int)py);
+            if (vr.worldInteractive)
+            {
+                /* end the drawn beam at the panel surface */
+                vrWorldSetRayLimit((sdword)pHand, vr.panelHitT);
+            }
         }
         else
         {
@@ -1447,6 +1461,11 @@ void vrEyeApplyView(void)
     {
         glMultMatrixf(vr.eyeViewMatrix);
     }
+}
+
+bool32 vrEyePassActive(void)
+{
+    return vr.eyeActive;
 }
 
 static bool32 vrCreateStereoSwapchains(void)

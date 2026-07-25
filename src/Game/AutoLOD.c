@@ -209,6 +209,18 @@ void alodSetPolys(udword polys)
 ----------------------------------------------------------------------------*/
 void alodIncPolys(udword polys)
 {
+#ifdef HW_ENABLE_VR
+    /* the VR eye passes re-render the world; only the mono pass may feed
+       the poly budget or auto-LOD oscillates between detail levels */
+    {
+        extern bool32 vrEyePassActive(void);
+
+        if (vrEyePassActive())
+        {
+            return;
+        }
+    }
+#endif
     if (alodEnabled)
     {
         alodNumPolys += polys;

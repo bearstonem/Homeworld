@@ -57,6 +57,7 @@ typedef struct {
     vector  dir;                    /* unit direction   */
     SpaceObjRotImpTarg *hover;      /* object under this ray, if any */
     real32  hoverT;                 /* ray parameter of the hover hit */
+    real32  limitT;                 /* draw clip (panel hit), 0 = none */
 } vrwray;
 
 static struct {
@@ -313,6 +314,7 @@ void vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], boo
 
     ray->valid = valid && vrw.worldValid;
     ray->hover = NULL;
+    ray->limitT = 0.0f;
     if (!ray->valid)
     {
         return;
@@ -349,6 +351,11 @@ void vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], boo
 bool32 vrWorldHandHasTarget(sdword hand)
 {
     return vrw.ray[hand].valid && vrw.ray[hand].hover != NULL;
+}
+
+void vrWorldSetRayLimit(sdword hand, real32 metres)
+{
+    vrw.ray[hand].limitT = metres * vrw.scale;
 }
 
 /*-----------------------------------------------------------------------------
@@ -735,7 +742,8 @@ void vrWorldDrawOverlays(void)
         {
             continue;
         }
-        length = (ray->hover != NULL) ? ray->hoverT : (2.5f * vrw.scale);
+        length = (ray->hover != NULL) ? ray->hoverT
+               : (ray->limitT > 0.0f) ? ray->limitT : (2.5f * vrw.scale);
         end.x = ray->origin.x + ray->dir.x * length;
         end.y = ray->origin.y + ray->dir.y * length;
         end.z = ray->origin.z + ray->dir.z * length;
