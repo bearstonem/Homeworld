@@ -78,6 +78,10 @@
 #include "UnivUpdate.h"
 #include "utility.h"
 
+#ifdef HW_ENABLE_VR
+#include "vr.h"
+#endif
+
 #ifdef _WIN32
     #include <windows.h>
 #endif
@@ -5418,6 +5422,23 @@ void mrRegionDraw(regionhandle reg)
 
     if ((!mrRenderMainScreen) || nisBlackFade == 1.0f)
     {
+#ifdef HW_ENABLE_VR
+        //the per-eye world renders overwrite the window framebuffer that
+        //becomes the VR UI quad, and with the main view suppressed nothing
+        //else re-establishes it - a full-screen manager or NIS card would be
+        //composited over the last eye's leftover world render
+        if (vrActive())
+        {
+            GLboolean hadScissor = glIsEnabled(GL_SCISSOR_TEST);
+
+            glDisable(GL_SCISSOR_TEST);
+            glClear(GL_COLOR_BUFFER_BIT);
+            if (hadScissor)
+            {
+                glEnable(GL_SCISSOR_TEST);
+            }
+        }
+#endif
         if (nisIsRunning && nisFullyScissored && rndScissorEnabled)
         {
             glEnable(GL_SCISSOR_TEST);

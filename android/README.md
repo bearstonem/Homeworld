@@ -88,10 +88,62 @@ developer mode, connect via adb, then install/push as above.
 
 The `-Dvr=true` meson option builds an immersive Quest variant: the game
 compiles its desktop GL 1.x path against [gl4es] (GL over ES2) on an
-ES 3.0 context, and each frame is presented on a large virtual screen
-via an OpenXR quad layer (see `src/SDL/vr.c`). A Bluetooth mouse/keyboard
-paired with the headset can control the game; mapping the Touch
-controllers to the cursor is a future step, as is true stereo rendering.
+ES 3.0 context. The game world is rendered in tracked stereo, while menus
+and managers are presented through an OpenXR quad layer (see
+`src/SDL/vr.c`). Bluetooth mouse/keyboard input remains available alongside
+the Touch controllers.
+
+Touch controls in the 3D world:
+
+- Aim at one of your ships and pull either trigger to select it. Hold the
+  left grip for additive/toggle selection. A quick second trigger pull
+  selects visible ships of the same type.
+- Pull a trigger on empty space, sweep the ray across ships, then release
+  to commit the group selection. The sweep is a brush, not a hairline: its
+  capture radius widens with distance the way a screen-space band box does
+  with depth, and it takes every ship the beam passes over.
+- Hold A/X to preview a context order and release to issue it: attack an
+  enemy, harvest a resource, dock at one of your ships, or move when aimed
+  at empty space. During a move preview, right-stick Y changes height and
+  B/Y cancels.
+- To fly a route rather than a straight line, hold the trigger during a move
+  preview and sweep: the swept points are smoothed into a Catmull-Rom spline
+  and resampled by arc length into evenly spaced waypoints, drawn as a curve
+  with a ring on each. Releasing A/X sends the selection along them, ring by
+  ring. Right-stick Y still sets height while drawing, so a route can climb
+  and dive. Homeworld has no waypoint order of its own, so each leg is issued
+  as a plain move once the previous one is reached.
+- Ray colors show the pending action; short controller pulses confirm
+  target acquisition, selection, and issued orders.
+- The left stick orbits and right-stick Y zooms; squeezing both grips at once
+  pinches the hologram to zoom and rotate it. Hold the right grip to turn the
+  right stick into a fleet traversal control: flick it left or right to step
+  the camera through your ships. The grip is required so that cycling cannot
+  fire by accident while zooming, and it suppresses zoom for as long as it is
+  held. Left-stick click focuses the selection; right-stick click opens
+  Sensors, and B/Y closes it again.
+- Ships render at true physical scale. Homeworld's N-LIPS scaling, which
+  inflates a ship in proportion to its camera depth to keep small craft
+  readable on a flat monitor, is disabled in VR: nothing cancels it through
+  the fixed headset projection, so it only made ships swell as the fleet was
+  pushed away.
+- Raise the left controller to use the wrist panel. The nearer of the panel
+  and 3D target receives input, and the pointer remains captured until the
+  button is released. Left-grip+B/Y hides or shows the wrist panel.
+- A control reference card rides beside the left wrist panel, and a fleet
+  status readout (resource units, ship and selection counts, sensors level,
+  class totals) rides the right wrist. Both are their own compositor layers
+  drawn from live game state, and both follow the wrist panel's visibility.
+- Right-grip+B/Y opens the Build Manager, and an unmodified B/Y closes any
+  open manager - Construction, Launch, Research, Trade or Sensors. Sensors is
+  full-screen and suppresses the main view like the rest, so it is treated as
+  a manager too rather than being squeezed onto the wrist panel. Manager
+  screens are dense 2D UI, so they are presented as a
+  panel a fixed readable distance in front of you, leaning toward the ship
+  they concern but clamped into a cone around your gaze. The panel is the
+  only way back out of a manager, so input only becomes modal once the
+  compositor has accepted a frame containing it, and a manager that never
+  becomes visible is closed automatically.
 
 [gl4es]: https://github.com/ptitSeb/gl4es
 

@@ -79,6 +79,7 @@
 #include <stdlib.h>
 #include "gl4esinit.h"
 #include "vr.h"
+#include "vrworld.h"
 #endif
 
 #if defined _MSC_VER
@@ -2429,6 +2430,14 @@ void rndMainViewRenderFunction(Camera *camera)
         real32 eye[3] = {camera->eyeposition.x, camera->eyeposition.y, camera->eyeposition.z};
         real32 lookat[3] = {camera->lookatpoint.x, camera->lookatpoint.y, camera->lookatpoint.z};
 
+        //hand the VR layer the pure main-view camera while it still is one:
+        //ShipView and the sensors manager overwrite rndCameraMatrix with
+        //their own cameras later in the frame, and the eye passes compose
+        //the head pose into it
+        if (!vrEyePassActive())
+        {
+            vrWorldCaptureGameCamera((real32 const*)&rndCameraMatrix);
+        }
         vrDebugRenderPass((real32 const*)&rndCameraMatrix,
                           (real32 const*)&rndProjectionMatrix, eye, lookat);
     }
@@ -2658,7 +2667,23 @@ dontdraw:
                                     }
 #endif //RND_SCALECAP_TWEAK
 
-                                    if (shipStaticInfo->scaleCap != 0.0f)
+                                    if (shipStaticInfo->scaleCap != 0.0f
+#ifdef HW_ENABLE_VR
+                                        //N-LIPS inflates a ship in proportion
+                                        //to its camera depth so that
+                                        //perspective shrinkage cancels out and
+                                        //small craft keep a readable size on a
+                                        //flat screen. A VR hologram is valued
+                                        //for honest physical scale instead, and
+                                        //through the fixed headset projection
+                                        //the inflation wins outright: ships
+                                        //swell as the fleet is pushed away.
+                                        //Leaving magnitudeSquared at 1.0 also
+                                        //keeps effects, particles and selection
+                                        //circles matching the true hull.
+                                        && !vrActive()
+#endif
+                                        )
                                     {                   //if there's a scaling cap
                                         real32 scaleFactor;
                                         glEnable(GL_RESCALE_NORMAL);

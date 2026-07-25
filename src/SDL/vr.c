@@ -42,12 +42,46 @@
 #define VR_GL_COLOR_ATTACHMENT0  0x8CE0
 #define VR_GL_COLOR_BUFFER_BIT   0x00004000
 #define VR_GL_NEAREST            0x2600
+#define VR_GL_LINEAR             0x2601
 
 #define VR_MAX_SWAPCHAIN_IMAGES 8
 
 /* Virtual screen: ~2m away, 4:3 like the game's default resolution */
 #define VR_SCREEN_DISTANCE  2.0f
 #define VR_SCREEN_WIDTH     2.4f
+
+/* Full-screen managers (Build/Launch/Research/Trade) are dense 2D screens
+   and the panel is the only way back out of one, so it is placed relative
+   to the head at a fixed readable size, biased toward the ship it concerns
+   but always well inside the field of view. */
+#define VR_MANAGER_DISTANCE      1.80f  /* metres in front of the head      */
+#define VR_MANAGER_WIDTH         2.20f  /* ~63 degrees wide: desktop-legible*/
+#define VR_MANAGER_CONE_COS      0.940f /* open within 20 deg of the gaze:  */
+#define VR_MANAGER_CONE_SIN      0.342f /* far edge still inside the FOV    */
+#define VR_MANAGER_LOST_COS      0.64f  /* >~50 deg off gaze: glide back    */
+#define VR_MANAGER_HOME_COS      0.985f /* settled in front again           */
+#define VR_MANAGER_PITCH_SIN     0.259f /* hold within 15 deg of eye level  */
+#define VR_MANAGER_FOLLOW_ALPHA  0.12f  /* ~0.3s glide at 72Hz             */
+#define VR_MANAGER_PENDING_FRAMES 200   /* escape hatch if never presentable*/
+
+/* Wrist cards: extra quad layers with content this file draws itself, rather
+   than a copy of the game's framebuffer. The controls reference rides
+   outboard of the left wrist panel; the status readout rides the right wrist.
+   Content is laid out in the game's logical UI pixels (prim2d/font space) and
+   blitted out of a scratch corner of the window framebuffer. */
+#define VR_CARD_CONTROLS   0
+#define VR_CARD_STATUS     1
+#define VR_CARD_COUNT      2
+
+#define VR_CARD_CONTROLS_WIN_W   330    /* layout size, logical UI pixels */
+#define VR_CARD_CONTROLS_WIN_H   540
+#define VR_CARD_CONTROLS_WIDTH   0.24f  /* physical width, metres */
+#define VR_CARD_STATUS_WIN_W     300
+#define VR_CARD_STATUS_WIN_H     200
+#define VR_CARD_STATUS_WIDTH     0.22f
+#define VR_CARD_TEX_SCALE        2      /* swapchain px per logical UI px */
+#define VR_CARD_GAP              0.02f  /* metres between panel and card */
+#define VR_CARD_CONTROLS_SIDE   -1.0f   /* which side of the wrist panel */
 
 #define VR_HAND_LEFT   0
 #define VR_HAND_RIGHT  1
@@ -57,6 +91,20 @@
 
 #define VR_DEBUG_INTERVAL 120
 
+#define VR_GESTURE_NONE          0
+#define VR_SELECT_PANEL          1
+#define VR_SELECT_CLICK          2
+#define VR_SELECT_SWEEP          3
+#define VR_SELECT_PATH           4
+#define VR_CONTEXT_PANEL         1
+#define VR_CONTEXT_ORDER         2
+#define VR_CONTEXT_MOVE          3
+#define VR_CONTEXT_KEY           4
+
+#define VR_DOUBLE_TRIGGER_NS 350000000LL
+#define VR_MOVE_HEIGHT_RATE  0.30f
+#define VR_MOVE_HEIGHT_LIMIT 2.50f
+
 /* How many game-world units one real-world metre of head movement is
    worth. Homeworld ships are hundreds of units long; at 1000 the fleet
    reads as a room-sized hologram. */
@@ -65,7 +113,14 @@
 extern SDL_Window *sdlwindow;
 
 #include "Camera.h"
+#include "font.h"
+#include "FontReg.h"
+#include "main.h"
+#include "prim2d.h"
 #include "render.h"
+#include "Select.h"
+#include "ShipSelect.h"
+#include "Universe.h"
 extern void rndMainViewRenderFunction(Camera *camera);
 extern Camera *mrCamera;
 extern bool32 gameIsRunning;
@@ -83,6 +138,30 @@ typedef void (*rawGlBlitFramebuffer_t)(int srcX0, int srcY0, int srcX1, int srcY
                                        int dstX0, int dstY0, int dstX1, int dstY1,
                                        unsigned int mask, unsigned int filter);
 typedef void (*rawGlDeleteFramebuffers_t)(int n, unsigned int const* ids);
+
+/* Manager presentation is tracked separately from the game's own manager
+   state. Modal input suppression is gated on VISIBLE - reached only once the
+   compositor has accepted a frame containing a valid manager panel - so a
+   presentation failure can never turn into a trap the user has to quit out
+   of. */
+typedef enum
+{
+    VR_MGR_HIDDEN = 0,
+    VR_MGR_PENDING,                 /* open, no presentable panel yet */
+    VR_MGR_VISIBLE                  /* a valid panel pose was submitted */
+} vrmanagerstate;
+
+typedef struct {
+    XrSwapchain  swapchain;
+    uint32_t     imageCount;
+    XrSwapchainImageOpenGLESKHR images[VR_MAX_SWAPCHAIN_IMAGES];
+    sdword       winWidth, winHeight;   /* layout size, logical UI pixels */
+    sdword       texWidth, texHeight;   /* swapchain size */
+    real32       widthMetres;
+    XrPosef      pose;
+    bool32       poseValid;
+    bool32       failed;                /* swapchain creation gave up */
+} vrcard;
 
 typedef struct {
     XrInstance   instance;
@@ -112,6 +191,8 @@ typedef struct {
     bool32       active;
     udword       frameCount;
     udword       errorsLogged;
+    bool32       inFrame;          /* guards re-entry through rndFlush */
+    udword       reentryLogged;
     sdword       debugEye;         /* -1 mono, 0 left eye, 1 right eye */
     udword       debugPassFrame[3];
     udword       debugObjectFrame[3][2]; /* first ship/asteroid in each pass */
@@ -128,27 +209,45 @@ typedef struct {
                                        (chord left  -> R)                       */
     XrAction     gripAction;        /* left grip    -> Shift, right grip = chord */
     XrAction     gripPoseAction;
+    XrAction     hapticAction;
     XrPath       handPath[VR_HAND_COUNT];
     XrSpace      aimSpace[VR_HAND_COUNT];
     XrSpace      gripSpace[VR_HAND_COUNT];
     real32       quadWidth;         /* current screen width in metres */
-    bool32       prevSelect;
-    bool32       prevContext;
-    bool32       prevBack;
+    bool32       prevSelect[VR_HAND_COUNT];
+    bool32       prevContext[VR_HAND_COUNT];
+    bool32       prevBack[VR_HAND_COUNT];
     bool32       prevGripLeft;
     bool32       prevStickClick[VR_HAND_COUNT];
-    sdword       contextKey;        /* key sent at press, released on release (0 = mouse) */
-    sdword       backKey;
+    sdword       selectGestureHand;
+    sdword       selectGestureMode;
+    bool32       selectAdditive;
+    XrTime       lastSelectTime[VR_HAND_COUNT];
+    sdword       contextGestureHand;
+    sdword       contextGestureMode;
+    sdword       contextKey;        /* key held by an active context chord */
+    sdword       backKey[VR_HAND_COUNT];
     sdword       stickClickKey[VR_HAND_COUNT];
     bool32       stickRotating;     /* left stick currently orbiting the camera */
     real32       wheelAccum;
     sdword       pointerX, pointerY;
     bool32       pointerValid;
+    sdword       pointerHand;
     bool32       worldInteractive;  /* game world exists; native 3D interaction on */
     real32       panelHitT;         /* metres to the panel along the pointer ray */
-    sdword       activeHand;
     real32       moveHeight;        /* metres of vertical offset in a move order */
+    XrTime       lastInputTime;
     bool32       panelHidden;       /* wrist panel toggled off in-game */
+    vrcard       card[VR_CARD_COUNT];
+    fonthandle   cardFont;
+    bool32       cardFontTried;
+    bool32       cardOverflowLogged;
+    vrmanagerstate managerState;
+    udword       managerFrames;     /* frames since the manager opened */
+    udword       managerPendingFrames; /* consecutive frames not presentable */
+    bool32       managerPlaced;     /* panel pose established in space */
+    bool32       managerPoseValid;  /* this frame's pose is submittable */
+    bool32       managerFollowing;  /* panel gliding back into view */
     bool32       grabValid[VR_HAND_COUNT];
     XrVector3f   grabPrev[VR_HAND_COUNT];
     bool32       pinchValid;
@@ -454,7 +553,7 @@ static bool32 vrCreateActions(void)
 {
     XrActionSetCreateInfo setInfo;
     XrActionCreateInfo actionInfo;
-    XrActionSuggestedBinding bindings[16];
+    XrActionSuggestedBinding bindings[18];
     XrInteractionProfileSuggestedBinding suggested;
     XrSessionActionSetsAttachInfo attachInfo;
     XrActionSpaceCreateInfo spaceInfo;
@@ -511,8 +610,13 @@ static bool32 vrCreateActions(void)
     strcpy(actionInfo.localizedActionName, "Grip pose");
     VR_CHECK("xrCreateAction grip_pose", xrCreateAction(vr.actionSet, &actionInfo, &vr.gripPoseAction));
 
+    actionInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    strcpy(actionInfo.actionName, "haptic");
+    strcpy(actionInfo.localizedActionName, "Haptic feedback");
+    VR_CHECK("xrCreateAction haptic", xrCreateAction(vr.actionSet, &actionInfo, &vr.hapticAction));
+
     {
-        struct { XrAction action; char const* path; } layout[16] = {
+        struct { XrAction action; char const* path; } layout[18] = {
             { vr.aimAction,        "/user/hand/left/input/aim/pose" },
             { vr.aimAction,        "/user/hand/right/input/aim/pose" },
             { vr.selectAction,     "/user/hand/left/input/trigger/value" },
@@ -529,8 +633,10 @@ static bool32 vrCreateActions(void)
             { vr.gripAction,       "/user/hand/right/input/squeeze/value" },
             { vr.gripPoseAction,   "/user/hand/left/input/grip/pose" },
             { vr.gripPoseAction,   "/user/hand/right/input/grip/pose" },
+            { vr.hapticAction,     "/user/hand/left/output/haptic" },
+            { vr.hapticAction,     "/user/hand/right/output/haptic" },
         };
-        for (i = 0; i < 16; i++)
+        for (i = 0; i < 18; i++)
         {
             bindings[i].action = layout[i].action;
             xrStringToPath(vr.instance, layout[i].path, &bindings[i].binding);
@@ -541,7 +647,7 @@ static bool32 vrCreateActions(void)
     memset(&suggested, 0, sizeof(suggested));
     suggested.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
     suggested.interactionProfile = profilePath;
-    suggested.countSuggestedBindings = 16;
+    suggested.countSuggestedBindings = 18;
     suggested.suggestedBindings = bindings;
     VR_CHECK("xrSuggestInteractionProfileBindings",
              xrSuggestInteractionProfileBindings(vr.instance, &suggested));
@@ -662,28 +768,27 @@ static void vrLookOrientation(XrVector3f f, XrQuaternionf* out)
 
 #define VR_WRIST_PANEL_WIDTH 0.32f
 
-/* In-game the screen becomes a small panel riding the left wrist */
-static bool32 vrUpdateWristPanel(XrTime displayTime)
+/* Watch-face pose for a hand: a panel riding just above the controller,
+   tilted so it faces the user when the arm is raised naturally. Both the
+   left wrist panel and the wrist cards are placed from this. */
+static bool32 vrWristPose(uword hand, XrTime displayTime, XrPosef* out)
 {
-    XrSpaceLocation grip, head;
-    XrVector3f offset = {0.0f, 0.06f, -0.05f}, worldOffset, toPanel;
-    real32 mag;
+    XrSpaceLocation grip;
+    XrVector3f offset, worldOffset;
+    XrQuaternionf tilt = {0.0f, -0.7071068f, 0.7071068f, 0.0f};  /* +90degX then 180degZ roll */
+    XrQuaternionf q;
 
     memset(&grip, 0, sizeof(grip));
     grip.type = XR_TYPE_SPACE_LOCATION;
-    memset(&head, 0, sizeof(head));
-    head.type = XR_TYPE_SPACE_LOCATION;
     /* the aim pose is used (grip pose returns no tracking on this runtime) */
-    if (XR_FAILED(xrLocateSpace(vr.aimSpace[VR_HAND_LEFT], vr.space, displayTime, &grip))
+    if (XR_FAILED(xrLocateSpace(vr.aimSpace[hand], vr.space, displayTime, &grip))
         || !(grip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
-        || !(grip.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)
-        || XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &head))
-        || !(head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+        || !(grip.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
     {
         if (vr.frameCount % 3600 == 1)
         {
-            SDL_Log("VR: wrist panel: left aim not tracked (flags 0x%x)",
-                    (unsigned)grip.locationFlags);
+            SDL_Log("VR: wrist pose: hand %u aim not tracked (flags 0x%x)",
+                    (unsigned)hand, (unsigned)grip.locationFlags);
         }
         return FALSE;
     }
@@ -692,27 +797,298 @@ static bool32 vrUpdateWristPanel(XrTime displayTime)
     offset.y = 0.10f;                                       //above the controller
     offset.z = 0.06f;                                       //slightly toward the wrist
     vrQuatRotate(grip.pose.orientation, offset, &worldOffset);
-    vr.quadPose.position.x = grip.pose.position.x + worldOffset.x;
-    vr.quadPose.position.y = grip.pose.position.y + worldOffset.y;
-    vr.quadPose.position.z = grip.pose.position.z + worldOffset.z;
+    out->position.x = grip.pose.position.x + worldOffset.x;
+    out->position.y = grip.pose.position.y + worldOffset.y;
+    out->position.z = grip.pose.position.z + worldOffset.z;
 
-    /* watch-face orientation: locked to the wrist, tilted so the panel
-       faces the user when the arm is raised naturally */
+    q = grip.pose.orientation;
+    out->orientation.w = q.w * tilt.w - q.x * tilt.x - q.y * tilt.y - q.z * tilt.z;
+    out->orientation.x = q.w * tilt.x + q.x * tilt.w + q.y * tilt.z - q.z * tilt.y;
+    out->orientation.y = q.w * tilt.y - q.x * tilt.z + q.y * tilt.w + q.z * tilt.x;
+    out->orientation.z = q.w * tilt.z + q.x * tilt.y - q.y * tilt.x + q.z * tilt.w;
+    return TRUE;
+}
+
+/* In-game the screen becomes a small panel riding the left wrist */
+static bool32 vrUpdateWristPanel(XrTime displayTime)
+{
+    XrPosef pose;
+
+    if (!vrWristPose(VR_HAND_LEFT, displayTime, &pose))
     {
-        XrQuaternionf tilt = {0.0f, -0.7071068f, 0.7071068f, 0.0f};  /* +90degX then 180degZ roll */
-        XrQuaternionf q = grip.pose.orientation;
-
-        vr.quadPose.orientation.w = q.w * tilt.w - q.x * tilt.x - q.y * tilt.y - q.z * tilt.z;
-        vr.quadPose.orientation.x = q.w * tilt.x + q.x * tilt.w + q.y * tilt.z - q.z * tilt.y;
-        vr.quadPose.orientation.y = q.w * tilt.y - q.x * tilt.z + q.y * tilt.w + q.z * tilt.x;
-        vr.quadPose.orientation.z = q.w * tilt.z + q.x * tilt.y - q.y * tilt.x + q.z * tilt.w;
+        return FALSE;
     }
-    (void)head;
-    (void)toPanel;
-    (void)mag;
+    vr.quadPose = pose;
     vr.quadWidth = VR_WRIST_PANEL_WIDTH;
     vr.quadPlaced = TRUE;
     return TRUE;
+}
+
+static void vrPushKey(SDL_Keycode sym, SDL_Scancode scancode, bool32 down);
+
+/* also rejects NaN: neither comparison holds for it */
+static bool32 vrFinite(real32 v)
+{
+    return v > -1.0e9f && v < 1.0e9f;
+}
+
+/* A pose the compositor will accept: finite position, unit quaternion. */
+static bool32 vrPoseSubmittable(XrPosef const* pose)
+{
+    real32 norm = pose->orientation.x * pose->orientation.x
+                + pose->orientation.y * pose->orientation.y
+                + pose->orientation.z * pose->orientation.z
+                + pose->orientation.w * pose->orientation.w;
+
+    return vrFinite(pose->position.x) && vrFinite(pose->position.y)
+        && vrFinite(pose->position.z)
+        && norm > 0.99f && norm < 1.01f;
+}
+
+/* Hold a direction within VR_MANAGER_PITCH_SIN of eye level so a manager
+   never opens at the user's feet or above their head. */
+static void vrClampPitch(XrVector3f* dir, XrVector3f fallback)
+{
+    real32 limit = VR_MANAGER_PITCH_SIN;
+    real32 horizontal, want, wantHorizontal, rescale;
+
+    if (dir->y <= limit && dir->y >= -limit)
+    {
+        return;
+    }
+    want = dir->y > 0.0f ? limit : -limit;
+    wantHorizontal = sqrtf(1.0f - want * want);
+    horizontal = sqrtf(dir->x * dir->x + dir->z * dir->z);
+    if (horizontal < 1e-4f)
+    {                                                       //straight up/down
+        horizontal = sqrtf(fallback.x * fallback.x + fallback.z * fallback.z);
+        if (horizontal < 1e-4f)
+        {
+            dir->x = 0.0f;
+            dir->y = want;
+            dir->z = -wantHorizontal;
+            return;
+        }
+        dir->x = fallback.x;
+        dir->z = fallback.z;
+    }
+    rescale = wantHorizontal / horizontal;
+    dir->x *= rescale;
+    dir->z *= rescale;
+    dir->y = want;
+}
+
+/* Panel pose VR_MANAGER_DISTANCE along dir from the head, facing back at it.
+   Returns FALSE when the result is not submittable. */
+static bool32 vrManagerPoseAlong(XrVector3f headPos, XrVector3f dir, XrPosef* out)
+{
+    real32 mag = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+
+    if (!(mag > 1e-4f) || !vrFinite(mag))
+    {
+        return FALSE;
+    }
+    dir.x /= mag;
+    dir.y /= mag;
+    dir.z /= mag;
+    out->position.x = headPos.x + dir.x * VR_MANAGER_DISTANCE;
+    out->position.y = headPos.y + dir.y * VR_MANAGER_DISTANCE;
+    out->position.z = headPos.z + dir.z * VR_MANAGER_DISTANCE;
+    vrLookOrientation(dir, &out->orientation);
+    return vrPoseSubmittable(out);
+}
+
+/* Manager panel placement. On the opening frame the panel is aimed at the
+   ship the manager concerns, clamped into a cone around the current gaze so
+   it is always substantially in view. After that it stays put in space (it
+   is a screen being read and clicked) and only glides back if the user turns
+   well away from it. Returns TRUE once a submittable pose exists. */
+static bool32 vrUpdateManagerPanel(XrTime displayTime)
+{
+    XrSpaceLocation head;
+    XrVector3f gaze = {0.0f, 0.0f, -1.0f};
+    XrVector3f forward, desired, toPanel;
+    XrPosef pose;
+    real32 mag, dot;
+
+    memset(&head, 0, sizeof(head));
+    head.type = XR_TYPE_SPACE_LOCATION;
+    if (XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &head))
+        || !(head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+        || !(head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+    {
+        if (vr.managerFrames % VR_DEBUG_INTERVAL == 1)
+        {
+            SDL_Log("VR: manager '%s' panel: head not located (flags 0x%x)",
+                    vrWorldManagerName(), (unsigned)head.locationFlags);
+        }
+        return FALSE;
+    }
+    vrQuatRotate(head.pose.orientation, gaze, &forward);
+    vr.quadWidth = VR_MANAGER_WIDTH;
+
+    if (!vr.managerPlaced)
+    {
+        real32 shipPos[3], shipRadius = 0.0f;
+        bool32 biased = FALSE;
+
+        desired = forward;
+        if (vrWorldManagerPanelAnchor(shipPos, &shipRadius))
+        {
+            XrVector3f toShip;
+            real32 distance;
+
+            toShip.x = shipPos[0] - head.pose.position.x;
+            toShip.y = shipPos[1] - head.pose.position.y;
+            toShip.z = shipPos[2] - head.pose.position.z;
+            distance = sqrtf(toShip.x * toShip.x + toShip.y * toShip.y
+                           + toShip.z * toShip.z);
+            if (distance > 1e-3f && vrFinite(distance))
+            {
+                toShip.x /= distance;
+                toShip.y /= distance;
+                toShip.z /= distance;
+                dot = toShip.x * forward.x + toShip.y * forward.y
+                    + toShip.z * forward.z;
+                if (dot >= VR_MANAGER_CONE_COS)
+                {                                           //already in view
+                    desired = toShip;
+                    biased = TRUE;
+                }
+                else
+                {
+                    /* rotate the gaze exactly to the cone edge, in the
+                       plane containing the ship - the panel leans toward
+                       the ship without ever leaving the field of view */
+                    XrVector3f perp;
+
+                    perp.x = toShip.x - forward.x * dot;
+                    perp.y = toShip.y - forward.y * dot;
+                    perp.z = toShip.z - forward.z * dot;
+                    mag = sqrtf(perp.x * perp.x + perp.y * perp.y
+                              + perp.z * perp.z);
+                    if (mag > 1e-4f)
+                    {
+                        desired.x = forward.x * VR_MANAGER_CONE_COS
+                                  + (perp.x / mag) * VR_MANAGER_CONE_SIN;
+                        desired.y = forward.y * VR_MANAGER_CONE_COS
+                                  + (perp.y / mag) * VR_MANAGER_CONE_SIN;
+                        desired.z = forward.z * VR_MANAGER_CONE_COS
+                                  + (perp.z / mag) * VR_MANAGER_CONE_SIN;
+                        biased = TRUE;
+                    }
+                }
+            }
+        }
+        vrClampPitch(&desired, forward);
+        if (!vrManagerPoseAlong(head.pose.position, desired, &pose))
+        {
+            SDL_Log("VR: manager '%s' panel pose rejected: head=(%.2f %.2f %.2f) "
+                    "dir=(%.3f %.3f %.3f) biased=%d",
+                    vrWorldManagerName(), head.pose.position.x,
+                    head.pose.position.y, head.pose.position.z,
+                    desired.x, desired.y, desired.z, (int)biased);
+            return FALSE;
+        }
+        vr.quadPose = pose;
+        vr.managerPlaced = TRUE;
+        vr.managerFollowing = FALSE;
+        SDL_Log("VR: manager '%s' panel placed at (%.2f %.2f %.2f) "
+                "dir=(%.3f %.3f %.3f) width=%.2f biased=%d shipRadius=%.2f "
+                "camAge=%u frame=%u",
+                vrWorldManagerName(), vr.quadPose.position.x,
+                vr.quadPose.position.y, vr.quadPose.position.z,
+                desired.x, desired.y, desired.z, vr.quadWidth, (int)biased,
+                shipRadius, (unsigned)vrWorldGameCameraAge(),
+                (unsigned)vr.frameCount);
+        return TRUE;
+    }
+
+    /* established: keep the panel where it is, but never let it be lost */
+    toPanel.x = vr.quadPose.position.x - head.pose.position.x;
+    toPanel.y = vr.quadPose.position.y - head.pose.position.y;
+    toPanel.z = vr.quadPose.position.z - head.pose.position.z;
+    mag = sqrtf(toPanel.x * toPanel.x + toPanel.y * toPanel.y
+              + toPanel.z * toPanel.z);
+    if (!(mag > 0.20f) || !vrFinite(mag))
+    {                                                       //walked into it
+        vr.managerPlaced = FALSE;
+        return FALSE;
+    }
+    dot = (forward.x * toPanel.x + forward.y * toPanel.y
+         + forward.z * toPanel.z) / mag;
+    if (dot < VR_MANAGER_LOST_COS)
+    {
+        vr.managerFollowing = TRUE;
+    }
+    if (vr.managerFollowing)
+    {
+        desired = forward;
+        vrClampPitch(&desired, forward);
+        if (vrManagerPoseAlong(head.pose.position, desired, &pose))
+        {
+            real32 const alpha = VR_MANAGER_FOLLOW_ALPHA;
+
+            vr.quadPose.position.x += (pose.position.x - vr.quadPose.position.x) * alpha;
+            vr.quadPose.position.y += (pose.position.y - vr.quadPose.position.y) * alpha;
+            vr.quadPose.position.z += (pose.position.z - vr.quadPose.position.z) * alpha;
+            vrNlerp(vr.quadPose.orientation, pose.orientation, alpha,
+                    &vr.quadPose.orientation);
+        }
+        if (dot > VR_MANAGER_HOME_COS)
+        {
+            vr.managerFollowing = FALSE;
+        }
+    }
+    else
+    {
+        /* re-aim only: the panel turns to face the user as they move
+           around it, without drifting from where it was placed */
+        XrQuaternionf facing;
+        XrVector3f unit;
+
+        unit.x = toPanel.x / mag;
+        unit.y = toPanel.y / mag;
+        unit.z = toPanel.z / mag;
+        vrLookOrientation(unit, &facing);
+        vr.quadPose.orientation = facing;
+    }
+    if (!vrPoseSubmittable(&vr.quadPose))
+    {
+        SDL_Log("VR: manager '%s' panel pose went bad: pos=(%.2f %.2f %.2f) "
+                "q=(%.4f %.4f %.4f %.4f) - re-placing",
+                vrWorldManagerName(), vr.quadPose.position.x,
+                vr.quadPose.position.y, vr.quadPose.position.z,
+                vr.quadPose.orientation.x, vr.quadPose.orientation.y,
+                vr.quadPose.orientation.z, vr.quadPose.orientation.w);
+        vr.managerPlaced = FALSE;
+        return FALSE;
+    }
+    if (vr.managerFrames % VR_DEBUG_INTERVAL == 1)
+    {
+        SDL_Log("VR: manager '%s' panel pos=(%.2f %.2f %.2f) distance=%.2f "
+                "gazeDot=%.3f following=%d state=%d frames=%u",
+                vrWorldManagerName(), vr.quadPose.position.x,
+                vr.quadPose.position.y, vr.quadPose.position.z, mag, dot,
+                (int)vr.managerFollowing, (int)vr.managerState,
+                (unsigned)vr.managerFrames);
+    }
+    return TRUE;
+}
+
+static void vrManagerPanelReset(void)
+{
+    if (vr.managerState != VR_MGR_HIDDEN)
+    {
+        SDL_Log("VR: manager panel closed after %u frames (state=%d)",
+                (unsigned)vr.managerFrames, (int)vr.managerState);
+    }
+    vr.managerState = VR_MGR_HIDDEN;
+    vr.managerFrames = 0;
+    vr.managerPendingFrames = 0;
+    vr.managerPlaced = FALSE;
+    vr.managerPoseValid = FALSE;
+    vr.managerFollowing = FALSE;
 }
 
 static void vrUpdateScreenPose(XrTime displayTime)
@@ -723,41 +1099,58 @@ static void vrUpdateScreenPose(XrTime displayTime)
     XrPosef desired;
     real32 mag, dot;
 
-    if (vr.worldInteractive)
+    if (vr.worldInteractive && vrWorldManagerActive())
     {
-        real32 panelPos[3];
-
-        if (vrWorldManagerPanelAnchor(panelPos))
+        if (vr.managerState == VR_MGR_HIDDEN)
         {
-            /* Build/Launch/Research manager open: the game frame floats
-               beside the ship it concerns, billboarded to the head */
-            XrSpaceLocation head;
-            XrVector3f toPanel;
-            real32 mag;
-
-            vr.quadPose.position.x = panelPos[0];
-            vr.quadPose.position.y = panelPos[1];
-            vr.quadPose.position.z = panelPos[2];
-            memset(&head, 0, sizeof(head));
-            head.type = XR_TYPE_SPACE_LOCATION;
-            if (XR_SUCCEEDED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &head))
-                && (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
-            {
-                toPanel.x = vr.quadPose.position.x - head.pose.position.x;
-                toPanel.y = vr.quadPose.position.y - head.pose.position.y;
-                toPanel.z = vr.quadPose.position.z - head.pose.position.z;
-                mag = sqrtf(toPanel.x * toPanel.x + toPanel.y * toPanel.y + toPanel.z * toPanel.z);
-                if (mag > 1e-4f)
-                {
-                    toPanel.x /= mag; toPanel.y /= mag; toPanel.z /= mag;
-                    vrLookOrientation(toPanel, &vr.quadPose.orientation);
-                }
-            }
-            vr.quadWidth = 0.85f;
+            vr.managerState = VR_MGR_PENDING;
+            vr.managerFrames = 0;
+            vr.managerPendingFrames = 0;
+            vr.managerPlaced = FALSE;
+            vr.managerFollowing = FALSE;
+            SDL_Log("VR: manager '%s' opened: presentation pending, camAge=%u",
+                    vrWorldManagerName(), (unsigned)vrWorldGameCameraAge());
+        }
+        vr.managerFrames++;
+        vr.managerPoseValid = vrUpdateManagerPanel(displayTime);
+        if (vr.managerPoseValid)
+        {
             vr.quadPlaced = TRUE;
+            vr.managerPendingFrames = 0;
             return;
         }
 
+        vr.managerPendingFrames++;
+        if (vr.managerState == VR_MGR_VISIBLE)
+        {
+            /* The panel stopped being presentable - tracking dropout, or a
+               pose that went bad. Hand the world controls straight back:
+               a manager the user cannot see must never also be modal. */
+            SDL_Log("VR: manager '%s' panel no longer presentable at frame %u "
+                    "- input no longer modal", vrWorldManagerName(),
+                    (unsigned)vr.managerFrames);
+            vr.managerState = VR_MGR_PENDING;
+        }
+        if (vr.managerPendingFrames > VR_MANAGER_PENDING_FRAMES)
+        {
+            /* The panel is the only way out of a manager. If one never
+               becomes presentable, close it rather than stranding the user
+               in a screen they can neither see nor dismiss. */
+            SDL_Log("VR: manager '%s' not presentable for %u frames - closing",
+                    vrWorldManagerName(), (unsigned)vr.managerPendingFrames);
+            if (!vrWorldCloseManagers())
+            {
+                vrPushKey(SDLK_ESCAPE, SDL_SCANCODE_ESCAPE, TRUE);
+                vrPushKey(SDLK_ESCAPE, SDL_SCANCODE_ESCAPE, FALSE);
+            }
+            vrManagerPanelReset();
+        }
+        return;
+    }
+
+    vrManagerPanelReset();
+    if (vr.worldInteractive)
+    {
         /* if the controller loses tracking, the panel holds its last wrist
            pose instead of reverting to the big floating screen */
         vrUpdateWristPanel(displayTime);
@@ -827,7 +1220,8 @@ static void vrUpdateScreenPose(XrTime displayTime)
 
 /* Intersect a hand's aim ray with the virtual screen; returns TRUE and the
    game-window pixel coordinates on hit. */
-static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
+static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py,
+                                real32* hitT)
 {
     XrSpaceLocation location;
     XrVector3f origin, forward = {0.0f, 0.0f, -1.0f}, direction, local, localDir;
@@ -870,7 +1264,7 @@ static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
 
     *px = (sdword)(u * (real32)vr.width);
     *py = (sdword)(v * (real32)vr.height);
-    vr.panelHitT = t;                                       //ray clip distance, metres
+    *hitT = t;                                              //ray clip distance, metres
     return TRUE;
 }
 
@@ -902,6 +1296,460 @@ static void vrPushKey(SDL_Keycode sym, SDL_Scancode scancode, bool32 down)
     SDL_PushEvent(&event);
 }
 
+static void vrHapticPulse(uword hand, real32 amplitude, XrDuration duration)
+{
+    XrHapticActionInfo info;
+    XrHapticVibration vibration;
+
+    if (vr.hapticAction == XR_NULL_HANDLE || vr.state != XR_SESSION_STATE_FOCUSED)
+    {
+        return;
+    }
+    memset(&info, 0, sizeof(info));
+    info.type = XR_TYPE_HAPTIC_ACTION_INFO;
+    info.action = vr.hapticAction;
+    info.subactionPath = vr.handPath[hand];
+    memset(&vibration, 0, sizeof(vibration));
+    vibration.type = XR_TYPE_HAPTIC_VIBRATION;
+    vibration.duration = duration;
+    vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
+    vibration.amplitude = amplitude;
+    xrApplyHapticFeedback(vr.session, &info, (XrHapticBaseHeader const*)&vibration);
+}
+
+/* The game cursor is drawn before vrFrame updates the OpenXR pointer. Draw a
+   small current-frame reticle into the same framebuffer copied to the wrist
+   quad, making the visual hit exact even though the beam is in another
+   compositor layer. */
+static void vrDrawPanelReticle(void)
+{
+    color const shadow = colRGB(8, 18, 24);
+    color const cyan = colRGB(70, 230, 255);
+    bool32 const wasPrimMode = primModeEnabled;
+    sdword x, y;
+
+    if (!vr.pointerValid || vr.width <= 0 || vr.height <= 0)
+    {
+        return;
+    }
+    /* The pointer is in framebuffer pixels, which on Quest is an integer
+       multiple of the logical UI resolution prim2d draws in (4128x2208 vs
+       1032x552). Drawing it unscaled put the reticle off the panel entirely. */
+    x = vr.pointerX * MAIN_WindowWidth / vr.width;
+    y = vr.pointerY * MAIN_WindowHeight / vr.height;
+    primModeSet2();
+    primLineThick2(x - 11, y, x - 4, y, 4, shadow);
+    primLineThick2(x + 4, y, x + 11, y, 4, shadow);
+    primLineThick2(x, y - 11, x, y - 4, 4, shadow);
+    primLineThick2(x, y + 4, x, y + 11, 4, shadow);
+    primLineThick2(x - 10, y, x - 4, y, 2, cyan);
+    primLineThick2(x + 4, y, x + 10, y, 2, cyan);
+    primLineThick2(x, y - 10, x, y - 4, 2, cyan);
+    primLineThick2(x, y + 4, x, y + 10, 2, cyan);
+    if (!wasPrimMode)
+    {
+        primModeClear2();
+    }
+    glFlush();
+}
+
+/* Bright border around the panel while a manager owns the screen. On device
+   this separates the two ways a manager can look wrong: no border means the
+   quad is not where the user is looking (or was not submitted), a border
+   around empty space means the game drew nothing into the framebuffer. */
+static void vrDrawManagerBorder(void)
+{
+    color const edge = colRGB(255, 140, 20);
+    bool32 const wasPrimMode = primModeEnabled;
+    /* prim2d works in logical window space, which maps to the whole
+       framebuffer - and so to the whole quad - however it is scaled */
+    sdword right = MAIN_WindowWidth - 1;
+    sdword bottom = MAIN_WindowHeight - 1;
+
+    if (!vr.worldInteractive || !vrWorldManagerActive())
+    {
+        return;
+    }
+    primModeSet2();
+    primLineThick2(0, 2, right, 2, 5, edge);
+    primLineThick2(0, bottom - 2, right, bottom - 2, 5, edge);
+    primLineThick2(2, 0, 2, bottom, 5, edge);
+    primLineThick2(right - 2, 0, right - 2, bottom, 5, edge);
+    if (!wasPrimMode)
+    {
+        primModeClear2();
+    }
+    glFlush();
+}
+
+/*-----------------------------------------------------------------------------
+    Wrist cards
+----------------------------------------------------------------------------*/
+static void vrCardInit(void)
+{
+    vr.card[VR_CARD_CONTROLS].winWidth = VR_CARD_CONTROLS_WIN_W;
+    vr.card[VR_CARD_CONTROLS].winHeight = VR_CARD_CONTROLS_WIN_H;
+    vr.card[VR_CARD_CONTROLS].widthMetres = VR_CARD_CONTROLS_WIDTH;
+    vr.card[VR_CARD_STATUS].winWidth = VR_CARD_STATUS_WIN_W;
+    vr.card[VR_CARD_STATUS].winHeight = VR_CARD_STATUS_WIN_H;
+    vr.card[VR_CARD_STATUS].widthMetres = VR_CARD_STATUS_WIDTH;
+}
+
+/* Created on first use, like the eye buffers: a card is a convenience, so a
+   failure here must never take the session down with it. */
+static bool32 vrCardSwapchain(sdword index)
+{
+    vrcard* card = &vr.card[index];
+    XrSwapchainCreateInfo createInfo;
+    uint32_t i;
+
+    if (card->swapchain != XR_NULL_HANDLE)
+    {
+        return TRUE;
+    }
+    if (card->failed)
+    {
+        return FALSE;
+    }
+    card->texWidth = card->winWidth * VR_CARD_TEX_SCALE;
+    card->texHeight = card->winHeight * VR_CARD_TEX_SCALE;
+
+    memset(&createInfo, 0, sizeof(createInfo));
+    createInfo.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT
+                          | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    createInfo.format = GL_RGBA8;
+    createInfo.sampleCount = 1;
+    createInfo.width = card->texWidth;
+    createInfo.height = card->texHeight;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+    if (XR_FAILED(xrCreateSwapchain(vr.session, &createInfo, &card->swapchain)))
+    {
+        SDL_Log("VR: card %d swapchain %dx%d failed", (int)index,
+                (int)card->texWidth, (int)card->texHeight);
+        card->swapchain = XR_NULL_HANDLE;
+        card->failed = TRUE;
+        return FALSE;
+    }
+    for (i = 0; i < VR_MAX_SWAPCHAIN_IMAGES; i++)
+    {
+        card->images[i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
+    }
+    if (XR_FAILED(xrEnumerateSwapchainImages(card->swapchain,
+                                             VR_MAX_SWAPCHAIN_IMAGES,
+                                             &card->imageCount,
+                                             (XrSwapchainImageBaseHeader*)card->images)))
+    {
+        SDL_Log("VR: card %d image enumeration failed", (int)index);
+        card->failed = TRUE;
+        return FALSE;
+    }
+    SDL_Log("VR: card %d swapchain %dx%d with %u images, %.2fm wide",
+            (int)index, (int)card->texWidth, (int)card->texHeight,
+            card->imageCount, card->widthMetres);
+    return TRUE;
+}
+
+static fonthandle vrCardFont(void)
+{
+    if (!vr.cardFontTried)
+    {
+        vr.cardFontTried = TRUE;
+        vr.cardFont = frFontRegister("default.hff");
+        SDL_Log("VR: card font handle %u", (unsigned)vr.cardFont);
+    }
+    return vr.cardFont;
+}
+
+/* One row of "label ... value" inside the card, in logical UI pixels */
+static void vrCardRow(sdword x, sdword y, sdword width, char const* label,
+                      char const* value, color labelColor, color valueColor)
+{
+    fontPrint(x, y, labelColor, (char*)label);
+    if (value != NULL)
+    {
+        fontPrint(x + width - fontWidth((char*)value), y, valueColor,
+                  (char*)value);
+    }
+}
+
+static void vrCardDrawControls(vrcard const* card)
+{
+    static char const* rows[][2] = {
+        {"SELECT",              NULL},
+        {"trigger",             "select"},
+        {"L-grip + trigger",    "add / toggle"},
+        {"trigger x2",          "all of type"},
+        {"empty + sweep",       "group brush"},
+        {"",                    NULL},
+        {"ORDERS  hold A/X",    NULL},
+        {"on enemy",            "attack"},
+        {"on resource",         "harvest"},
+        {"on own ship",         "dock"},
+        {"on empty",            "move"},
+        {"R-grip + A/X",        "dock order"},
+        {"R-stick Y",           "move height"},
+        {"+ trigger, sweep",    "draw path"},
+        {"release A/X",         "fly path"},
+        {"B/Y",                 "cancel"},
+        {"",                    NULL},
+        {"CAMERA",              NULL},
+        {"L-stick",             "orbit"},
+        {"R-stick Y",           "zoom"},
+        {"both grips",          "pinch zoom"},
+        {"R-grip + R-stick X",  "cycle fleet"},
+        {"L-stick click",       "focus sel"},
+        {"R-stick click",       "sensors"},
+        {"",                    NULL},
+        {"PANELS",              NULL},
+        {"R-grip + B/Y",        "build mgr"},
+        {"B/Y",                 "close mgr"},
+        {"L-grip + B/Y",        "hide panel"},
+    };
+    sdword const count = (sdword)(sizeof(rows) / sizeof(rows[0]));
+    color const heading = colRGB(120, 230, 255);
+    color const label = colRGB(210, 225, 235);
+    color const value = colRGB(255, 205, 110);
+    sdword lineHeight = fontHeight("Ay");
+    sdword inner = 10;
+    sdword y = inner + 2;
+    sdword i;
+
+    if (lineHeight <= 0)
+    {
+        lineHeight = 12;
+    }
+    for (i = 0; i < count && y + lineHeight < card->winHeight - inner; i++)
+    {
+        /* the tail of this list is how the user escapes a manager, so a
+           silent overflow is not acceptable: say so once and loudly */
+        if (i + 1 == count && !vr.cardOverflowLogged)
+        {
+            vr.cardOverflowLogged = TRUE;
+            SDL_Log("VR: controls card fits all %d rows (lineHeight=%d y=%d "
+                    "of %d)", (int)count, (int)lineHeight, (int)y,
+                    (int)card->winHeight);
+        }
+        if (rows[i][1] == NULL)
+        {
+            if (rows[i][0][0] != '\0')
+            {
+                fontPrint(inner, y, heading, (char*)rows[i][0]);
+                y += lineHeight;
+            }
+            else
+            {
+                y += lineHeight / 2;
+            }
+            continue;
+        }
+        vrCardRow(inner, y, card->winWidth - inner * 2, rows[i][0], rows[i][1],
+                  label, value);
+        y += lineHeight;
+    }
+    if (i < count && !vr.cardOverflowLogged)
+    {
+        vr.cardOverflowLogged = TRUE;
+        SDL_Log("VR: controls card OVERFLOW: only %d of %d rows fit "
+                "(lineHeight=%d, need ~%d px, have %d) - raise "
+                "VR_CARD_CONTROLS_WIN_H", (int)i, (int)count, (int)lineHeight,
+                (int)(count * lineHeight + inner * 2), (int)card->winHeight);
+    }
+}
+
+static void vrCardDrawStatus(vrcard const* card)
+{
+    color const heading = colRGB(120, 230, 255);
+    color const label = colRGB(210, 225, 235);
+    color const value = colRGB(255, 205, 110);
+    sdword lineHeight = fontHeight("Ay");
+    sdword inner = 10;
+    sdword width = card->winWidth - inner * 2;
+    sdword y = inner + 2;
+    char text[64];
+
+    if (lineHeight <= 0)
+    {
+        lineHeight = 12;
+    }
+    fontPrint(inner, y, heading, "FLEET STATUS");
+    y += lineHeight + lineHeight / 3;
+
+    if (universe.curPlayerPtr == NULL)
+    {
+        fontPrint(inner, y, label, "no player");
+        return;
+    }
+    sprintf(text, "%d", (int)universe.curPlayerPtr->resourceUnits);
+    vrCardRow(inner, y, width, "resource units", text, label, value);
+    y += lineHeight;
+
+    sprintf(text, "%d", (int)universe.curPlayerPtr->totalships);
+    vrCardRow(inner, y, width, "ships", text, label, value);
+    y += lineHeight;
+
+    sprintf(text, "%d", (int)selSelected.numShips);
+    vrCardRow(inner, y, width, "selected", text, label, value);
+    y += lineHeight;
+
+    sprintf(text, "%d", (int)universe.curPlayerPtr->sensorLevel);
+    vrCardRow(inner, y, width, "sensors level", text, label, value);
+    y += lineHeight;
+
+    sprintf(text, "%d", (int)universe.curPlayerPtr->classtotals[CLASS_Fighter]);
+    vrCardRow(inner, y, width, "fighters", text, label, value);
+    y += lineHeight;
+
+    sprintf(text, "%d", (int)universe.curPlayerPtr->classtotals[CLASS_Corvette]);
+    vrCardRow(inner, y, width, "corvettes", text, label, value);
+    y += lineHeight;
+
+    sprintf(text, "%d", (int)universe.curPlayerPtr->classtotals[CLASS_Frigate]);
+    vrCardRow(inner, y, width, "frigates", text, label, value);
+}
+
+/* Lay a card out in the top-left of the window framebuffer and blit it into
+   its swapchain. Runs after the game frame has already been copied to the UI
+   quad and before the eye passes clear the framebuffer, so the scratch
+   drawing is never seen and never survives. */
+static void vrCardRender(sdword index, uint32_t imageIndex)
+{
+    vrcard const* card = &vr.card[index];
+    color const backdrop = colRGB(10, 16, 24);
+    color const edge = colRGB(60, 140, 180);
+    bool32 const wasPrimMode = primModeEnabled;
+    fonthandle previousFont;
+    rectangle rect;
+    sdword srcX1, srcY0;
+
+    rect.x0 = 0;
+    rect.y0 = 0;
+    rect.x1 = card->winWidth;
+    rect.y1 = card->winHeight;
+
+    primModeSet2();
+    primRectSolid2(&rect, backdrop);
+    primRectOutline2(&rect, 2, edge);
+    previousFont = fontMakeCurrent(vrCardFont());
+    if (index == VR_CARD_CONTROLS)
+    {
+        vrCardDrawControls(card);
+    }
+    else
+    {
+        vrCardDrawStatus(card);
+    }
+    fontMakeCurrent(previousFont);
+    if (!wasPrimMode)
+    {
+        primModeClear2();
+    }
+    glFlush();
+
+    /* prim2d's origin is top-left in logical UI pixels; GL row 0 is the
+       bottom of the framebuffer, so the laid-out block is the top-left
+       corner scaled up by the framebuffer/UI ratio. */
+    srcX1 = card->winWidth * vr.width / MAIN_WindowWidth;
+    srcY0 = vr.height - card->winHeight * vr.height / MAIN_WindowHeight;
+    vr.rawBindFramebuffer(VR_GL_DRAW_FRAMEBUFFER, vr.blitFbo);
+    vr.rawFramebufferTexture2D(VR_GL_DRAW_FRAMEBUFFER, VR_GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, card->images[imageIndex].image, 0);
+    vr.rawBindFramebuffer(VR_GL_READ_FRAMEBUFFER, 0);
+    vr.rawBlitFramebuffer(0, srcY0, srcX1, vr.height,
+                          0, 0, card->texWidth, card->texHeight,
+                          VR_GL_COLOR_BUFFER_BIT, VR_GL_LINEAR);
+    vr.rawBindFramebuffer(VR_GL_DRAW_FRAMEBUFFER, 0);
+}
+
+/* Cards ride the wrists alongside the panel, so they follow the same
+   visibility rule: in-game, panel not hidden, no manager owning the screen. */
+static void vrUpdateCardPoses(XrTime displayTime)
+{
+    vrcard* controls = &vr.card[VR_CARD_CONTROLS];
+    vrcard* status = &vr.card[VR_CARD_STATUS];
+    bool32 wanted = vr.worldInteractive && !vr.panelHidden
+                 && !vrWorldManagerActive();
+    XrPosef pose;
+
+    controls->poseValid = FALSE;
+    status->poseValid = FALSE;
+    if (!wanted)
+    {
+        return;
+    }
+
+    /* controls card: outboard of the left wrist panel, in its own plane */
+    if (vrWristPose(VR_HAND_LEFT, displayTime, &pose))
+    {
+        XrVector3f right = {1.0f, 0.0f, 0.0f}, offset;
+        real32 shift = (VR_WRIST_PANEL_WIDTH + controls->widthMetres) * 0.5f
+                     + VR_CARD_GAP;
+
+        vrQuatRotate(pose.orientation, right, &offset);
+        controls->pose.orientation = pose.orientation;
+        controls->pose.position.x = pose.position.x
+            + offset.x * shift * VR_CARD_CONTROLS_SIDE;
+        controls->pose.position.y = pose.position.y
+            + offset.y * shift * VR_CARD_CONTROLS_SIDE;
+        controls->pose.position.z = pose.position.z
+            + offset.z * shift * VR_CARD_CONTROLS_SIDE;
+        controls->poseValid = vrPoseSubmittable(&controls->pose);
+    }
+
+    /* status card: watch face on the right wrist */
+    if (vrWristPose(VR_HAND_RIGHT, displayTime, &pose))
+    {
+        status->pose = pose;
+        status->poseValid = vrPoseSubmittable(&status->pose);
+    }
+}
+
+/* Draw, blit and describe one card as a quad layer. Returns FALSE when the
+   card should not be submitted this frame. */
+static bool32 vrCardSubmit(sdword index, XrCompositionLayerQuad* quad)
+{
+    vrcard const* card = &vr.card[index];
+    XrSwapchainImageAcquireInfo acquireInfo;
+    XrSwapchainImageWaitInfo waitInfo;
+    XrSwapchainImageReleaseInfo releaseInfo;
+    uint32_t imageIndex = 0;
+
+    if (!card->poseValid || !vrCardSwapchain(index) || vr.blitFbo == 0)
+    {
+        return FALSE;
+    }
+    memset(&acquireInfo, 0, sizeof(acquireInfo));
+    acquireInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+    memset(&waitInfo, 0, sizeof(waitInfo));
+    waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+    waitInfo.timeout = XR_INFINITE_DURATION;
+    memset(&releaseInfo, 0, sizeof(releaseInfo));
+    releaseInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+
+    if (XR_FAILED(xrAcquireSwapchainImage(card->swapchain, &acquireInfo, &imageIndex))
+        || XR_FAILED(xrWaitSwapchainImage(card->swapchain, &waitInfo)))
+    {
+        return FALSE;
+    }
+    vrCardRender(index, imageIndex);
+    xrReleaseSwapchainImage(card->swapchain, &releaseInfo);
+
+    memset(quad, 0, sizeof(*quad));
+    quad->type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+    quad->space = vr.space;
+    quad->eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad->subImage.swapchain = card->swapchain;
+    quad->subImage.imageRect.extent.width = card->texWidth;
+    quad->subImage.imageRect.extent.height = card->texHeight;
+    quad->pose = card->pose;
+    quad->size.width = card->widthMetres;
+    quad->size.height = card->widthMetres * (real32)card->winHeight
+                      / (real32)card->winWidth;
+    return TRUE;
+}
+
 static bool32 vrActionPressedHand(XrAction action, uword hand)
 {
     XrActionStateGetInfo getInfo;
@@ -915,11 +1763,6 @@ static bool32 vrActionPressedHand(XrAction action, uword hand)
     state.type = XR_TYPE_ACTION_STATE_BOOLEAN;
     return XR_SUCCEEDED(xrGetActionStateBoolean(vr.session, &getInfo, &state))
            && state.isActive && state.currentState;
-}
-
-static bool32 vrActionPressed(XrAction action)
-{
-    return vrActionPressedHand(action, VR_HAND_LEFT) || vrActionPressedHand(action, VR_HAND_RIGHT);
 }
 
 static void vrActionStick(uword hand, real32* x, real32* y)
@@ -970,8 +1813,20 @@ static void vrUpdateInput(XrTime time)
 {
     XrActiveActionSet activeSet;
     XrActionsSyncInfo syncInfo;
-    sdword px, py;
-    bool32 select, context, back;
+    real32 pos[VR_HAND_COUNT][3], dir[VR_HAND_COUNT][3];
+    real32 panelT[VR_HAND_COUNT] = {0.0f, 0.0f};
+    sdword panelX[VR_HAND_COUNT] = {0, 0};
+    sdword panelY[VR_HAND_COUNT] = {0, 0};
+    bool32 tracked[VR_HAND_COUNT] = {FALSE, FALSE};
+    bool32 grip[VR_HAND_COUNT];
+    bool32 hoverChanged[VR_HAND_COUNT] = {FALSE, FALSE};
+    bool32 panelHit[VR_HAND_COUNT] = {FALSE, FALSE};
+    bool32 panelOwns[VR_HAND_COUNT] = {FALSE, FALSE};
+    bool32 select[VR_HAND_COUNT], context[VR_HAND_COUNT], back[VR_HAND_COUNT];
+    bool32 managerOpen, managerActive;
+    uword const handOrder[VR_HAND_COUNT] = {VR_HAND_RIGHT, VR_HAND_LEFT};
+    real32 deltaSeconds = 1.0f / 72.0f;
+    uword hand, orderIndex;
 
     if (vr.state != XR_SESSION_STATE_FOCUSED)
     {
@@ -988,23 +1843,40 @@ static void vrUpdateInput(XrTime time)
     {
         return;
     }
+    if (vr.lastInputTime != 0 && time > vr.lastInputTime)
+    {
+        deltaSeconds = (real32)((double)(time - vr.lastInputTime) / 1000000000.0);
+        if (deltaSeconds > 0.05f)
+        {
+            deltaSeconds = 0.05f;
+        }
+    }
+    vr.lastInputTime = time;
+    for (hand = 0; hand < VR_HAND_COUNT; hand++)
+    {
+        grip[hand] = vrActionPressedHand(vr.gripAction, hand);
+        select[hand] = vrActionPressedHand(vr.selectAction, hand);
+        context[hand] = vrActionPressedHand(vr.contextAction, hand);
+        back[hand] = vrActionPressedHand(vr.backAction, hand);
+    }
+    /* A manager owns the pointer as soon as the game opens it, but it only
+       takes input away from the world once its panel has actually reached
+       the compositor. Otherwise a presentation failure locks the user out
+       of every control they could use to recover. */
+    managerOpen = vr.worldInteractive && vrWorldManagerActive();
+    managerActive = managerOpen && vr.managerState == VR_MGR_VISIBLE;
 
     /* feed both aim rays into the world-interaction layer (in-game only;
        vrWorldFrameBegin gates on a live game world) */
     if (vr.worldInteractive)
     {
-        uword hand;
-        real32 pos[VR_HAND_COUNT][3], dir[VR_HAND_COUNT][3];
-        bool32 tracked[VR_HAND_COUNT];
-        bool32 grip[VR_HAND_COUNT];
-
         memset(pos, 0, sizeof(pos));
         memset(dir, 0, sizeof(dir));
         for (hand = 0; hand < VR_HAND_COUNT; hand++)
         {
             tracked[hand] = vrHandAimLocal(hand, time, pos[hand], dir[hand]);
-            grip[hand] = vrActionPressedHand(vr.gripAction, hand);
-            vrWorldSetRay((sdword)hand, pos[hand], dir[hand], tracked[hand]);
+            hoverChanged[hand] =
+                vrWorldSetRay((sdword)hand, pos[hand], dir[hand], tracked[hand]);
         }
         if (vr.frameCount % VR_DEBUG_INTERVAL == 1)
         {
@@ -1019,13 +1891,10 @@ static void vrUpdateInput(XrTime time)
                     dir[VR_HAND_RIGHT][0], dir[VR_HAND_RIGHT][1],
                     dir[VR_HAND_RIGHT][2]);
         }
-        vr.activeHand = vrWorldHandHasTarget(VR_HAND_RIGHT) ? VR_HAND_RIGHT
-                      : vrWorldHandHasTarget(VR_HAND_LEFT) ? VR_HAND_LEFT
-                      : VR_HAND_RIGHT;
-
         /* grab-the-space gestures. Two grips: pinch zoom + pair rotation.
            One grip: 1:1 pan (your hand drags the hologram). */
-        if (grip[VR_HAND_LEFT] && grip[VR_HAND_RIGHT]
+        if (!managerActive
+            && grip[VR_HAND_LEFT] && grip[VR_HAND_RIGHT]
             && tracked[VR_HAND_LEFT] && tracked[VR_HAND_RIGHT])
         {
             real32 dx = pos[VR_HAND_RIGHT][0] - pos[VR_HAND_LEFT][0];
@@ -1098,10 +1967,13 @@ static void vrUpdateInput(XrTime time)
     }
     else
     {
-        /* in-game: left stick orbits, right stick Y zooms, right stick X
-           flicks cycle the camera focus through the fleet */
+        /* in-game: left stick orbits, right stick Y zooms, and right grip
+           turns the right stick into a fleet traversal control - flick it
+           left/right to step the camera through the fleet. Cycling used to
+           sit on a bare flick, which fired by accident while zooming. */
         real32 lx, ly, rx, ry;
         sdword cycleDir;
+        bool32 traversing;
 
         vrActionStick(VR_HAND_LEFT, &lx, &ly);
         vrActionStick(VR_HAND_RIGHT, &rx, &ry);
@@ -1112,18 +1984,25 @@ static void vrUpdateInput(XrTime time)
                     (unsigned)vr.frameCount, lx, ly, rx, ry,
                     (int)(lx * lx + ly * ly > 0.04f));
         }
-        if (lx * lx + ly * ly > 0.04f)
+        traversing = grip[VR_HAND_RIGHT] && !managerActive;
+        if (!managerActive && lx * lx + ly * ly > 0.04f)
         {
             vrWorldCameraOrbit(-lx * 0.035f, ly * 0.025f);
         }
-        if ((ry > 0.25f || ry < -0.25f) && !vrWorldMoveActive())
+        /* while the grip claims the right stick, it steers the fleet and
+           nothing else: a diagonal flick must not also drive the zoom */
+        if (!managerActive && !traversing && (ry > 0.25f || ry < -0.25f)
+            && !vrWorldMoveActive())
         {
             vrWorldCameraZoom(1.0f - ry * 0.02f);
         }
-        cycleDir = (rx > 0.7f) ? 1 : (rx < -0.7f) ? -1 : 0;
+        cycleDir = traversing
+                 ? ((rx > 0.7f) ? 1 : (rx < -0.7f) ? -1 : 0) : 0;
         if (cycleDir != 0 && vr.prevCycleDir == 0)
         {
             vrWorldFocusCycle(cycleDir);
+            SDL_Log("VR: fleet cycle %+d (right grip + right stick)",
+                    (int)cycleDir);
         }
         vr.prevCycleDir = cycleDir;
         if (vr.stickRotating)
@@ -1157,171 +2036,492 @@ static void vrUpdateInput(XrTime time)
         }
     }
 
-    /* panel pointer from the aim ray (right hand wins). In-game the panel
-       only receives the pointer when no ship is hovered (wizard clicks),
-       and never while hidden. */
-    if (!vr.stickRotating
-        && !(vr.worldInteractive && !vrWorldManagerActive()
-             && (vrWorldHandHasTarget(vr.activeHand) || vr.panelHidden)))
+    /* Resolve each hand against both surfaces. The nearest physical hit owns
+       input; manager screens explicitly take priority. A gesture that began
+       on the panel remains locked to that hand until its button is released. */
+    vr.pointerValid = FALSE;
+    vr.pointerHand = -1;
+    if (!vr.stickRotating)
     {
-        uword pHand = VR_HAND_RIGHT;
-        bool32 hit = vrPointerFromHand(VR_HAND_RIGHT, time, &px, &py);
+        bool32 panelAvailable = !vr.worldInteractive || !vr.panelHidden || managerOpen;
+        sdword lockedPanelHand = -1;
+        sdword pointerCandidate = -1;
 
-        if (!hit)
+        for (hand = 0; hand < VR_HAND_COUNT; hand++)
         {
-            pHand = VR_HAND_LEFT;
-            hit = vrPointerFromHand(VR_HAND_LEFT, time, &px, &py);
-        }
-        if (hit)
-        {
-            vr.pointerX = px;
-            vr.pointerY = py;
-            vr.pointerValid = TRUE;
-            SDL_WarpMouseInWindow(sdlwindow, (int)px, (int)py);
-            if (vr.worldInteractive)
+            real32 worldT;
+
+            if (!panelAvailable)
             {
-                /* end the drawn beam at the panel surface */
-                vrWorldSetRayLimit((sdword)pHand, vr.panelHitT);
+                continue;
+            }
+            panelHit[hand] = vrPointerFromHand(hand, time, &panelX[hand],
+                                               &panelY[hand], &panelT[hand]);
+            if (!panelHit[hand])
+            {
+                continue;
+            }
+            worldT = vr.worldInteractive ? vrWorldHandHitDistance((sdword)hand) : -1.0f;
+            panelOwns[hand] = !vr.worldInteractive || managerOpen || worldT < 0.0f
+                           || panelT[hand] <= worldT;
+            if (panelOwns[hand] && vr.worldInteractive)
+            {
+                vrWorldSetRayLimit((sdword)hand, panelT[hand]);
             }
         }
-        else
+
+        if (vr.selectGestureMode == VR_SELECT_PANEL)
         {
-            vr.pointerValid = FALSE;
+            lockedPanelHand = vr.selectGestureHand;
+        }
+        else if (vr.contextGestureMode == VR_CONTEXT_PANEL)
+        {
+            lockedPanelHand = vr.contextGestureHand;
+        }
+        if (lockedPanelHand >= 0 && panelHit[lockedPanelHand])
+        {
+            pointerCandidate = lockedPanelHand;
+        }
+        else if (panelOwns[VR_HAND_RIGHT])
+        {
+            pointerCandidate = VR_HAND_RIGHT;
+        }
+        else if (panelOwns[VR_HAND_LEFT])
+        {
+            pointerCandidate = VR_HAND_LEFT;
+        }
+
+        if (pointerCandidate >= 0)
+        {
+            vr.pointerX = panelX[pointerCandidate];
+            vr.pointerY = panelY[pointerCandidate];
+            vr.panelHitT = panelT[pointerCandidate];
+            vr.pointerHand = pointerCandidate;
+            vr.pointerValid = TRUE;
+            SDL_WarpMouseInWindow(sdlwindow, vr.pointerX, vr.pointerY);
         }
     }
-    else if (vr.worldInteractive)
+    if (vr.worldInteractive)
     {
-        vr.pointerValid = FALSE;
+        for (hand = 0; hand < VR_HAND_COUNT; hand++)
+        {
+            if (!managerActive && hoverChanged[hand] && !panelOwns[hand])
+            {
+                vrHapticPulse(hand, 0.16f, 12000000);
+            }
+        }
     }
 
-    select = vrActionPressed(vr.selectAction);
-    context = vrActionPressed(vr.contextAction);
-    back = vrActionPressed(vr.backAction);
-
-    if (select != vr.prevSelect)
+    /* Trigger selection is captured by the hand and surface on press. This
+       prevents the other controller, or a ray crossing the wrist panel,
+       from stealing the release. */
+    for (orderIndex = 0; orderIndex < VR_HAND_COUNT; orderIndex++)
     {
-        if (vr.worldInteractive && !vr.pointerValid)
+        hand = handOrder[orderIndex];
+        if (select[hand] && !vr.prevSelect[hand])
         {
-            /* native selection */
-            bool32 additive = vrActionPressedHand(vr.gripAction, VR_HAND_LEFT);
-
-            if (select)
+            /* The trigger is otherwise unbound during a move preview, so it
+               is what draws a freehand flight path: sweep with both held and
+               the swept curve becomes the waypoints. */
+            if (vr.contextGestureMode == VR_CONTEXT_MOVE
+                && vr.contextGestureHand == (sdword)hand
+                && vrWorldMoveActive())
             {
-                if (vrWorldHandHasTarget(vr.activeHand))
+                vrWorldPathBegin((sdword)hand);
+                vr.selectGestureHand = hand;
+                vr.selectGestureMode = VR_SELECT_PATH;
+                vrHapticPulse(hand, 0.30f, 22000000);
+            }
+            else if (vr.selectGestureHand < 0 && vr.contextGestureHand < 0)
+            {
+                if (panelOwns[hand])
                 {
-                    vrWorldSelectClick(vr.activeHand, additive);
+                    vr.pointerX = panelX[hand];
+                    vr.pointerY = panelY[hand];
+                    vr.panelHitT = panelT[hand];
+                    vr.pointerHand = hand;
+                    vr.pointerValid = TRUE;
+                    SDL_WarpMouseInWindow(sdlwindow, vr.pointerX, vr.pointerY);
+                    vrPushMouseButton(SDL_BUTTON_LEFT, TRUE);
+                    vr.selectGestureHand = hand;
+                    vr.selectGestureMode = VR_SELECT_PANEL;
+                }
+                else if (vr.worldInteractive && !managerActive)
+                {
+                    bool32 changed = FALSE;
+
+                    vr.selectAdditive = grip[VR_HAND_LEFT];
+                    vr.selectGestureHand = hand;
+                    if (vrWorldHandHasTarget((sdword)hand))
+                    {
+                        bool32 doubleTrigger =
+                            vrWorldHandHasSelectable((sdword)hand)
+                            && vr.lastSelectTime[hand] != 0
+                            && time > vr.lastSelectTime[hand]
+                            && time - vr.lastSelectTime[hand] <= VR_DOUBLE_TRIGGER_NS;
+
+                        if (doubleTrigger)
+                        {
+                            changed = vrWorldSelectType((sdword)hand, vr.selectAdditive);
+                            vr.lastSelectTime[hand] = 0;
+                            SDL_Log("VR: hand %u double-trigger type select additive=%d changed=%d",
+                                    (unsigned)hand, (int)vr.selectAdditive, (int)changed);
+                        }
+                        else
+                        {
+                            changed = vrWorldSelectClick((sdword)hand, vr.selectAdditive);
+                            vr.lastSelectTime[hand] =
+                                vrWorldHandHasSelectable((sdword)hand) ? time : 0;
+                            SDL_Log("VR: hand %u trigger select additive=%d changed=%d",
+                                    (unsigned)hand, (int)vr.selectAdditive, (int)changed);
+                        }
+                        vr.selectGestureMode = VR_SELECT_CLICK;
+                    }
+                    else
+                    {
+                        vr.lastSelectTime[hand] = 0;
+                        vrWorldSweepBegin((sdword)hand);
+                        vr.selectGestureMode = VR_SELECT_SWEEP;
+                        SDL_Log("VR: hand %u sweep selection begin additive=%d",
+                                (unsigned)hand, (int)vr.selectAdditive);
+                    }
+                    if (changed)
+                    {
+                        vrHapticPulse(hand, 0.38f, 30000000);
+                    }
+                }
+            }
+        }
+        else if (!select[hand] && vr.prevSelect[hand]
+                 && vr.selectGestureHand == (sdword)hand)
+        {
+            bool32 changed = FALSE;
+
+            if (vr.selectGestureMode == VR_SELECT_PANEL)
+            {
+                vrPushMouseButton(SDL_BUTTON_LEFT, FALSE);
+            }
+            else if (vr.selectGestureMode == VR_SELECT_SWEEP)
+            {
+                changed = vrWorldSweepCommit((sdword)hand, vr.selectAdditive);
+                SDL_Log("VR: hand %u sweep selection commit additive=%d changed=%d",
+                        (unsigned)hand, (int)vr.selectAdditive, (int)changed);
+            }
+            else if (vr.selectGestureMode == VR_SELECT_PATH)
+            {
+                changed = vrWorldPathFinishStroke();
+                SDL_Log("VR: hand %u path stroke committed=%d points=%d",
+                        (unsigned)hand, (int)changed,
+                        (int)vrWorldPathPointCount());
+            }
+            if (changed)
+            {
+                vrHapticPulse(hand, 0.42f, 35000000);
+            }
+            vr.selectGestureHand = -1;
+            vr.selectGestureMode = VR_GESTURE_NONE;
+        }
+        vr.prevSelect[hand] = select[hand];
+    }
+
+    /* A/X previews a native smart order while held and commits it on
+       release. Empty space starts a move preview; an invalid target never
+       falls through into an accidental move. */
+    for (orderIndex = 0; orderIndex < VR_HAND_COUNT; orderIndex++)
+    {
+        hand = handOrder[orderIndex];
+        if (context[hand] && !vr.prevContext[hand])
+        {
+            if (vr.contextGestureHand < 0 && vr.selectGestureHand < 0)
+            {
+                if (grip[VR_HAND_RIGHT] && !managerActive)
+                {
+                    vr.contextKey = SDLK_d;
+                    vrPushKey(SDLK_d, SDL_SCANCODE_D, TRUE);
+                    vr.contextGestureHand = hand;
+                    vr.contextGestureMode = VR_CONTEXT_KEY;
+                }
+                else if (panelOwns[hand])
+                {
+                    vr.pointerX = panelX[hand];
+                    vr.pointerY = panelY[hand];
+                    vr.panelHitT = panelT[hand];
+                    vr.pointerHand = hand;
+                    vr.pointerValid = TRUE;
+                    SDL_WarpMouseInWindow(sdlwindow, vr.pointerX, vr.pointerY);
+                    vrPushMouseButton(SDL_BUTTON_RIGHT, TRUE);
+                    vr.contextGestureHand = hand;
+                    vr.contextGestureMode = VR_CONTEXT_PANEL;
+                }
+                else if (vr.worldInteractive && !managerActive)
+                {
+                    vrworldintent intent = vrWorldContextIntent((sdword)hand);
+
+                    vr.contextGestureHand = hand;
+                    if (vrWorldHandHasTarget((sdword)hand))
+                    {
+                        vr.contextGestureMode = VR_CONTEXT_ORDER;
+                        vrHapticPulse(hand,
+                                      intent == VRW_INTENT_INVALID ? 0.10f : 0.26f,
+                                      intent == VRW_INTENT_INVALID ? 18000000 : 28000000);
+                        SDL_Log("VR: hand %u smart-order preview intent=%d",
+                                (unsigned)hand, (int)intent);
+                    }
+                    else if (intent == VRW_INTENT_MOVE
+                             && vrWorldMoveBegin((sdword)hand))
+                    {
+                        vr.contextGestureMode = VR_CONTEXT_MOVE;
+                        vr.moveHeight = 0.0f;
+                        vrHapticPulse(hand, 0.24f, 26000000);
+                        SDL_Log("VR: hand %u move preview begin", (unsigned)hand);
+                    }
+                    else
+                    {
+                        vr.contextGestureHand = -1;
+                    }
+                }
+            }
+        }
+        else if (!context[hand] && vr.prevContext[hand]
+                 && vr.contextGestureHand == (sdword)hand)
+        {
+            bool32 issued = FALSE;
+
+            if (vr.contextGestureMode == VR_CONTEXT_PANEL)
+            {
+                vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
+            }
+            else if (vr.contextGestureMode == VR_CONTEXT_ORDER)
+            {
+                issued = vrWorldContextOrder((sdword)hand);
+                SDL_Log("VR: hand %u smart-order commit issued=%d",
+                        (unsigned)hand, (int)issued);
+            }
+            else if (vr.contextGestureMode == VR_CONTEXT_MOVE)
+            {
+                /* A drawn path replaces the single destination: finish an
+                   in-progress stroke, then fly whatever curve was laid down. */
+                if (vrWorldPathDrawing())
+                {
+                    vrWorldPathFinishStroke();
+                }
+                if (vrWorldPathPointCount() > 0)
+                {
+                    vrWorldMoveCancel();
+                    issued = vrWorldPathCommit();
+                    SDL_Log("VR: hand %u path commit issued=%d legs=%d",
+                            (unsigned)hand, (int)issued,
+                            (int)vrWorldPathPointCount());
                 }
                 else
                 {
-                    vrWorldSweepBegin(vr.activeHand);
+                    issued = vrWorldMoveCommit();
+                    SDL_Log("VR: hand %u move commit issued=%d height=%.3f",
+                            (unsigned)hand, (int)issued, vr.moveHeight);
                 }
-            }
-            else
-            {
-                vrWorldSweepCommit(vr.activeHand, additive);
-            }
-            vr.prevSelect = select;
-        }
-        else if (vr.pointerValid || !select)
-        {
-            vrPushMouseButton(SDL_BUTTON_LEFT, select);
-            vr.prevSelect = select;
-        }
-    }
-
-    /* in-game native context orders / move on A-X */
-    if (vr.worldInteractive && !vr.pointerValid)
-    {
-        if (context != vr.prevContext)
-        {
-            if (context)
-            {
-                if (!vrWorldContextOrder(vr.activeHand))
+                if (vr.selectGestureMode == VR_SELECT_PATH)
                 {
-                    vrWorldMoveBegin(vr.activeHand);
+                    vr.selectGestureHand = -1;
+                    vr.selectGestureMode = VR_GESTURE_NONE;
                 }
             }
-            else
-            {
-                vrWorldMoveCommit();
-            }
-            vr.prevContext = context;
-        }
-        if (vrWorldMoveActive())
-        {
-            real32 rx, ry;
-
-            vrActionStick(VR_HAND_RIGHT, &rx, &ry);
-            vr.moveHeight += ry * 0.004f;
-            vrWorldMoveUpdate(vr.activeHand, vr.moveHeight);
-        }
-        else
-        {
-            vr.moveHeight = 0.0f;
-        }
-        if (back && !vr.prevBack && vrWorldMoveActive())
-        {
-            vrWorldMoveCancel();
-            vr.prevBack = back;                             //swallow this ESC
-        }
-        else if (back && !vr.prevBack
-                 && vrActionPressedHand(vr.gripAction, VR_HAND_LEFT))
-        {
-            /* left grip + B/Y: toggle the wrist panel */
-            vr.panelHidden = !vr.panelHidden;
-            SDL_Log("VR: wrist panel %s", vr.panelHidden ? "hidden" : "shown");
-            vr.prevBack = back;                             //swallow this ESC
-        }
-    }
-
-    /* A/X: right mouse button, or Dock with the right-grip chord */
-    if (context != vr.prevContext)
-    {
-        if (context)
-        {
-            vr.contextKey = vrActionPressedHand(vr.gripAction, VR_HAND_RIGHT) ? SDLK_d : 0;
-            if (vr.contextKey)
-            {
-                vrPushKey(vr.contextKey, SDL_SCANCODE_D, TRUE);
-            }
-            else if (vr.pointerValid)
-            {
-                vrPushMouseButton(SDL_BUTTON_RIGHT, TRUE);
-            }
-        }
-        else
-        {
-            if (vr.contextKey)
+            else if (vr.contextGestureMode == VR_CONTEXT_KEY)
             {
                 vrPushKey(vr.contextKey, SDL_SCANCODE_D, FALSE);
                 vr.contextKey = 0;
             }
-            else
+            if (issued)
             {
-                vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
+                vrHapticPulse(hand, 0.52f, 45000000);
+            }
+            vr.contextGestureHand = -1;
+            vr.contextGestureMode = VR_GESTURE_NONE;
+            vr.moveHeight = 0.0f;
+        }
+        vr.prevContext[hand] = context[hand];
+    }
+
+    if (vr.contextGestureMode == VR_CONTEXT_MOVE
+        && vr.contextGestureHand >= 0 && vrWorldMoveActive())
+    {
+        real32 rx, ry;
+        real32 heightInput;
+
+        vrActionStick(VR_HAND_RIGHT, &rx, &ry);
+        if (fabsf(ry) > 0.20f)
+        {
+            heightInput = (fabsf(ry) - 0.20f) / 0.80f;
+            if (ry < 0.0f)
+            {
+                heightInput = -heightInput;
+            }
+            vr.moveHeight += heightInput * VR_MOVE_HEIGHT_RATE * deltaSeconds;
+            if (vr.moveHeight > VR_MOVE_HEIGHT_LIMIT)
+            {
+                vr.moveHeight = VR_MOVE_HEIGHT_LIMIT;
+            }
+            else if (vr.moveHeight < -VR_MOVE_HEIGHT_LIMIT)
+            {
+                vr.moveHeight = -VR_MOVE_HEIGHT_LIMIT;
             }
         }
-        vr.prevContext = context;
+        vrWorldMoveUpdate(vr.contextGestureHand, vr.moveHeight);
+        /* after the destination has been recomputed for this frame, so the
+           stroke records the height the stick is currently dialling in */
+        vrWorldPathSample(vr.contextGestureHand);
     }
 
-    /* B/Y: Escape, or Build manager with the right-grip chord */
-    if (back != vr.prevBack)
+    /* B/Y cancels a move first, then closes any open manager - that path is
+       unconditional, so a manager is always escapable no matter what its
+       panel is doing. Otherwise left-grip+B/Y toggles the wrist panel,
+       right-grip+B/Y opens Build, and an unmodified press is Escape. */
+    for (orderIndex = 0; orderIndex < VR_HAND_COUNT; orderIndex++)
     {
-        if (back)
+        hand = handOrder[orderIndex];
+        if (back[hand] && !vr.prevBack[hand])
         {
-            vr.backKey = vrActionPressedHand(vr.gripAction, VR_HAND_RIGHT) ? SDLK_b : SDLK_ESCAPE;
-            vrPushKey(vr.backKey, (vr.backKey == SDLK_b) ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE, TRUE);
+            SDL_Log("VR: hand %u B/Y press grips=%d/%d move=%d manager=%s state=%d",
+                    (unsigned)hand, (int)grip[VR_HAND_LEFT],
+                    (int)grip[VR_HAND_RIGHT], (int)vrWorldMoveActive(),
+                    vrWorldManagerName(), (int)vr.managerState);
+            if (vrWorldMoveActive() || vrWorldPathDrawing()
+                || vrWorldPathActive())
+            {
+                vrWorldMoveCancel();
+                vrWorldPathCancel();
+                if (vr.contextGestureMode == VR_CONTEXT_MOVE)
+                {
+                    vr.contextGestureHand = -1;
+                    vr.contextGestureMode = VR_GESTURE_NONE;
+                    vr.moveHeight = 0.0f;
+                }
+                if (vr.selectGestureMode == VR_SELECT_PATH)
+                {
+                    vr.selectGestureHand = -1;
+                    vr.selectGestureMode = VR_GESTURE_NONE;
+                }
+                vrHapticPulse(hand, 0.30f, 30000000);
+                SDL_Log("VR: move preview / flight path cancelled");
+            }
+            else if (vrWorldManagerActive())
+            {
+                bool32 closed = vrWorldCloseManagers();
+
+                SDL_Log("VR: manager close requested, remaining=%s closed=%d",
+                        vrWorldManagerName(), (int)closed);
+                if (!closed)
+                {                                           //trader GUI: Escape is its exit
+                    vr.backKey[hand] = SDLK_ESCAPE;
+                    vrPushKey(SDLK_ESCAPE, SDL_SCANCODE_ESCAPE, TRUE);
+                }
+                else
+                {
+                    /* hand the quad straight back to the wrist so the panel
+                       does not linger a frame at manager size and distance */
+                    vrUpdateScreenPose(time);
+                }
+                vrHapticPulse(hand, 0.38f, 35000000);
+            }
+            else if (grip[VR_HAND_LEFT])
+            {
+                vr.panelHidden = !vr.panelHidden;
+                vrHapticPulse(hand, 0.25f, 25000000);
+                SDL_Log("VR: wrist panel %s", vr.panelHidden ? "hidden" : "shown");
+            }
+            else if (grip[VR_HAND_RIGHT] && vr.worldInteractive)
+            {
+                bool32 opened = vrWorldToggleBuildManager();
+
+                vrHapticPulse(hand, opened ? 0.42f : 0.10f,
+                              opened ? 40000000 : 18000000);
+                SDL_Log("VR: Build Manager open requested handled=%d manager=%s",
+                        (int)opened, vrWorldManagerName());
+                if (opened)
+                {
+                    /* vrUpdateScreenPose normally runs just before input.
+                       Place the panel now so a newly opened manager never
+                       spends its first compositor frame at the wrist pose. */
+                    vrUpdateScreenPose(time);
+                }
+            }
+            else
+            {
+                vr.backKey[hand] = grip[VR_HAND_RIGHT] ? SDLK_b : SDLK_ESCAPE;
+                SDL_Log("VR: hand %u dispatching %s key",
+                        (unsigned)hand,
+                        vr.backKey[hand] == SDLK_b ? "Build" : "Escape");
+                vrPushKey(vr.backKey[hand],
+                          (vr.backKey[hand] == SDLK_b)
+                              ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE,
+                          TRUE);
+            }
         }
-        else
+        else if (!back[hand] && vr.prevBack[hand] && vr.backKey[hand] != 0)
         {
-            vrPushKey(vr.backKey, (vr.backKey == SDLK_b) ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE, FALSE);
+            vrPushKey(vr.backKey[hand],
+                      (vr.backKey[hand] == SDLK_b)
+                          ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE,
+                      FALSE);
+            vr.backKey[hand] = 0;
         }
-        vr.prevBack = back;
+        vr.prevBack[hand] = back[hand];
     }
 
-    /* left grip: Shift (additive selection / band-box) */
+    /* Ray color communicates what the next trigger/A-X action will do. */
+    if (vr.worldInteractive)
     {
-        bool32 gripLeft = vrActionPressedHand(vr.gripAction, VR_HAND_LEFT);
+        for (hand = 0; hand < VR_HAND_COUNT; hand++)
+        {
+            vrworldintent intent = VRW_INTENT_IDLE;
+
+            if (panelOwns[hand]
+                || (vr.selectGestureHand == (sdword)hand
+                    && vr.selectGestureMode == VR_SELECT_PANEL)
+                || (vr.contextGestureHand == (sdword)hand
+                    && vr.contextGestureMode == VR_CONTEXT_PANEL))
+            {
+                intent = VRW_INTENT_PANEL;
+            }
+            else if (managerActive)
+            {
+                intent = VRW_INTENT_INVALID;
+            }
+            else if (vr.selectGestureHand == (sdword)hand)
+            {
+                intent = vr.selectAdditive ? VRW_INTENT_ADD_SELECT : VRW_INTENT_SELECT;
+            }
+            else if (vr.contextGestureHand == (sdword)hand)
+            {
+                if (vr.contextGestureMode == VR_CONTEXT_MOVE)
+                {
+                    intent = VRW_INTENT_MOVE;
+                }
+                else if (vr.contextGestureMode == VR_CONTEXT_KEY)
+                {
+                    intent = VRW_INTENT_DOCK;
+                }
+                else
+                {
+                    intent = vrWorldContextIntent((sdword)hand);
+                }
+            }
+            else if (vrWorldHandHasSelectable((sdword)hand))
+            {
+                intent = grip[VR_HAND_LEFT] ? VRW_INTENT_ADD_SELECT : VRW_INTENT_SELECT;
+            }
+            else if (vrWorldHandHasTarget((sdword)hand))
+            {
+                intent = vrWorldContextIntent((sdword)hand);
+            }
+            vrWorldSetIntent((sdword)hand, intent);
+        }
+    }
+
+    /* left grip: Shift for world additive selection, never leak a modifier
+       into a modal manager panel. */
+    {
+        bool32 gripLeft = !managerActive
+                        && vrActionPressedHand(vr.gripAction, VR_HAND_LEFT);
 
         if (gripLeft != vr.prevGripLeft)
         {
@@ -1330,7 +2530,8 @@ static void vrUpdateInput(XrTime time)
         }
     }
 
-    /* stick clicks: left = Move order (chord: Research), right = Sensors */
+    /* In-game stick clicks focus the selection / toggle Sensors. Suppress
+       both while a manager owns interaction. */
     {
         uword hand;
 
@@ -1338,6 +2539,20 @@ static void vrUpdateInput(XrTime time)
         {
             bool32 pressed = vrActionPressedHand(vr.stickClickAction, hand);
 
+            if (managerActive)
+            {
+                if (vr.stickClickKey[hand] != 0)
+                {
+                    vrPushKey(vr.stickClickKey[hand],
+                              (vr.stickClickKey[hand] == SDLK_r) ? SDL_SCANCODE_R :
+                              (vr.stickClickKey[hand] == SDLK_m) ? SDL_SCANCODE_M :
+                                                                  SDL_SCANCODE_SPACE,
+                              FALSE);
+                    vr.stickClickKey[hand] = 0;
+                }
+                vr.prevStickClick[hand] = pressed;
+                continue;
+            }
             if (pressed == vr.prevStickClick[hand])
             {
                 continue;
@@ -1379,6 +2594,87 @@ static void vrUpdateInput(XrTime time)
             vr.prevStickClick[hand] = pressed;
         }
     }
+}
+
+/* OpenXR can stop delivering action updates while the app is unfocused.
+   Release every synthesized hold and cancel previews at that boundary so
+   returning from the system UI cannot leave a mouse button or key stuck. */
+static void vrReleaseInputCapture(void)
+{
+    uword hand;
+
+    if (vr.selectGestureMode == VR_SELECT_PANEL)
+    {
+        vrPushMouseButton(SDL_BUTTON_LEFT, FALSE);
+    }
+    else if (vr.selectGestureMode == VR_SELECT_SWEEP)
+    {
+        vrWorldSweepCancel();
+    }
+    else if (vr.selectGestureMode == VR_SELECT_PATH)
+    {
+        /* an unfinished stroke is meaningless; a committed path keeps flying */
+        if (vrWorldPathDrawing())
+        {
+            vrWorldPathCancel();
+        }
+    }
+    if (vr.contextGestureMode == VR_CONTEXT_PANEL)
+    {
+        vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
+    }
+    else if (vr.contextGestureMode == VR_CONTEXT_KEY && vr.contextKey != 0)
+    {
+        vrPushKey(vr.contextKey, SDL_SCANCODE_D, FALSE);
+    }
+    if (vrWorldMoveActive())
+    {
+        vrWorldMoveCancel();
+    }
+    if (vr.stickRotating)
+    {
+        vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
+    }
+    if (vr.prevGripLeft)
+    {
+        vrPushKey(SDLK_LSHIFT, SDL_SCANCODE_LSHIFT, FALSE);
+    }
+    for (hand = 0; hand < VR_HAND_COUNT; hand++)
+    {
+        if (vr.backKey[hand] != 0)
+        {
+            vrPushKey(vr.backKey[hand],
+                      vr.backKey[hand] == SDLK_b
+                          ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE,
+                      FALSE);
+        }
+        if (vr.stickClickKey[hand] != 0)
+        {
+            vrPushKey(vr.stickClickKey[hand],
+                      vr.stickClickKey[hand] == SDLK_r ? SDL_SCANCODE_R :
+                      vr.stickClickKey[hand] == SDLK_m ? SDL_SCANCODE_M :
+                                                        SDL_SCANCODE_SPACE,
+                      FALSE);
+        }
+    }
+
+    memset(vr.prevSelect, 0, sizeof(vr.prevSelect));
+    memset(vr.prevContext, 0, sizeof(vr.prevContext));
+    memset(vr.prevBack, 0, sizeof(vr.prevBack));
+    memset(vr.prevStickClick, 0, sizeof(vr.prevStickClick));
+    memset(vr.backKey, 0, sizeof(vr.backKey));
+    memset(vr.stickClickKey, 0, sizeof(vr.stickClickKey));
+    vr.prevGripLeft = FALSE;
+    vr.selectGestureHand = -1;
+    vr.selectGestureMode = VR_GESTURE_NONE;
+    vr.contextGestureHand = -1;
+    vr.contextGestureMode = VR_GESTURE_NONE;
+    vr.contextKey = 0;
+    vr.stickRotating = FALSE;
+    vr.pointerValid = FALSE;
+    vr.pointerHand = -1;
+    vr.moveHeight = 0.0f;
+    vr.lastInputTime = 0;
 }
 
 /*-----------------------------------------------------------------------------
@@ -1910,6 +3206,10 @@ bool32 vrInit(sdword width, sdword height)
     vr.height = height;
     vr.quadWidth = VR_SCREEN_WIDTH;
     vr.debugEye = -1;
+    vr.selectGestureHand = -1;
+    vr.contextGestureHand = -1;
+    vr.pointerHand = -1;
+    vrCardInit();
     for (pass = 0; pass < 3; pass++)
     {
         vr.debugPassFrame[pass] = (udword)-1;
@@ -1941,6 +3241,11 @@ static void vrHandleSessionState(XrEventDataSessionStateChanged const* event)
 {
     XrSessionBeginInfo beginInfo;
 
+    if (vr.state == XR_SESSION_STATE_FOCUSED
+        && event->state != XR_SESSION_STATE_FOCUSED)
+    {
+        vrReleaseInputCapture();
+    }
     vr.state = event->state;
     SDL_Log("VR: session state -> %d", (int)event->state);
     switch (event->state)
@@ -1956,8 +3261,11 @@ static void vrHandleSessionState(XrEventDataSessionStateChanged const* event)
             }
             break;
         case XR_SESSION_STATE_FOCUSED:
-            /* User (re)entered the app - put the screen in front of them */
+            /* User (re)entered the app - put the screen in front of them,
+               including an open manager's panel */
             vr.quadPlaced = FALSE;
+            vr.managerPlaced = FALSE;
+            vr.managerFollowing = FALSE;
             break;
         case XR_SESSION_STATE_STOPPING:
             xrEndSession(vr.session);
@@ -1995,6 +3303,8 @@ static void vrPollEvents(void)
                 /* Tracking space recentered (headset donned, Meta-button
                    recenter, ...) - the old anchor is meaningless now */
                 vr.quadPlaced = FALSE;
+                vr.managerPlaced = FALSE;
+                vr.managerFollowing = FALSE;
                 SDL_Log("VR: reference space changed, re-anchoring");
                 break;
             case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
@@ -2041,15 +3351,18 @@ static void vrCopyFrame(uint32_t imageIndex)
     }
 }
 
-void vrFrame(void)
+static void vrFrameInner(void)
 {
     XrFrameState frameState;
     XrFrameWaitInfo waitInfo;
     XrFrameBeginInfo beginInfo;
     XrFrameEndInfo endInfo;
     XrCompositionLayerQuad quad;
-    XrCompositionLayerBaseHeader const* layers[2];
+    XrCompositionLayerQuad cardQuad[VR_CARD_COUNT];
+    bool32 cardReady[VR_CARD_COUNT] = {FALSE, FALSE};
+    XrCompositionLayerBaseHeader const* layers[2 + VR_CARD_COUNT];
     uint32_t layerCount = 0;
+    bool32 managerQuadSubmitted = FALSE;
 
     if (!vr.active)
     {
@@ -2107,6 +3420,9 @@ void vrFrame(void)
 
         vrUpdateScreenPose(frameState.predictedDisplayTime);
         vrUpdateInput(frameState.predictedDisplayTime);
+        vrUpdateCardPoses(frameState.predictedDisplayTime);
+        vrDrawManagerBorder();
+        vrDrawPanelReticle();
 
         memset(&acquireInfo, 0, sizeof(acquireInfo));
         acquireInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
@@ -2122,6 +3438,18 @@ void vrFrame(void)
             vrCopyFrame(imageIndex);
             xrReleaseSwapchainImage(vr.swapchain, &releaseInfo);
 
+            /* Cards scribble their layout into the framebuffer, so they must
+               come after the game frame has been copied out of it and before
+               the eye passes clear it. */
+            {
+                sdword card;
+
+                for (card = 0; card < VR_CARD_COUNT; card++)
+                {
+                    cardReady[card] = vrCardSubmit(card, &cardQuad[card]);
+                }
+            }
+
             /* stereo world behind the UI screen (in-game only; the window
                framebuffer is reused per eye, which is why the quad blit
                above must happen first) */
@@ -2130,19 +3458,43 @@ void vrFrame(void)
                 layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&vr.projLayer;
             }
 
-            if (!(vr.worldInteractive && vr.panelHidden))
+            /* While a manager is open the quad IS the manager screen, so it
+               is submitted only with a pose this frame validated as
+               submittable - never at a stale wrist pose. */
             {
-                memset(&quad, 0, sizeof(quad));
-                quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
-                quad.space = vr.space;
-                quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-                quad.subImage.swapchain = vr.swapchain;
-                quad.subImage.imageRect.extent.width = vr.width;
-                quad.subImage.imageRect.extent.height = vr.height;
-                quad.pose = vr.quadPose;
-                quad.size.width = vr.quadWidth;
-                quad.size.height = vr.quadWidth * (real32)vr.height / (real32)vr.width;
-                layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&quad;
+                bool32 managerOpen = vr.worldInteractive && vrWorldManagerActive();
+                bool32 showQuad = managerOpen
+                                ? vr.managerPoseValid
+                                : !(vr.worldInteractive && vr.panelHidden);
+
+                if (showQuad && vrPoseSubmittable(&vr.quadPose))
+                {
+                    memset(&quad, 0, sizeof(quad));
+                    quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+                    quad.space = vr.space;
+                    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    quad.subImage.swapchain = vr.swapchain;
+                    quad.subImage.imageRect.extent.width = vr.width;
+                    quad.subImage.imageRect.extent.height = vr.height;
+                    quad.pose = vr.quadPose;
+                    quad.size.width = vr.quadWidth;
+                    quad.size.height = vr.quadWidth * (real32)vr.height / (real32)vr.width;
+                    layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&quad;
+                    managerQuadSubmitted = managerOpen;
+                }
+            }
+
+            {
+                sdword card;
+
+                for (card = 0; card < VR_CARD_COUNT; card++)
+                {
+                    if (cardReady[card])
+                    {
+                        layers[layerCount++] =
+                            (XrCompositionLayerBaseHeader const*)&cardQuad[card];
+                    }
+                }
             }
         }
     }
@@ -2155,10 +3507,35 @@ void vrFrame(void)
     endInfo.layers = layers;
     {
         XrResult result = xrEndFrame(vr.session, &endInfo);
-        if (XR_FAILED(result) && vr.errorsLogged < 8)
+
+        if (XR_FAILED(result))
         {
-            vr.errorsLogged++;
-            vrLogResult("xrEndFrame", result);
+            if (vr.errorsLogged < 8)
+            {
+                vr.errorsLogged++;
+                vrLogResult("xrEndFrame", result);
+            }
+            if (managerQuadSubmitted)
+            {
+                /* the compositor rejected the frame the manager panel was
+                   in: keep presentation pending so input stays escapable */
+                SDL_Log("VR: manager '%s' frame rejected, pose=(%.2f %.2f %.2f) "
+                        "q=(%.4f %.4f %.4f %.4f) width=%.2f layers=%u",
+                        vrWorldManagerName(), vr.quadPose.position.x,
+                        vr.quadPose.position.y, vr.quadPose.position.z,
+                        vr.quadPose.orientation.x, vr.quadPose.orientation.y,
+                        vr.quadPose.orientation.z, vr.quadPose.orientation.w,
+                        vr.quadWidth, (unsigned)layerCount);
+            }
+        }
+        else if (managerQuadSubmitted && vr.managerState != VR_MGR_VISIBLE)
+        {
+            SDL_Log("VR: manager '%s' panel visible after %u frames "
+                    "(pose=(%.2f %.2f %.2f) width=%.2f) - input now modal",
+                    vrWorldManagerName(), (unsigned)vr.managerFrames,
+                    vr.quadPose.position.x, vr.quadPose.position.y,
+                    vr.quadPose.position.z, vr.quadWidth);
+            vr.managerState = VR_MGR_VISIBLE;
         }
     }
 
@@ -2169,6 +3546,29 @@ void vrFrame(void)
                 (unsigned)vr.frameCount, (int)vr.state,
                 (int)frameState.shouldRender, (unsigned)layerCount);
     }
+}
+
+void vrFrame(void)
+{
+    /* The game re-enters the render flush from inside our own frame: opening
+       a manager runs rndClear(), and every rndFlush() in it lands back here
+       while xrBeginFrame is still outstanding. Nested OpenXR frames break
+       the frame sequence the compositor relies on, and the nested
+       vrUpdateInput would re-fire the still-held button that opened the
+       manager - recursing until the stack gives out. Drop inner calls. */
+    if (vr.inFrame)
+    {
+        if (vr.reentryLogged < 8)
+        {
+            vr.reentryLogged++;
+            SDL_Log("VR: dropped re-entrant vrFrame at frame %u (manager=%s)",
+                    (unsigned)vr.frameCount, vrWorldManagerName());
+        }
+        return;
+    }
+    vr.inFrame = TRUE;
+    vrFrameInner();
+    vr.inFrame = FALSE;
 }
 
 void vrShutdown(void)
@@ -2204,6 +3604,13 @@ void vrShutdown(void)
         if (vr.eyeSwapchain[i] != XR_NULL_HANDLE)
         {
             xrDestroySwapchain(vr.eyeSwapchain[i]);
+        }
+    }
+    for (i = 0; i < VR_CARD_COUNT; i++)
+    {
+        if (vr.card[i].swapchain != XR_NULL_HANDLE)
+        {
+            xrDestroySwapchain(vr.card[i].swapchain);
         }
     }
     if (vr.viewSpace != XR_NULL_HANDLE)

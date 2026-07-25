@@ -6,9 +6,11 @@
         game world -> [game camera lookat] -> [anchor, scaled] -> LOCAL -> eye
     so a controller pose in LOCAL space maps into the game world through the
     inverses: world = lookat^-1 * anchor^-1 * (pose * VR_WORLD_SCALE).
-    The pure lookat matrix is captured from rndCameraMatrix, which the mono
-    render pass fills before vrFrame runs (the eye passes overwrite it later
-    with per-eye composites, so the capture happens in vrWorldFrameBegin).
+    The pure lookat matrix is pushed in from rndMainViewRenderFunction via
+    vrWorldCaptureGameCamera. Sampling rndCameraMatrix here instead does not
+    work: ShipView and the sensors manager overwrite that global with their
+    own cameras, and every full-screen manager clears mrRenderMainScreen so
+    the mono main-view render - the only thing that refreshes it - stops.
 
     Created 24/07/2026
 =============================================================================*/
@@ -20,12 +22,14 @@
 #include <math.h>
 #include <string.h>
 
+#include "Alliance.h"
 #include "Camera.h"
 #include "CameraCommand.h"
 #include "ConsMgr.h"
 #include "FastMath.h"
 #include "LaunchMgr.h"
 #include "ResearchGUI.h"
+#include "Sensors.h"
 #include "CommandWrap.h"
 #include "Dock.h"
 #include "InfoOverlay.h"
@@ -37,6 +41,7 @@
 #include "Select.h"
 #include "ShipSelect.h"
 #include "SpaceObj.h"
+#include "TradeMgr.h"
 #include "Tutor.h"
 #include "Universe.h"
 #include "Vector.h"
@@ -47,10 +52,22 @@ extern Camera *mrCamera;                                    //mainrgn.c
 extern bool32 gameIsRunning;                                //Globals.c
 
 #define VRW_HAND_COUNT     2
-#define VRW_PICK_MARGIN    1.4f     /* collision sphere inflation for picking */
-#define VRW_SWEEP_RADIUS   0.12f    /* LOCAL-space metres around the ray */
+#define VRW_PICK_MARGIN    1.25f    /* collision sphere inflation for picking */
+#define VRW_PICK_STICKY    1.15f    /* extra radius for the previous target */
+#define VRW_PICK_CONE_TAN  0.012f   /* ~0.7 degree controller selection cone */
+#define VRW_PICK_CONE_MAX  180.0f   /* cap distant-target assistance */
+#define VRW_SWEEP_CONE_TAN 0.070f   /* ~4 degree brush: sweeping paints over
+                                       a group rather than threading between
+                                       ships one aim-cone at a time */
+#define VRW_SWEEP_MARGIN   1.60f    /* collision inflation while sweeping */
 #define VRW_RAY_LENGTH     100000.0f
 #define VRW_DEBUG_INTERVAL 120
+
+/* Freehand path drawing */
+#define VRW_PATH_MAX_SAMPLES 64     /* raw swept points before decimation */
+#define VRW_PATH_MAX_POINTS  12     /* waypoints handed to the follower */
+#define VRW_PATH_SPLINE_STEPS 12    /* spline evaluations per raw segment */
+#define VRW_PATH_LEG_TIMEOUT 45.0f  /* seconds before a stuck leg is skipped */
 
 typedef struct {
     bool32  valid;
@@ -59,11 +76,15 @@ typedef struct {
     SpaceObjRotImpTarg *hover;      /* object under this ray, if any */
     real32  hoverT;                 /* ray parameter of the hover hit */
     real32  limitT;                 /* draw clip (panel hit), 0 = none */
+    vrworldintent intent;
 } vrwray;
 
 static struct {
     bool32  worldValid;
     real32  scale;                  /* metres -> game units */
+    real32  gameCam[16];            /* pure mono main-view camera matrix */
+    bool32  gameCamValid;
+    udword  gameCamAge;             /* frames since the last capture */
     real32  lookatInv[16];          /* inverse of the game camera lookat */
     real32  anchorInv[16];          /* inverse of the scaled anchor pose */
     real32  lookatFwd[16];          /* forward transforms (world -> LOCAL) */
@@ -81,6 +102,24 @@ static struct {
     vector  movePlanePoint;         /* ray/plane intersection (XY at height) */
     vector  moveDestination;        /* plane point + vertical offset */
     real32  movePlaneZ;
+
+    /* freehand path: raw stroke */
+    bool32  pathDrawing;
+    sdword  pathHand;
+    vector  pathSample[VRW_PATH_MAX_SAMPLES];
+    sdword  pathSampleCount;
+    real32  pathMinSampleDist;      /* decimation threshold, game units */
+    real32  pathSpacing;            /* arc length between waypoints */
+
+    /* freehand path: resampled waypoints and the follower flying them */
+    vector  pathPoint[VRW_PATH_MAX_POINTS];
+    sdword  pathCount;
+    bool32  pathActive;
+    MaxSelection pathSelection;
+    sdword  pathLeg;
+    real32  pathArriveDist;
+    real32  pathLegStart;           /* universe time the leg was issued */
+    real32  pathLastUpdate;
 
     /* diagnostics */
     udword  debugFrame;
@@ -141,10 +180,30 @@ static void vrwTransformDir(real32 const m[16], vector const* in, vector* out)
     out->z = m[2] * in->x + m[6] * in->y + m[10] * in->z;
 }
 
+/* also rejects NaN: neither comparison holds for it */
+static bool32 vrwFinite(real32 v)
+{
+    return v > -1.0e18f && v < 1.0e18f;
+}
+
+static void vrwPathFollow(void);
+
+void vrWorldCaptureGameCamera(real32 const view[16])
+{
+    memcpy(vrw.gameCam, view, sizeof(vrw.gameCam));
+    vrw.gameCamValid = TRUE;
+    vrw.gameCamAge = 0;
+}
+
+udword vrWorldGameCameraAge(void)
+{
+    return vrw.gameCamValid ? vrw.gameCamAge : (udword)-1;
+}
+
 bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], real32 scale)
 {
     real32 R[9], t[3];
-    real32 const* look = (real32 const*)&rndCameraMatrix;
+    real32 const* look;
     real32 lookR[9], lookT[3];
     sdword r, c;
 
@@ -152,6 +211,22 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
     if (!gameIsRunning || mrCamera == NULL)
     {
         return FALSE;
+    }
+    /* Never sample rndCameraMatrix directly here - see the file header. The
+       captured matrix goes stale while a manager holds the main view down,
+       which is correct: stale means "the last real main-view camera", and
+       camera motion is suppressed for as long as a manager owns input. */
+    if (vrw.gameCamValid)
+    {
+        look = vrw.gameCam;
+        if (vrw.gameCamAge < (udword)-1)
+        {
+            vrw.gameCamAge++;
+        }
+    }
+    else
+    {
+        look = (real32 const*)&rndCameraMatrix;
     }
     vrw.scale = scale;
 
@@ -190,6 +265,7 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
     vrw.anchorFwd[15] = 1.0f;
 
     vrw.worldValid = TRUE;
+    vrwPathFollow();                        //advance any committed flight path
 
     /* periodic diagnostics: camera matrix health. Ray roundtrips are logged
        in vrWorldSetRay, after the current frame's ray has been transformed. */
@@ -212,10 +288,12 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
                 look[0], look[4], look[8], look[12], look[13], look[14],
                 mrCamera->eyeposition.x, mrCamera->eyeposition.y, mrCamera->eyeposition.z);
         SDL_Log("VRDBG CHAIN frame=%u lookDet=%.5f anchorDet=%.5f "
-                "anchorPosM=(%.4f %.4f %.4f) q=(%.4f %.4f %.4f %.4f)",
+                "anchorPosM=(%.4f %.4f %.4f) q=(%.4f %.4f %.4f %.4f) "
+                "camAge=%u manager=%s",
                 (unsigned)vrw.debugFrame, lookDet, anchorDet,
                 anchorPos[0], anchorPos[1], anchorPos[2],
-                anchorQuat[0], anchorQuat[1], anchorQuat[2], anchorQuat[3]);
+                anchorQuat[0], anchorQuat[1], anchorQuat[2], anchorQuat[3],
+                (unsigned)vrWorldGameCameraAge(), vrWorldManagerName());
         SDL_Log("VRDBG CAMERA frame=%u angle=%.6f decl=%.6f distance=%.2f "
                 "userFlags=0x%x look=(%.1f %.1f %.1f)",
                 (unsigned)vrw.debugFrame, mrCamera->angle,
@@ -229,31 +307,103 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
 
 bool32 vrWorldManagerActive(void)
 {
-    return cmActive || lmActive || rmGUIActive;
+    /* Sensors belongs here too: it is full-screen and clears
+       mrRenderMainScreen like the rest, so without it the sensors map would
+       be shown on the 32cm wrist panel. */
+    return cmActive || lmActive || rmGUIActive || tmTraderGUIActive()
+        || smSensorsActive;
 }
 
-bool32 vrWorldManagerPanelAnchor(real32 outPosMetres[3])
+char const* vrWorldManagerName(void)
+{
+    if (cmActive)            return "construction";
+    if (lmActive)            return "launch";
+    if (rmGUIActive)         return "research";
+    if (tmTraderGUIActive()) return "trade";
+    if (smSensorsActive)     return "sensors";
+    return "none";
+}
+
+bool32 vrWorldCloseManagers(void)
+{
+    if (cmActive)        cmCloseIfOpen();
+    if (lmActive)        lmCloseIfOpen();
+    if (rmGUIActive)     rmCloseIfOpen();
+    if (smSensorsActive) smSensorsCloseForGood();
+    /* The trader GUI has no close entry point; its own panel button and the
+       Escape key are the way out, so it is reported as still open here. */
+    return !vrWorldManagerActive();
+}
+
+bool32 vrWorldManagerPanelAnchor(real32 outPosMetres[3], real32* outRadiusMetres)
 {
     vector world, cam, local;
+    Ship* anchorShip = NULL;
+    real32 radius;
 
-    if (!vrw.worldValid || !(cmActive || lmActive || rmGUIActive))
+    if (!vrw.worldValid || !vrWorldManagerActive() || vrw.scale <= 0.0f)
     {
         return FALSE;
     }
-    if (selSelected.numShips > 0)
+    if (selSelected.numShips > 0
+        && !(selSelected.ShipPtr[0]->flags & SOF_Dead))
     {
-        world = selSelected.ShipPtr[0]->collInfo.collPosition;
+        anchorShip = selSelected.ShipPtr[0];
+    }
+    else if (cmActive && universe.curPlayerPtr != NULL
+             && universe.curPlayerPtr->PlayerMothership != NULL)
+    {
+        anchorShip = universe.curPlayerPtr->PlayerMothership;
+    }
+
+    if (anchorShip != NULL)
+    {
+        world = anchorShip->collInfo.collPosition;
+        radius = anchorShip->staticinfo->staticheader.staticCollInfo.collspheresize
+               / vrw.scale;
     }
     else
     {
         world = selCentrePoint;
+        radius = 0.10f;
     }
     vrwTransformPoint(vrw.lookatFwd, &world, &cam);
     vrwTransformPoint(vrw.anchorFwd, &cam, &local);
-    outPosMetres[0] = local.x / vrw.scale + 0.55f;          //beside the ship
-    outPosMetres[1] = local.y / vrw.scale + 0.10f;
+    if (!vrwFinite(local.x) || !vrwFinite(local.y) || !vrwFinite(local.z)
+        || !vrwFinite(radius))
+    {
+        SDL_Log("VR: manager anchor rejected: world=(%.1f %.1f %.1f) "
+                "local=(%.1f %.1f %.1f) radius=%.3f camAge=%u",
+                world.x, world.y, world.z, local.x, local.y, local.z,
+                radius, (unsigned)vrWorldGameCameraAge());
+        return FALSE;
+    }
+    outPosMetres[0] = local.x / vrw.scale;
+    outPosMetres[1] = local.y / vrw.scale;
     outPosMetres[2] = local.z / vrw.scale;
+    *outRadiusMetres = radius < 0.0f ? 0.0f : (radius > 20.0f ? 20.0f : radius);
     return TRUE;
+}
+
+bool32 vrWorldToggleBuildManager(void)
+{
+    if (!vrw.worldValid)
+    {
+        return FALSE;
+    }
+    if (cmActive)
+    {
+        cmCloseIfOpen();
+        return !cmActive;
+    }
+
+    /* Manager modes are mutually exclusive. Match the taskbar behavior by
+       closing another full-screen manager before opening Construction. */
+    lmCloseIfOpen();
+    rmCloseIfOpen();
+    tutGameMessage("KB_Build");
+    mrBuildShips(NULL, NULL);
+    return cmActive;
 }
 
 /*-----------------------------------------------------------------------------
@@ -287,9 +437,22 @@ static void vrwLocalDirToWorld(real32 const dir[3], vector* out)
     }
 }
 
+static bool32 vrwPlayerShipSelectable(SpaceObjRotImpTarg const* obj)
+{
+    udword const blocked = SOF_Dead | SOF_Hide | SOF_Disabled
+                         | SOF_Crazy | SOF_Hyperspace;
+
+    return obj != NULL && obj->objtype == OBJ_ShipType
+        && ((Ship const*)obj)->playerowner == universe.curPlayerPtr
+        && ((Ship const*)obj)->shiptype != Drone
+        && (obj->flags & SOF_Selectable)
+        && !(obj->flags & blocked);
+}
+
 /* nearest ray/sphere hit along the render list. selectableOnly restricts to
    the current player's selectable ships. */
-static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly, real32* hitT)
+static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
+                                   SpaceObjRotImpTarg const* preferred, real32* hitT)
 {
     Node* node;
     SpaceObjRotImpTarg* best = NULL;
@@ -309,9 +472,7 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly, rea
         }
         if (selectableOnly)
         {
-            if (obj->objtype != OBJ_ShipType
-                || ((Ship*)obj)->playerowner != universe.curPlayerPtr
-                || ((Ship*)obj)->shiptype == Drone)
+            if (!vrwPlayerShipSelectable(obj))
             {
                 continue;
             }
@@ -321,12 +482,22 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly, rea
             continue;
         }
 
-        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize * VRW_PICK_MARGIN;
         vecSub(toObj, obj->collInfo.collPosition, ray->origin);
         tCentre = vecDotProduct(toObj, ray->dir);
         if (tCentre < 0.0f)
         {
             continue;                                       //behind the controller
+        }
+        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize
+               * VRW_PICK_MARGIN;
+        {
+            real32 coneRadius = tCentre * VRW_PICK_CONE_TAN;
+
+            radius += coneRadius < VRW_PICK_CONE_MAX ? coneRadius : VRW_PICK_CONE_MAX;
+        }
+        if (obj == preferred)
+        {
+            radius *= VRW_PICK_STICKY;
         }
         distSqr = vecMagnitudeSquared(toObj) - tCentre * tCentre;
         discr = radius * radius - distSqr;
@@ -357,16 +528,60 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly, rea
     return best;
 }
 
-void vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], bool32 valid)
+/* Sweep-select brush. This is the VR stand-in for the desktop band-box, so
+   it behaves like one: every selectable player ship the beam passes over
+   joins the preview - not just the nearest - and the capture radius widens
+   with distance exactly as a screen-space box does with depth. Painting
+   across a cluster therefore takes the whole cluster in one pass. */
+static void vrwSweepAccumulate(vrwray const* ray)
+{
+    Node* node;
+
+    for (node = universe.RenderList.head;
+         node != NULL && vrw.sweepPreview.numShips < COMMAND_MAX_SHIPS;
+         node = node->next)
+    {
+        SpaceObjRotImpTarg* obj = (SpaceObjRotImpTarg*)listGetStructOfNode(node);
+        vector toObj;
+        real32 radius, tCentre, distSqr;
+
+        if (!vrwPlayerShipSelectable(obj))
+        {
+            continue;
+        }
+        vecSub(toObj, obj->collInfo.collPosition, ray->origin);
+        tCentre = vecDotProduct(toObj, ray->dir);
+        if (tCentre < 0.0f)
+        {
+            continue;                                       //behind the controller
+        }
+        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize
+               * VRW_SWEEP_MARGIN
+               + tCentre * VRW_SWEEP_CONE_TAN;
+        distSqr = vecMagnitudeSquared(toObj) - tCentre * tCentre;
+        if (distSqr > radius * radius)
+        {
+            continue;
+        }
+        if (!selShipInSelection(vrw.sweepPreview.ShipPtr,
+                                vrw.sweepPreview.numShips, (Ship*)obj))
+        {
+            vrw.sweepPreview.ShipPtr[vrw.sweepPreview.numShips++] = (Ship*)obj;
+        }
+    }
+}
+
+bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], bool32 valid)
 {
     vrwray* ray = &vrw.ray[hand];
+    SpaceObjRotImpTarg* oldHover = ray->hover;
 
     ray->valid = valid && vrw.worldValid;
     ray->hover = NULL;
     ray->limitT = 0.0f;
     if (!ray->valid)
     {
-        return;
+        return FALSE;
     }
     vrw.dbgLocalPos[hand].x = origin[0];
     vrw.dbgLocalPos[hand].y = origin[1];
@@ -376,7 +591,7 @@ void vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], boo
     vrw.dbgLocalDir[hand].z = dir[2];
     vrwLocalToWorld(origin, &ray->origin);
     vrwLocalDirToWorld(dir, &ray->dir);
-    ray->hover = vrwPick(ray, FALSE, &ray->hoverT);
+    ray->hover = vrwPick(ray, FALSE, oldHover, &ray->hoverT);
     if (hand == 1 && vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
     {
         vector backCam, backLocal, backCamDir, backLocalDir;
@@ -413,29 +628,31 @@ void vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], boo
                 backLocalDir.x, backLocalDir.y, backLocalDir.z, dirDot);
     }
 
-    /* while sweeping, accumulate player ships near the ray */
     if (vrw.sweepActive && hand == vrw.sweepHand)
     {
-        real32 t;
-        SpaceObjRotImpTarg* obj = vrwPick(ray, TRUE, &t);
-
-        if (obj != NULL && vrw.sweepPreview.numShips < COMMAND_MAX_SHIPS
-            && !selShipInSelection(vrw.sweepPreview.ShipPtr, vrw.sweepPreview.numShips, (Ship*)obj))
-        {
-            vrw.sweepPreview.ShipPtr[vrw.sweepPreview.numShips++] = (Ship*)obj;
-        }
+        vrwSweepAccumulate(ray);
     }
 
     /* move order follows the ray */
     if (vrw.moveActive && hand == vrw.moveHand)
     {
-        vector far;
+        real32 t;
 
-        far.x = ray->origin.x + ray->dir.x * VRW_RAY_LENGTH;
-        far.y = ray->origin.y + ray->dir.y * VRW_RAY_LENGTH;
-        far.z = ray->origin.z + ray->dir.z * VRW_RAY_LENGTH;
-        vecLineIntersectWithXYPlane(&vrw.movePlanePoint, &ray->origin, &far, vrw.movePlaneZ);
+        /* Treat this as a ray, not an infinite line. Near-parallel or
+           behind-the-controller intersections retain the last valid point
+           instead of making the move disc jump across the map. */
+        if (fabsf(ray->dir.z) > 0.015f)
+        {
+            t = (vrw.movePlaneZ - ray->origin.z) / ray->dir.z;
+            if (t > 0.0f && t < VRW_RAY_LENGTH)
+            {
+                vrw.movePlanePoint.x = ray->origin.x + ray->dir.x * t;
+                vrw.movePlanePoint.y = ray->origin.y + ray->dir.y * t;
+                vrw.movePlanePoint.z = vrw.movePlaneZ;
+            }
+        }
     }
+    return ray->hover != NULL && ray->hover != oldHover;
 }
 
 bool32 vrWorldHandHasTarget(sdword hand)
@@ -443,9 +660,39 @@ bool32 vrWorldHandHasTarget(sdword hand)
     return vrw.ray[hand].valid && vrw.ray[hand].hover != NULL;
 }
 
+bool32 vrWorldHandHasSelectable(sdword hand)
+{
+    SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
+
+    return vrwPlayerShipSelectable(obj);
+}
+
+real32 vrWorldHandHitDistance(sdword hand)
+{
+    if (!vrWorldHandHasTarget(hand) || vrw.scale <= 0.0f)
+    {
+        return -1.0f;
+    }
+    return vrw.ray[hand].hoverT / vrw.scale;
+}
+
 void vrWorldSetRayLimit(sdword hand, real32 metres)
 {
-    vrw.ray[hand].limitT = metres * vrw.scale;
+    /* The game world and wrist screen are separate OpenXR layers. Stop the
+       projection-layer beam just in front of the quad, then let the exact
+       panel-space reticle drawn by vr.c finish the visual connection. */
+    real32 visibleMetres = metres > 0.012f ? metres - 0.012f : metres;
+
+    vrw.ray[hand].limitT = visibleMetres * vrw.scale;
+}
+
+void vrWorldSetIntent(sdword hand, vrworldintent intent)
+{
+    if (hand >= 0 && hand < VRW_HAND_COUNT
+        && intent >= VRW_INTENT_IDLE && intent <= VRW_INTENT_INVALID)
+    {
+        vrw.ray[hand].intent = intent;
+    }
 }
 
 /*-----------------------------------------------------------------------------
@@ -456,19 +703,20 @@ static bool32 vrwOrdersBlocked(void)
     return (universePause && !opPauseOrders) || mrDisabled;
 }
 
-void vrWorldSelectClick(sdword hand, bool32 additive)
+bool32 vrWorldSelectClick(sdword hand, bool32 additive)
 {
     SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
+    bool32 changed = FALSE;
 
-    if (obj == NULL || obj->objtype != OBJ_ShipType
-        || ((Ship*)obj)->playerowner != universe.curPlayerPtr)
+    if (!vrwPlayerShipSelectable(obj))
     {
-        if (!additive)
+        if (!additive && selSelected.numShips > 0)
         {
             selSelectNone();
             ioUpdateShipTotals();
+            changed = TRUE;
         }
-        return;
+        return changed;
     }
 
     if (additive)
@@ -481,12 +729,58 @@ void vrWorldSelectClick(sdword hand, bool32 additive)
         {
             selSelectionAddSingleShip(&selSelected, (Ship*)obj);
         }
+        changed = TRUE;
     }
     else
     {
+        changed = selSelected.numShips != 1 || selSelected.ShipPtr[0] != (Ship*)obj;
         selSelectionSetSingleShip((Ship*)obj);
     }
     ioUpdateShipTotals();
+    return changed;
+}
+
+bool32 vrWorldSelectType(sdword hand, bool32 additive)
+{
+    SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
+    Ship* target;
+    Node* node;
+    bool32 changed = FALSE;
+
+    if (!vrwPlayerShipSelectable(obj))
+    {
+        return FALSE;
+    }
+    target = (Ship*)obj;
+    if (!additive && selSelected.numShips > 0)
+    {
+        selSelectNone();
+        changed = TRUE;
+    }
+    /* Match the desktop double-click feel by limiting the expansion to the
+       current render list rather than selecting that type across the map. */
+    for (node = universe.RenderList.head;
+         node != NULL && selSelected.numShips < COMMAND_MAX_SHIPS;
+         node = node->next)
+    {
+        SpaceObjRotImpTarg* candidate =
+            (SpaceObjRotImpTarg*)listGetStructOfNode(node);
+
+        if (vrwPlayerShipSelectable(candidate)
+            && ((Ship*)candidate)->shiptype == target->shiptype
+            && !selShipInSelection(selSelected.ShipPtr, selSelected.numShips,
+                                   (Ship*)candidate))
+        {
+            selSelectionAddSingleShip(&selSelected, (Ship*)candidate);
+            changed = TRUE;
+        }
+    }
+    if (changed)
+    {
+        ioUpdateShipTotals();
+        tutGameMessage("Game_SelectingRect");
+    }
+    return changed;
 }
 
 void vrWorldSweepBegin(sdword hand)
@@ -496,33 +790,42 @@ void vrWorldSweepBegin(sdword hand)
     vrw.sweepPreview.numShips = 0;
 }
 
-void vrWorldSweepCommit(sdword hand, bool32 additive)
+bool32 vrWorldSweepCommit(sdword hand, bool32 additive)
 {
     sdword i;
+    bool32 changed = FALSE;
 
-    if (!vrw.sweepActive)
+    if (!vrw.sweepActive || hand != vrw.sweepHand)
     {
-        return;
+        return FALSE;
     }
     vrw.sweepActive = FALSE;
-    if (vrw.sweepPreview.numShips == 0)
-    {
-        return;
-    }
     if (!additive)
     {
-        selSelectNone();
+        if (selSelected.numShips > 0)
+        {
+            selSelectNone();
+            changed = TRUE;
+        }
     }
     for (i = 0; i < vrw.sweepPreview.numShips; i++)
     {
         if (!selShipInSelection(selSelected.ShipPtr, selSelected.numShips, vrw.sweepPreview.ShipPtr[i]))
         {
             selSelectionAddSingleShip(&selSelected, vrw.sweepPreview.ShipPtr[i]);
+            changed = TRUE;
         }
     }
-    ioUpdateShipTotals();
-    tutGameMessage("Game_SelectingRect");
+    if (changed)
+    {
+        ioUpdateShipTotals();
+        tutGameMessage("Game_SelectingRect");
+    }
+    SDL_Log("VR: sweep brush caught %d ship(s), selection now %d (additive=%d)",
+            (int)vrw.sweepPreview.numShips, (int)selSelected.numShips,
+            (int)additive);
     vrw.sweepPreview.numShips = 0;
+    return changed;
 }
 
 void vrWorldSweepCancel(void)
@@ -534,18 +837,63 @@ void vrWorldSweepCancel(void)
 /*-----------------------------------------------------------------------------
     Orders
 ----------------------------------------------------------------------------*/
+vrworldintent vrWorldContextIntent(sdword hand)
+{
+    SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
+    MaxSelection capable;
+
+    if (obj == NULL)
+    {
+        return VRW_INTENT_MOVE;
+    }
+    if (selSelected.numShips == 0 || vrwOrdersBlocked())
+    {
+        return VRW_INTENT_INVALID;
+    }
+    if (obj->objtype == OBJ_AsteroidType || obj->objtype == OBJ_DustType
+        || obj->objtype == OBJ_GasType)
+    {
+        return MakeShipsHarvestCapable((SelectCommand*)&capable,
+                                       (SelectCommand*)&selSelected)
+             ? VRW_INTENT_HARVEST : VRW_INTENT_INVALID;
+    }
+    if (obj->objtype != OBJ_ShipType)
+    {
+        return VRW_INTENT_INVALID;
+    }
+    if (((Ship*)obj)->playerowner == universe.curPlayerPtr)
+    {
+        if (!((Ship*)obj)->staticinfo->canReceiveSomething)
+        {
+            return VRW_INTENT_INVALID;
+        }
+        capable = selSelected;
+        makeShipsDockCapable((SelectCommand*)&capable);
+        return capable.numShips > 0 ? VRW_INTENT_DOCK : VRW_INTENT_INVALID;
+    }
+    if (allianceIsShipAlly((Ship*)obj, universe.curPlayerPtr))
+    {
+        return VRW_INTENT_INVALID;
+    }
+    return MakeShipsAttackCapable((SelectCommand*)&capable,
+                                  (SelectCommand*)&selSelected)
+         ? VRW_INTENT_ATTACK : VRW_INTENT_INVALID;
+}
+
 bool32 vrWorldContextOrder(sdword hand)
 {
     SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
     MaxSelection tempSelection;
+    vrworldintent intent = vrWorldContextIntent(hand);
 
-    if (obj == NULL || selSelected.numShips == 0 || vrwOrdersBlocked())
+    if (obj == NULL || intent == VRW_INTENT_MOVE || intent == VRW_INTENT_INVALID)
     {
         return FALSE;
     }
+    /* a fresh order supersedes whatever path was being flown */
+    vrWorldPathCancel();
 
-    if (obj->objtype == OBJ_AsteroidType || obj->objtype == OBJ_DustType
-        || obj->objtype == OBJ_GasType)
+    if (intent == VRW_INTENT_HARVEST)
     {                                                       //harvest
         if (MakeShipsHarvestCapable((SelectCommand*)&tempSelection, (SelectCommand*)&selSelected))
         {
@@ -557,21 +905,24 @@ bool32 vrWorldContextOrder(sdword hand)
         return FALSE;
     }
 
-    if (obj->objtype != OBJ_ShipType)
-    {
+    if (intent == VRW_INTENT_DOCK)
+    {                                                       //own ship: dock at it
+        tempSelection = selSelected;
+        makeShipsDockCapable((SelectCommand*)&tempSelection);
+        if (tempSelection.numShips > 0)
+        {
+            clWrapDock(&universe.mainCommandLayer, (SelectCommand*)&tempSelection,
+                       DOCK_AT_SPECIFIC_SHIP, (Ship*)obj);
+            tutGameMessage("Game_DoubleClickDock");
+            return TRUE;
+        }
         return FALSE;
     }
 
-    if (((Ship*)obj)->playerowner == universe.curPlayerPtr)
-    {                                                       //own ship: dock at it
-        clWrapDock(&universe.mainCommandLayer, (SelectCommand*)&selSelected,
-                   DOCK_AT_SPECIFIC_SHIP, (Ship*)obj);
-        tutGameMessage("Game_DoubleClickDock");
-        return TRUE;
-    }
-
-    /* enemy: attack */
-    if (MakeShipsAttackCapable((SelectCommand*)&tempSelection, (SelectCommand*)&selSelected))
+    /* non-allied enemy: attack */
+    if (intent == VRW_INTENT_ATTACK
+        && MakeShipsAttackCapable((SelectCommand*)&tempSelection,
+                                  (SelectCommand*)&selSelected))
     {
         MaxAnySelection attackOne;
 
@@ -620,24 +971,27 @@ void vrWorldMoveUpdate(sdword hand, real32 heightMetres)
     }
 }
 
-void vrWorldMoveCommit(void)
+bool32 vrWorldMoveCommit(void)
 {
     if (!vrw.moveActive)
     {
-        return;
+        return FALSE;
     }
     vrw.moveActive = FALSE;
     if (selSelected.numShips == 0 || vrwOrdersBlocked())
     {
-        return;
+        return FALSE;
     }
+    vrWorldPathCancel();                //a plain move replaces a flown path
     MakeShipsMobile((SelectCommand*)&selSelected);
     if (selSelected.numShips > 0)
     {
         clWrapMove(&universe.mainCommandLayer, (SelectCommand*)&selSelected,
                    selCentrePoint, vrw.moveDestination);
         tutGameMessage("Game_MoveIssued");
+        return TRUE;
     }
+    return FALSE;
 }
 
 void vrWorldMoveCancel(void)
@@ -652,6 +1006,334 @@ void vrWorldMoveCancel(void)
 bool32 vrWorldMoveActive(void)
 {
     return vrw.moveActive;
+}
+
+/*-----------------------------------------------------------------------------
+    Freehand flight paths
+
+    Homeworld has no waypoint order: clWrapMove takes a single destination and
+    replaces whatever the ships were doing. So a drawn path is kept here and
+    flown leg by leg, re-issuing a plain move each time the previous leg is
+    reached. The stroke itself is a Catmull-Rom spline through the swept
+    points, resampled by arc length so waypoint spacing is even regardless of
+    how fast the hand moved.
+----------------------------------------------------------------------------*/
+static real32 vrwDistance(vector const* a, vector const* b)
+{
+    vector d;
+
+    vecSub(d, *a, *b);
+    return fsqrt(vecMagnitudeSquared(d));
+}
+
+/* Catmull-Rom through p1..p2, with p0/p3 setting the tangents */
+static void vrwSpline(vector const* p0, vector const* p1, vector const* p2,
+                      vector const* p3, real32 t, vector* out)
+{
+    real32 t2 = t * t;
+    real32 t3 = t2 * t;
+    real32 a = -0.5f * t3 +  1.0f * t2 - 0.5f * t;
+    real32 b =  1.5f * t3 -  2.5f * t2            + 1.0f;
+    real32 c = -1.5f * t3 +  2.0f * t2 + 0.5f * t;
+    real32 d =  0.5f * t3 -  0.5f * t2;
+
+    out->x = a * p0->x + b * p1->x + c * p2->x + d * p3->x;
+    out->y = a * p0->y + b * p1->y + c * p2->y + d * p3->y;
+    out->z = a * p0->z + b * p1->z + c * p2->z + d * p3->z;
+}
+
+/* Point at parameter t within raw segment index, ends clamped */
+static void vrwSplineAt(sdword segment, real32 t, vector* out)
+{
+    sdword last = vrw.pathSampleCount - 1;
+    sdword i0 = segment - 1 < 0 ? 0 : segment - 1;
+    sdword i1 = segment;
+    sdword i2 = segment + 1 > last ? last : segment + 1;
+    sdword i3 = segment + 2 > last ? last : segment + 2;
+
+    vrwSpline(&vrw.pathSample[i0], &vrw.pathSample[i1], &vrw.pathSample[i2],
+              &vrw.pathSample[i3], t, out);
+}
+
+/* Halve the stroke in place when it fills up, so an arbitrarily long sweep
+   keeps being recorded at progressively coarser resolution. */
+static void vrwPathDecimate(void)
+{
+    sdword i, kept = 0;
+
+    for (i = 0; i < vrw.pathSampleCount; i += 2)
+    {
+        vrw.pathSample[kept++] = vrw.pathSample[i];
+    }
+    vrw.pathSampleCount = kept;
+    vrw.pathMinSampleDist *= 2.0f;
+}
+
+void vrWorldPathBegin(sdword hand)
+{
+    if (!vrw.moveActive || hand != vrw.moveHand)
+    {
+        return;
+    }
+    vrw.pathDrawing = TRUE;
+    vrw.pathHand = hand;
+    vrw.pathSampleCount = 0;
+    vrw.pathCount = 0;
+    vrw.pathSpacing = 0.0f;
+    /* start fine: a short stroke should keep its shape, and decimation
+       coarsens this on demand for long ones */
+    vrw.pathMinSampleDist = 0.03f * vrw.scale;
+    vrw.pathSample[vrw.pathSampleCount++] = vrw.moveDestination;
+    SDL_Log("VR: path draw begin hand=%d minSample=%.1f", (int)hand,
+            vrw.pathMinSampleDist);
+}
+
+void vrWorldPathSample(sdword hand)
+{
+    vector const* point = &vrw.moveDestination;
+
+    if (!vrw.pathDrawing || hand != vrw.pathHand)
+    {
+        return;
+    }
+    if (vrw.pathSampleCount > 0
+        && vrwDistance(point, &vrw.pathSample[vrw.pathSampleCount - 1])
+           < vrw.pathMinSampleDist)
+    {
+        return;
+    }
+    if (vrw.pathSampleCount >= VRW_PATH_MAX_SAMPLES)
+    {
+        vrwPathDecimate();
+    }
+    vrw.pathSample[vrw.pathSampleCount++] = *point;
+}
+
+/* Trigger released: smooth the stroke and lay waypoints along it evenly. */
+bool32 vrWorldPathFinishStroke(void)
+{
+    sdword segment, step;
+    real32 total = 0.0f, spacing, travelled = 0.0f;
+    vector previous, current;
+
+    if (!vrw.pathDrawing)
+    {
+        return FALSE;
+    }
+    vrw.pathDrawing = FALSE;
+    vrw.pathCount = 0;
+    if (vrw.pathSampleCount < 2)
+    {
+        SDL_Log("VR: path stroke too short (%d samples)",
+                (int)vrw.pathSampleCount);
+        return FALSE;
+    }
+
+    previous = vrw.pathSample[0];
+    for (segment = 0; segment + 1 < vrw.pathSampleCount; segment++)
+    {
+        for (step = 1; step <= VRW_PATH_SPLINE_STEPS; step++)
+        {
+            vrwSplineAt(segment, (real32)step / (real32)VRW_PATH_SPLINE_STEPS,
+                        &current);
+            total += vrwDistance(&previous, &current);
+            previous = current;
+        }
+    }
+    if (total <= 0.0f)
+    {
+        return FALSE;
+    }
+
+    /* Spacing follows the path length so the waypoint budget is never
+       exceeded and a long sweep does not become a dense stutter of orders. */
+    spacing = total / (real32)VRW_PATH_MAX_POINTS;
+    vrw.pathSpacing = spacing;
+    previous = vrw.pathSample[0];
+    for (segment = 0; segment + 1 < vrw.pathSampleCount; segment++)
+    {
+        for (step = 1; step <= VRW_PATH_SPLINE_STEPS; step++)
+        {
+            vrwSplineAt(segment, (real32)step / (real32)VRW_PATH_SPLINE_STEPS,
+                        &current);
+            travelled += vrwDistance(&previous, &current);
+            previous = current;
+            if (travelled >= spacing && vrw.pathCount < VRW_PATH_MAX_POINTS - 1)
+            {
+                vrw.pathPoint[vrw.pathCount++] = current;
+                travelled = 0.0f;
+            }
+        }
+    }
+    /* finish exactly where the hand stopped */
+    if (vrw.pathCount < VRW_PATH_MAX_POINTS)
+    {
+        vrw.pathPoint[vrw.pathCount++] =
+            vrw.pathSample[vrw.pathSampleCount - 1];
+    }
+    SDL_Log("VR: path stroke done: %d samples, length=%.0f spacing=%.0f "
+            "-> %d waypoints", (int)vrw.pathSampleCount, total, spacing,
+            (int)vrw.pathCount);
+    return vrw.pathCount > 0;
+}
+
+bool32 vrWorldPathCommit(void)
+{
+    sdword i;
+    real32 maxColl = 0.0f;
+
+    if (vrw.pathCount <= 0)
+    {
+        return FALSE;
+    }
+    if (selSelected.numShips == 0 || vrwOrdersBlocked())
+    {
+        vrWorldPathCancel();
+        return FALSE;
+    }
+
+    vrw.pathSelection = selSelected;
+    MakeShipsMobile((SelectCommand*)&vrw.pathSelection);
+    if (vrw.pathSelection.numShips == 0)
+    {
+        vrWorldPathCancel();
+        return FALSE;
+    }
+    for (i = 0; i < vrw.pathSelection.numShips; i++)
+    {
+        real32 coll = vrw.pathSelection.ShipPtr[i]->staticinfo
+                      ->staticheader.staticCollInfo.collspheresize;
+
+        if (coll > maxColl)
+        {
+            maxColl = coll;
+        }
+    }
+    /* Arrive generously: the follower only needs to know the leg is done, and
+       a tight radius on a spread-out group would stall the whole path until
+       the timeout rescued it. Scale with leg length as well as group size. */
+    vrw.pathArriveDist = maxColl * 3.0f + 0.10f * vrw.scale;
+    if (vrw.pathArriveDist < vrw.pathSpacing * 0.25f)
+    {
+        vrw.pathArriveDist = vrw.pathSpacing * 0.25f;
+    }
+
+    selCentrePointCompute();
+    vrw.pathActive = TRUE;
+    vrw.pathSampleCount = 0;            //the drawn stroke has served its purpose
+    vrw.pathLeg = 0;
+    vrw.pathLegStart = universe.totaltimeelapsed;
+    vrw.pathLastUpdate = universe.totaltimeelapsed;
+    clWrapMove(&universe.mainCommandLayer, (SelectCommand*)&vrw.pathSelection,
+               selCentrePoint, vrw.pathPoint[0]);
+    tutGameMessage("Game_MoveIssued");
+    SDL_Log("VR: path commit: %d ships, %d legs, arrive=%.0f, leg 0 -> "
+            "(%.0f %.0f %.0f)", (int)vrw.pathSelection.numShips,
+            (int)vrw.pathCount, vrw.pathArriveDist, vrw.pathPoint[0].x,
+            vrw.pathPoint[0].y, vrw.pathPoint[0].z);
+    return TRUE;
+}
+
+void vrWorldPathCancel(void)
+{
+    if (vrw.pathDrawing || vrw.pathActive || vrw.pathCount > 0)
+    {
+        SDL_Log("VR: path cancelled (drawing=%d active=%d leg=%d/%d)",
+                (int)vrw.pathDrawing, (int)vrw.pathActive, (int)vrw.pathLeg,
+                (int)vrw.pathCount);
+    }
+    vrw.pathDrawing = FALSE;
+    vrw.pathActive = FALSE;
+    vrw.pathSampleCount = 0;
+    vrw.pathCount = 0;
+    vrw.pathLeg = 0;
+    vrw.pathSelection.numShips = 0;
+}
+
+bool32 vrWorldPathDrawing(void)
+{
+    return vrw.pathDrawing;
+}
+
+bool32 vrWorldPathActive(void)
+{
+    return vrw.pathActive;
+}
+
+sdword vrWorldPathPointCount(void)
+{
+    return vrw.pathCount;
+}
+
+/* Advance the committed path. Called once per frame from vrWorldFrameBegin;
+   gated on universe time so the extra rndFlush passes a manager triggers
+   cannot re-issue the same leg several times and stall the ships. */
+static void vrwPathFollow(void)
+{
+    vector centre;
+    sdword i, alive = 0;
+    bool32 reached, timedOut;
+
+    if (!vrw.pathActive)
+    {
+        return;
+    }
+    if (!(universe.totaltimeelapsed > vrw.pathLastUpdate))
+    {
+        return;
+    }
+    vrw.pathLastUpdate = universe.totaltimeelapsed;
+
+    /* drop casualties; abandon the path if the group is gone */
+    vecZeroVector(centre);
+    for (i = 0; i < vrw.pathSelection.numShips; i++)
+    {
+        Ship* ship = vrw.pathSelection.ShipPtr[i];
+
+        if (ship->flags & SOF_Dead)
+        {
+            continue;
+        }
+        vrw.pathSelection.ShipPtr[alive++] = ship;
+        vecAddTo(centre, ship->collInfo.collPosition);
+    }
+    vrw.pathSelection.numShips = alive;
+    if (alive == 0)
+    {
+        SDL_Log("VR: path abandoned, no ships left");
+        vrWorldPathCancel();
+        return;
+    }
+    vecDivideByScalar(centre, (real32)alive, i);
+
+    reached = vrwDistance(&centre, &vrw.pathPoint[vrw.pathLeg])
+              <= vrw.pathArriveDist;
+    timedOut = (universe.totaltimeelapsed - vrw.pathLegStart)
+               > VRW_PATH_LEG_TIMEOUT;
+    if (!reached && !timedOut)
+    {
+        return;
+    }
+    if (timedOut && !reached)
+    {
+        SDL_Log("VR: path leg %d timed out, skipping", (int)vrw.pathLeg);
+    }
+
+    vrw.pathLeg++;
+    if (vrw.pathLeg >= vrw.pathCount)
+    {
+        SDL_Log("VR: path complete (%d legs)", (int)vrw.pathCount);
+        vrw.pathActive = FALSE;
+        vrw.pathCount = 0;
+        vrw.pathSelection.numShips = 0;
+        return;
+    }
+    vrw.pathLegStart = universe.totaltimeelapsed;
+    clWrapMove(&universe.mainCommandLayer, (SelectCommand*)&vrw.pathSelection,
+               centre, vrw.pathPoint[vrw.pathLeg]);
+    SDL_Log("VR: path leg %d/%d -> (%.0f %.0f %.0f)", (int)vrw.pathLeg,
+            (int)vrw.pathCount, vrw.pathPoint[vrw.pathLeg].x,
+            vrw.pathPoint[vrw.pathLeg].y, vrw.pathPoint[vrw.pathLeg].z);
 }
 
 /*-----------------------------------------------------------------------------
@@ -802,7 +1484,6 @@ void vrWorldDrawOverlays(void)
     GLint modelDepthAfter, projectionDepthAfter;
     GLboolean oldFog;
     GLenum entryError, exitError;
-    color const rayColor = colRGB(80, 160, 255);
     color const hoverColor = colRGB(255, 200, 60);
     color const selColor = colRGB(90, 255, 120);
     color const moveColor = colRGB(255, 255, 255);
@@ -838,13 +1519,37 @@ void vrWorldDrawOverlays(void)
         vrwray const* ray = &vrw.ray[hand];
         vector end;
         real32 length;
+        color rayColor;
 
         if (!ray->valid)
         {
             continue;
         }
-        length = (ray->hover != NULL) ? ray->hoverT
-               : (ray->limitT > 0.0f) ? ray->limitT : (2.5f * vrw.scale);
+        switch (ray->intent)
+        {
+            case VRW_INTENT_SELECT:     rayColor = colRGB(90, 255, 120); break;
+            case VRW_INTENT_ADD_SELECT: rayColor = colRGB(80, 255, 230); break;
+            case VRW_INTENT_ATTACK:     rayColor = colRGB(255, 70, 70); break;
+            case VRW_INTENT_HARVEST:    rayColor = colRGB(255, 190, 55); break;
+            case VRW_INTENT_DOCK:       rayColor = colRGB(80, 220, 255); break;
+            case VRW_INTENT_MOVE:       rayColor = colRGB(255, 255, 255); break;
+            case VRW_INTENT_PANEL:      rayColor = colRGB(70, 220, 255); break;
+            case VRW_INTENT_INVALID:    rayColor = colRGB(150, 150, 160); break;
+            default:                    rayColor = colRGB(80, 160, 255); break;
+        }
+        /* A panel can be farther away than the normal free-space beam,
+           especially when a manager is attached to a distant ship. */
+        if (ray->limitT > 0.0f)
+        {
+            /* Input routing has already decided that the panel owns this
+               ray. Do not let a projection-layer world pick shorten it. */
+            length = ray->limitT;
+        }
+        else
+        {
+            length = ray->hover != NULL && ray->hoverT > 0.0f
+                   ? ray->hoverT : (2.5f * vrw.scale);
+        }
         end.x = ray->origin.x + ray->dir.x * length;
         end.y = ray->origin.y + ray->dir.y * length;
         end.z = ray->origin.z + ray->dir.z * length;
@@ -859,11 +1564,11 @@ void vrWorldDrawOverlays(void)
             primCircleOutline3(&ray->origin, gizmoRadius, 12, 0, rayColor, Z_AXIS);
         }
 
-        if (ray->hover != NULL)
+        if (ray->hover != NULL && ray->intent != VRW_INTENT_PANEL)
         {
             primCircleOutline3(&ray->hover->collInfo.collPosition,
                                ray->hover->staticinfo->staticheader.staticCollInfo.collspheresize,
-                               24, 0, hoverColor, Z_AXIS);
+                               24, 0, rayColor, Z_AXIS);
         }
     }
 
@@ -883,6 +1588,47 @@ void vrWorldDrawOverlays(void)
         primCircleOutline3(&ship->collInfo.collPosition,
                            ship->staticinfo->staticheader.staticCollInfo.collspheresize * 1.2f,
                            16, 0, hoverColor, Z_AXIS);
+    }
+
+    /* Freehand path: the smoothed spline as a fine polyline, with a ring at
+       each waypoint the ships will be ordered to. This is purely a planning
+       aid - once the path is committed and the ships are flying it, it has
+       served its purpose and stops drawing. */
+    if (!vrw.pathActive && (vrw.pathDrawing || vrw.pathCount > 0))
+    {
+        color const strokeColor = colRGB(120, 200, 255);
+        color const pointColor = colRGB(255, 235, 140);
+        real32 ringSize = selAverageSize > 0.0f ? selAverageSize : 150.0f;
+        sdword segment, step;
+
+        if (vrw.pathSampleCount >= 2)
+        {
+            vector previous = vrw.pathSample[0];
+
+            for (segment = 0; segment + 1 < vrw.pathSampleCount; segment++)
+            {
+                for (step = 1; step <= VRW_PATH_SPLINE_STEPS; step++)
+                {
+                    vector current;
+
+                    vrwSplineAt(segment,
+                                (real32)step / (real32)VRW_PATH_SPLINE_STEPS,
+                                &current);
+                    primLine3(&previous, &current, strokeColor);
+                    previous = current;
+                }
+            }
+        }
+        for (i = 0; i < vrw.pathCount; i++)
+        {
+            primCircleOutline3(&vrw.pathPoint[i], ringSize, 12, 0, pointColor,
+                               Z_AXIS);
+            if (i > 0)
+            {
+                primLine3(&vrw.pathPoint[i - 1], &vrw.pathPoint[i],
+                          strokeColor);
+            }
+        }
     }
 
     if (vrw.moveActive)
