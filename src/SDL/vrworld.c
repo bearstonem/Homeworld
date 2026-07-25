@@ -61,6 +61,8 @@ extern bool32 gameIsRunning;                                //Globals.c
                                        ships one aim-cone at a time */
 #define VRW_SWEEP_MARGIN   1.60f    /* collision inflation while sweeping */
 #define VRW_RAY_LENGTH     100000.0f
+#define VRW_CURSOR_MIN     400.0f   /* nearest the cursor may sit: 50 units is
+                                       5cm of hologram, i.e. inside the hand */
 #define VRW_DEBUG_INTERVAL 120
 
 /* Freehand path drawing */
@@ -99,9 +101,8 @@ static struct {
     /* move order */
     bool32  moveActive;
     sdword  moveHand;
-    vector  movePlanePoint;         /* ray/plane intersection (XY at height) */
-    vector  moveDestination;        /* plane point + vertical offset */
-    real32  movePlaneZ;
+    vector  moveDestination;        /* point on the ray at cursorDist */
+    real32  cursorDist;             /* depth along the ray, game units */
 
     /* freehand path: raw stroke */
     bool32  pathDrawing;
@@ -187,6 +188,21 @@ static bool32 vrwFinite(real32 v)
 }
 
 static void vrwPathFollow(void);
+
+/* Place the move cursor on a hand's ray at the current depth. Shared so the
+   destination is consistent whether the ray moved or the depth did. */
+static void vrwMoveRecompute(sdword hand)
+{
+    vrwray const* ray = &vrw.ray[hand];
+
+    if (!ray->valid)
+    {
+        return;
+    }
+    vrw.moveDestination.x = ray->origin.x + ray->dir.x * vrw.cursorDist;
+    vrw.moveDestination.y = ray->origin.y + ray->dir.y * vrw.cursorDist;
+    vrw.moveDestination.z = ray->origin.z + ray->dir.z * vrw.cursorDist;
+}
 
 void vrWorldCaptureGameCamera(real32 const view[16])
 {
@@ -633,24 +649,13 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
         vrwSweepAccumulate(ray);
     }
 
-    /* move order follows the ray */
+    /* Move order rides the ray at the cursor depth. A controller has six
+       degrees of freedom, so unlike the mouse pie plate this needs no
+       horizontal plane to project onto - and therefore has no degenerate
+       angle where the projection flies off across the map. */
     if (vrw.moveActive && hand == vrw.moveHand)
     {
-        real32 t;
-
-        /* Treat this as a ray, not an infinite line. Near-parallel or
-           behind-the-controller intersections retain the last valid point
-           instead of making the move disc jump across the map. */
-        if (fabsf(ray->dir.z) > 0.015f)
-        {
-            t = (vrw.movePlaneZ - ray->origin.z) / ray->dir.z;
-            if (t > 0.0f && t < VRW_RAY_LENGTH)
-            {
-                vrw.movePlanePoint.x = ray->origin.x + ray->dir.x * t;
-                vrw.movePlanePoint.y = ray->origin.y + ray->dir.y * t;
-                vrw.movePlanePoint.z = vrw.movePlaneZ;
-            }
-        }
+        vrwMoveRecompute(hand);
     }
     return ray->hover != NULL && ray->hover != oldHover;
 }
@@ -939,30 +944,65 @@ bool32 vrWorldContextOrder(sdword hand)
 
 bool32 vrWorldMoveBegin(sdword hand)
 {
-    if (selSelected.numShips == 0 || vrwOrdersBlocked() || !vrw.ray[hand].valid)
+    vrwray const* ray = &vrw.ray[hand];
+    vector toSelection;
+
+    if (selSelected.numShips == 0 || vrwOrdersBlocked() || !ray->valid)
     {
         return FALSE;
     }
     selCentrePointCompute();
     vrw.moveActive = TRUE;
     vrw.moveHand = hand;
-    vrw.movePlaneZ = selCentrePoint.z;
-    vrw.movePlanePoint = selCentrePoint;
-    vrw.moveDestination = selCentrePoint;
+
+    /* Seed the depth at the fleet's own, measured ALONG the ray rather than
+       straight-line to the centroid. Straight-line puts the cursor on a
+       sphere around the hand, so aiming away from the fleet drops the cursor
+       off the fleet's depth and the destination appears to lunge. Projecting
+       onto the ray instead starts it level with the ships wherever you point.
+
+       Note there is deliberately no ray-pick here: this is only reached when
+       the beam is on empty space (vrWorldContextIntent only yields
+       VRW_INTENT_MOVE for a NULL hover), so a pick could only ever miss. */
+    vecSub(toSelection, selCentrePoint, ray->origin);
+    vrw.cursorDist = vecDotProduct(toSelection, ray->dir);
+    if (!(vrw.cursorDist > VRW_CURSOR_MIN))
+    {
+        /* pointing away from the fleet: fall back to its true distance */
+        vrw.cursorDist = fsqrt(vecMagnitudeSquared(toSelection));
+        if (!(vrw.cursorDist > VRW_CURSOR_MIN))
+        {
+            vrw.cursorDist = VRW_CURSOR_MIN;
+        }
+    }
+    vrwMoveRecompute(hand);
+    SDL_Log("VR: move cursor seeded at %.0f units (fleet %.0f away)",
+            vrw.cursorDist, fsqrt(vecMagnitudeSquared(toSelection)));
     tutGameMessage("Game_Move");
     return TRUE;
 }
 
-void vrWorldMoveUpdate(sdword hand, real32 heightMetres)
+/* depthDelta is a fractional change for this frame: it scales the cursor
+   distance rather than adding a height, so the same flick feels equally
+   responsive whether the fleet is 2000 or 60000 units out. */
+void vrWorldMoveUpdate(sdword hand, real32 depthDelta)
 {
     if (!vrw.moveActive || hand != vrw.moveHand)
     {
         return;
     }
-    vrw.moveDestination = vrw.movePlanePoint;
-    vrw.moveDestination.z += heightMetres * vrw.scale;
-    if (heightMetres != 0.0f)
+    if (depthDelta != 0.0f)
     {
+        vrw.cursorDist *= 1.0f + depthDelta;
+        if (vrw.cursorDist < VRW_CURSOR_MIN)
+        {
+            vrw.cursorDist = VRW_CURSOR_MIN;
+        }
+        else if (vrw.cursorDist > VRW_RAY_LENGTH)
+        {
+            vrw.cursorDist = VRW_RAY_LENGTH;
+        }
+        vrwMoveRecompute(hand);
         tutGameMessage("Game_MoveZ");
     }
     else
@@ -1006,6 +1046,11 @@ void vrWorldMoveCancel(void)
 bool32 vrWorldMoveActive(void)
 {
     return vrw.moveActive;
+}
+
+real32 vrWorldCursorDist(void)
+{
+    return vrw.cursorDist;
 }
 
 /*-----------------------------------------------------------------------------
@@ -1633,15 +1678,18 @@ void vrWorldDrawOverlays(void)
 
     if (vrw.moveActive)
     {
-        vector vertical = vrw.movePlanePoint;
+        /* The cursor is free in space now, so depth has to be readable some
+           other way: drop it onto the selection's plane with a vertical line
+           and ring the shadow, then join the shadow to the fleet. That trio
+           is what tells the eye how far out and how high the point is. */
+        vector shadow = vrw.moveDestination;
+        real32 ring = selAverageSize > 0.0f ? selAverageSize : 100.0f;
 
-        primCircleOutline3(&vrw.movePlanePoint, selAverageSize > 0.0f ? selAverageSize * 2.0f : 200.0f,
-                           32, 0, moveColor, Z_AXIS);
-        primLine3(&vrw.movePlanePoint, &vrw.moveDestination, moveColor);
-        vertical.z = selCentrePoint.z;
-        primLine3(&selCentrePoint, &vrw.movePlanePoint, moveColor);
-        primCircleOutline3(&vrw.moveDestination, selAverageSize > 0.0f ? selAverageSize : 100.0f,
-                           16, 0, hoverColor, Z_AXIS);
+        shadow.z = selCentrePoint.z;
+        primCircleOutline3(&shadow, ring * 2.0f, 32, 0, moveColor, Z_AXIS);
+        primLine3(&shadow, &vrw.moveDestination, moveColor);
+        primLine3(&selCentrePoint, &shadow, moveColor);
+        primCircleOutline3(&vrw.moveDestination, ring, 16, 0, hoverColor, Z_AXIS);
     }
 
     rndTextureEnable(oldTexture);

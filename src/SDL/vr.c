@@ -102,8 +102,8 @@
 #define VR_CONTEXT_KEY           4
 
 #define VR_DOUBLE_TRIGGER_NS 350000000LL
-#define VR_MOVE_HEIGHT_RATE  0.30f
-#define VR_MOVE_HEIGHT_LIMIT 2.50f
+#define VR_MOVE_DEPTH_DEADZONE 0.20f
+#define VR_MOVE_DEPTH_RATE     1.20f   /* ~3.3x cursor depth per second at full stick */
 
 /* How many game-world units one real-world metre of head movement is
    worth. Homeworld ships are hundreds of units long; at 1000 the fleet
@@ -235,7 +235,7 @@ typedef struct {
     sdword       pointerHand;
     bool32       worldInteractive;  /* game world exists; native 3D interaction on */
     real32       panelHitT;         /* metres to the panel along the pointer ray */
-    real32       moveHeight;        /* metres of vertical offset in a move order */
+    real32       moveDepthInput;    /* right-stick deflection driving order depth */
     XrTime       lastInputTime;
     bool32       panelHidden;       /* wrist panel toggled off in-game */
     vrcard       card[VR_CARD_COUNT];
@@ -553,12 +553,12 @@ static bool32 vrCreateActions(void)
 {
     XrActionSetCreateInfo setInfo;
     XrActionCreateInfo actionInfo;
-    XrActionSuggestedBinding bindings[18];
+    XrActionSuggestedBinding bindings[32];
     XrInteractionProfileSuggestedBinding suggested;
     XrSessionActionSetsAttachInfo attachInfo;
     XrActionSpaceCreateInfo spaceInfo;
     XrPath profilePath;
-    uword i;
+    uword i, bindingCount;
 
     xrStringToPath(vr.instance, "/user/hand/left", &vr.handPath[VR_HAND_LEFT]);
     xrStringToPath(vr.instance, "/user/hand/right", &vr.handPath[VR_HAND_RIGHT]);
@@ -616,7 +616,7 @@ static bool32 vrCreateActions(void)
     VR_CHECK("xrCreateAction haptic", xrCreateAction(vr.actionSet, &actionInfo, &vr.hapticAction));
 
     {
-        struct { XrAction action; char const* path; } layout[18] = {
+        struct { XrAction action; char const* path; } layout[] = {
             { vr.aimAction,        "/user/hand/left/input/aim/pose" },
             { vr.aimAction,        "/user/hand/right/input/aim/pose" },
             { vr.selectAction,     "/user/hand/left/input/trigger/value" },
@@ -636,7 +636,19 @@ static bool32 vrCreateActions(void)
             { vr.hapticAction,     "/user/hand/left/output/haptic" },
             { vr.hapticAction,     "/user/hand/right/output/haptic" },
         };
-        for (i = 0; i < 18; i++)
+        /* Derive the count: it used to be the literal 18 written out in four
+           separate places, and a single stale copy makes
+           xrSuggestInteractionProfileBindings fail and every input die at
+           once. */
+        bindingCount = (uword)(sizeof(layout) / sizeof(layout[0]));
+        if (bindingCount > sizeof(bindings) / sizeof(bindings[0]))
+        {
+            SDL_Log("VR: %u suggested bindings exceeds capacity %u",
+                    (unsigned)bindingCount,
+                    (unsigned)(sizeof(bindings) / sizeof(bindings[0])));
+            return FALSE;
+        }
+        for (i = 0; i < bindingCount; i++)
         {
             bindings[i].action = layout[i].action;
             xrStringToPath(vr.instance, layout[i].path, &bindings[i].binding);
@@ -647,7 +659,7 @@ static bool32 vrCreateActions(void)
     memset(&suggested, 0, sizeof(suggested));
     suggested.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
     suggested.interactionProfile = profilePath;
-    suggested.countSuggestedBindings = 18;
+    suggested.countSuggestedBindings = bindingCount;
     suggested.suggestedBindings = bindings;
     VR_CHECK("xrSuggestInteractionProfileBindings",
              xrSuggestInteractionProfileBindings(vr.instance, &suggested));
@@ -675,6 +687,23 @@ static bool32 vrCreateActions(void)
     }
 
     return TRUE;
+}
+
+/* Heading-only version of a head pose: the hologram is anchored to it, and
+   inheriting the head's pitch and roll tilts the entire battle relative to
+   the room for as long as the session lasts. Keep the yaw, drop the rest. */
+static void vrAnchorFromHead(XrPosef head, XrPosef* out)
+{
+    real32 yaw = atan2f(2.0f * (head.orientation.w * head.orientation.y
+                              + head.orientation.x * head.orientation.z),
+                        1.0f - 2.0f * (head.orientation.y * head.orientation.y
+                                     + head.orientation.x * head.orientation.x));
+
+    out->position = head.position;
+    out->orientation.x = 0.0f;
+    out->orientation.y = sinf(yaw * 0.5f);
+    out->orientation.z = 0.0f;
+    out->orientation.w = cosf(yaw * 0.5f);
 }
 
 /* v rotated by the inverse of q (q assumed unit length) */
@@ -1076,6 +1105,39 @@ static bool32 vrUpdateManagerPanel(XrTime displayTime)
     return TRUE;
 }
 
+/* Re-place the hologram in front of the player, here and now.
+   vr.anchorPose is only ever assigned outside gameplay, so in-game the battle
+   stays anchored to wherever the head happened to be on the main menu - which
+   for a standing player means it can end up at the wrong height, or behind
+   them, with no way back. This shifts vr.worldOffset (already composed into
+   both the eye anchor and vrWorldFrameBegin) so the anchor lands at the
+   current head position, keeping the anchor's own heading. */
+static void vrRecentreHologram(XrTime displayTime)
+{
+    XrSpaceLocation head;
+    XrPosef wanted;
+
+    memset(&head, 0, sizeof(head));
+    head.type = XR_TYPE_SPACE_LOCATION;
+    if (XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &head))
+        || !(head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+        || !(head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+    {
+        SDL_Log("VR: recentre skipped, head not located (flags 0x%x)",
+                (unsigned)head.locationFlags);
+        return;
+    }
+    vrAnchorFromHead(head.pose, &wanted);
+    vr.worldOffset.x = wanted.position.x - vr.anchorPose.position.x;
+    vr.worldOffset.y = wanted.position.y - vr.anchorPose.position.y;
+    vr.worldOffset.z = wanted.position.z - vr.anchorPose.position.z;
+    /* adopt the current heading too, so the fleet faces the way you do */
+    vr.anchorPose.orientation = wanted.orientation;
+    SDL_Log("VR: hologram recentred, offset=(%.2f %.2f %.2f) yaw q=(%.3f %.3f)",
+            vr.worldOffset.x, vr.worldOffset.y, vr.worldOffset.z,
+            vr.anchorPose.orientation.y, vr.anchorPose.orientation.w);
+}
+
 static void vrManagerPanelReset(void)
 {
     if (vr.managerState != VR_MGR_HIDDEN)
@@ -1179,11 +1241,12 @@ static void vrUpdateScreenPose(XrTime displayTime)
     if (!vr.quadPlaced)
     {
         vr.quadPose = desired;
-        vr.anchorPose = location.pose;                      //world anchor
+        vrAnchorFromHead(location.pose, &vr.anchorPose);    //world anchor
         vr.quadPlaced = TRUE;
         vr.quadFollowing = FALSE;
-        SDL_Log("VR: screen anchored at (%.2f, %.2f, %.2f)",
-                desired.position.x, desired.position.y, desired.position.z);
+        SDL_Log("VR: screen anchored at (%.2f, %.2f, %.2f), anchor yaw q=(%.3f %.3f)",
+                desired.position.x, desired.position.y, desired.position.z,
+                vr.anchorPose.orientation.y, vr.anchorPose.orientation.w);
         return;
     }
 
@@ -1608,6 +1671,19 @@ static void vrCardDrawStatus(vrcard const* card)
 
     sprintf(text, "%d", (int)universe.curPlayerPtr->classtotals[CLASS_Frigate]);
     vrCardRow(inner, y, width, "frigates", text, label, value);
+    y += lineHeight;
+
+    /* While an order is being placed, depth is the one thing stereo cannot
+       convey: past ~10m of hologram the disparity is indistinguishable from
+       infinity, so the number is the only real feedback the player gets. */
+    if (vrWorldMoveActive())
+    {
+        color const active = colRGB(120, 255, 170);
+
+        y += lineHeight / 3;
+        sprintf(text, "%d", (int)vrWorldCursorDist());
+        vrCardRow(inner, y, width, "order depth", text, active, active);
+    }
 }
 
 /* Lay a card out in the top-left of the window framebuffer and blit it into
@@ -2271,7 +2347,7 @@ static void vrUpdateInput(XrTime time)
                              && vrWorldMoveBegin((sdword)hand))
                     {
                         vr.contextGestureMode = VR_CONTEXT_MOVE;
-                        vr.moveHeight = 0.0f;
+                        vr.moveDepthInput = 0.0f;
                         vrHapticPulse(hand, 0.24f, 26000000);
                         SDL_Log("VR: hand %u move preview begin", (unsigned)hand);
                     }
@@ -2316,8 +2392,8 @@ static void vrUpdateInput(XrTime time)
                 else
                 {
                     issued = vrWorldMoveCommit();
-                    SDL_Log("VR: hand %u move commit issued=%d height=%.3f",
-                            (unsigned)hand, (int)issued, vr.moveHeight);
+                    SDL_Log("VR: hand %u move commit issued=%d depth=%.0f",
+                            (unsigned)hand, (int)issued, vrWorldCursorDist());
                 }
                 if (vr.selectGestureMode == VR_SELECT_PATH)
                 {
@@ -2336,7 +2412,7 @@ static void vrUpdateInput(XrTime time)
             }
             vr.contextGestureHand = -1;
             vr.contextGestureMode = VR_GESTURE_NONE;
-            vr.moveHeight = 0.0f;
+            vr.moveDepthInput = 0.0f;
         }
         vr.prevContext[hand] = context[hand];
     }
@@ -2345,29 +2421,25 @@ static void vrUpdateInput(XrTime time)
         && vr.contextGestureHand >= 0 && vrWorldMoveActive())
     {
         real32 rx, ry;
-        real32 heightInput;
 
+        /* Raw deflection, deadzoned. vrworld scales the cursor's distance by
+           it, so no accumulator is needed here and the depth cannot drift. */
         vrActionStick(VR_HAND_RIGHT, &rx, &ry);
-        if (fabsf(ry) > 0.20f)
+        vr.moveDepthInput = 0.0f;
+        if (fabsf(ry) > VR_MOVE_DEPTH_DEADZONE)
         {
-            heightInput = (fabsf(ry) - 0.20f) / 0.80f;
+            vr.moveDepthInput = (fabsf(ry) - VR_MOVE_DEPTH_DEADZONE)
+                              / (1.0f - VR_MOVE_DEPTH_DEADZONE);
             if (ry < 0.0f)
             {
-                heightInput = -heightInput;
-            }
-            vr.moveHeight += heightInput * VR_MOVE_HEIGHT_RATE * deltaSeconds;
-            if (vr.moveHeight > VR_MOVE_HEIGHT_LIMIT)
-            {
-                vr.moveHeight = VR_MOVE_HEIGHT_LIMIT;
-            }
-            else if (vr.moveHeight < -VR_MOVE_HEIGHT_LIMIT)
-            {
-                vr.moveHeight = -VR_MOVE_HEIGHT_LIMIT;
+                vr.moveDepthInput = -vr.moveDepthInput;
             }
         }
-        vrWorldMoveUpdate(vr.contextGestureHand, vr.moveHeight);
+        /* time-based so depth speed does not follow the frame rate */
+        vrWorldMoveUpdate(vr.contextGestureHand,
+                          vr.moveDepthInput * VR_MOVE_DEPTH_RATE * deltaSeconds);
         /* after the destination has been recomputed for this frame, so the
-           stroke records the height the stick is currently dialling in */
+           stroke records the depth the stick is currently dialling in */
         vrWorldPathSample(vr.contextGestureHand);
     }
 
@@ -2393,7 +2465,7 @@ static void vrUpdateInput(XrTime time)
                 {
                     vr.contextGestureHand = -1;
                     vr.contextGestureMode = VR_GESTURE_NONE;
-                    vr.moveHeight = 0.0f;
+                    vr.moveDepthInput = 0.0f;
                 }
                 if (vr.selectGestureMode == VR_SELECT_PATH)
                 {
@@ -2565,8 +2637,14 @@ static void vrUpdateInput(XrTime time)
                     {
                         /* F equivalent: focus the camera on the selection,
                            and bring the hologram back home */
+                        /* One intent, "bring me back to my fleet": focus the
+                           game camera on the selection and put the hologram
+                           back in front of the player. Zeroing worldOffset
+                           was the old behaviour and did the opposite of
+                           useful - it snapped back to the anchor captured on
+                           the main menu. */
                         vrWorldCameraFocusSelection();
-                        vr.worldOffset.x = vr.worldOffset.y = vr.worldOffset.z = 0.0f;
+                        vrRecentreHologram(time);
                         vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
                         vr.prevStickClick[hand] = pressed;
                         vr.stickClickKey[hand] = 0;
@@ -2673,7 +2751,7 @@ static void vrReleaseInputCapture(void)
     vr.stickRotating = FALSE;
     vr.pointerValid = FALSE;
     vr.pointerHand = -1;
-    vr.moveHeight = 0.0f;
+    vr.moveDepthInput = 0.0f;
     vr.lastInputTime = 0;
 }
 

@@ -2726,24 +2726,8 @@ docapslock:
     mrLastKeyTime = universe.totaltimeelapsed;
 }
 
-//bit fields for the action mask
-#define MAM_Info                0x00000001
-#define MAM_Formations          0x00000002
-#define MAM_Tactics             0x00000004
-#define MAM_Move                0x00000008
-#define MAM_Scuttle             0x00000010
-#define MAM_Retire              0x00000020
-#define MAM_Divider             0x00000040
-#define MAM_Dock                0x00000080
-#define MAM_Launch              0x00000100
-#define MAM_Harvest             0x00000200
-#define MAM_Build               0x00000400
-#define MAM_Research            0x00000800
-#define MAM_Trade               0x00001000
-#define MAM_Hyperspace          0x00002000
-#define MAM_BasicSet            (MAM_Info | MAM_Formations | MAM_Tactics | MAM_Move)
-#define MAM_MedSet              MAM_BasicSet | MAM_Scuttle
-#define MAM_ExtSet              MAM_BasicSet | MAM_Scuttle | MAM_Retire
+//action mask bit fields now live in mainrgn.h: the VR command wheel
+//offers exactly the verbs this menu would, so they are shared vocabulary
 
 struct
 {
@@ -2823,6 +2807,34 @@ udword mrMenuActionsByShipType[TOTAL_NUM_SHIPS] =
     /* ResearchStation       */  MAM_ExtSet,
     /* JunkYardDawg           */  MAM_ExtSet
 };
+
+/*-----------------------------------------------------------------------------
+    Name        : mrSelectionActionMask
+    Description : OR of the context-menu action bits across the current
+                  selection, exactly as mrRightClickMenu composes it. Shared
+                  so the VR command wheel offers the same verbs, and greys out
+                  the same ones, as the right-click menu.
+    Inputs      :
+    Outputs     :
+    Return      : action mask, 0 when nothing is selected
+----------------------------------------------------------------------------*/
+udword mrSelectionActionMask(void)
+{
+    udword actionMask = 0;
+    sdword index;
+
+    for (index = 0; index < selSelected.numShips; index++)
+    {
+        ShipType type = selSelected.ShipPtr[index]->shiptype;
+
+        if (type < TOTAL_NUM_SHIPS)
+        {
+            actionMask |= mrMenuActionsByShipType[type];
+        }
+    }
+    return actionMask;
+}
+
 
 char *mrMenuItemByFormation[] =
 {

@@ -87,14 +87,20 @@ void vrWorldSweepCancel(void);
 vrworldintent vrWorldContextIntent(sdword hand);
 bool32 vrWorldContextOrder(sdword hand);
 
-/* Move order, pie-plate semantics in 3D: begin on empty space, update
-   follows ray/plane intersection with heightMetres vertical offset,
-   commit issues clWrapMove. Returns FALSE from Begin when no selection. */
+/* Move order placed freely in 3D. The destination rides the hand's ray at a
+   cursor depth, seeded from whatever the beam is touching (or the fleet's
+   own distance) and then scaled by depthDelta, a fractional change applied
+   for this frame. There is no projection plane, so unlike the mouse pie
+   plate there is no viewing angle at which placement degenerates. Returns
+   FALSE from Begin when there is no selection. */
 bool32 vrWorldMoveBegin(sdword hand);
-void vrWorldMoveUpdate(sdword hand, real32 heightMetres);
+void vrWorldMoveUpdate(sdword hand, real32 depthDelta);
 bool32 vrWorldMoveCommit(void);
 void vrWorldMoveCancel(void);
 bool32 vrWorldMoveActive(void);
+
+/* Current cursor depth in game units, for diagnostics */
+real32 vrWorldCursorDist(void);
 
 /* Freehand flight paths. While a move preview is running, holding the
    trigger draws a path through space: the swept points are smoothed into a

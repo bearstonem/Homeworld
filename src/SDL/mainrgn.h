@@ -109,6 +109,29 @@ udword mrRegionProcess(struct tagRegion *reg, sdword ID, udword event, udword da
 //region-draw routine for the main region
 void mrRegionDraw(regionhandle reg);
 
+//bit fields for the action mask
+#define MAM_Info                0x00000001
+#define MAM_Formations          0x00000002
+#define MAM_Tactics             0x00000004
+#define MAM_Move                0x00000008
+#define MAM_Scuttle             0x00000010
+#define MAM_Retire              0x00000020
+#define MAM_Divider             0x00000040
+#define MAM_Dock                0x00000080
+#define MAM_Launch              0x00000100
+#define MAM_Harvest             0x00000200
+#define MAM_Build               0x00000400
+#define MAM_Research            0x00000800
+#define MAM_Trade               0x00001000
+#define MAM_Hyperspace          0x00002000
+#define MAM_BasicSet            (MAM_Info | MAM_Formations | MAM_Tactics | MAM_Move)
+#define MAM_MedSet              MAM_BasicSet | MAM_Scuttle
+#define MAM_ExtSet              MAM_BasicSet | MAM_Scuttle | MAM_Retire
+
+//OR of the action bits for the current selection - shared with the VR
+//command wheel so it offers exactly what the right-click menu would
+udword mrSelectionActionMask(void);
+
 //right-click callback functions
 void mrDockingOrders(char *string, featom *atom);
 void mrDeltaFormation(char *string, featom *atom);

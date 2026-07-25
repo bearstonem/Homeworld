@@ -104,15 +104,20 @@ Touch controls in the 3D world:
   with depth, and it takes every ship the beam passes over.
 - Hold A/X to preview a context order and release to issue it: attack an
   enemy, harvest a resource, dock at one of your ships, or move when aimed
-  at empty space. During a move preview, right-stick Y changes height and
-  B/Y cancels.
+  at empty space. The destination is placed freely in 3D: it rides your aim
+  ray at a cursor depth that starts level with your ships, and right-stick Y
+  moves it toward or away from you. There is no projection plane, so unlike
+  the mouse pie plate there is no viewing angle at which placement breaks
+  down. A shadow ring on the fleet's plane, a vertical line and a line back
+  to the fleet make the depth readable, and the right wrist card shows it as
+  a number. B/Y cancels.
 - To fly a route rather than a straight line, hold the trigger during a move
   preview and sweep: the swept points are smoothed into a Catmull-Rom spline
   and resampled by arc length into evenly spaced waypoints, drawn as a curve
   with a ring on each. Releasing A/X sends the selection along them, ring by
-  ring. Right-stick Y still sets height while drawing, so a route can climb
-  and dive. Homeworld has no waypoint order of its own, so each leg is issued
-  as a plain move once the previous one is reached.
+  ring. Right-stick Y still sets depth while drawing, so a route is a genuine
+  space curve that can climb and dive. Homeworld has no waypoint order of its
+  own, so each leg is issued as a plain move once the previous one is reached.
 - Ray colors show the pending action; short controller pulses confirm
   target acquisition, selection, and issued orders.
 - The left stick orbits and right-stick Y zooms; squeezing both grips at once
@@ -120,8 +125,10 @@ Touch controls in the 3D world:
   right stick into a fleet traversal control: flick it left or right to step
   the camera through your ships. The grip is required so that cycling cannot
   fire by accident while zooming, and it suppresses zoom for as long as it is
-  held. Left-stick click focuses the selection; right-stick click opens
-  Sensors, and B/Y closes it again.
+  held. Left-stick click means "bring me back to my fleet": it focuses the
+  camera on your selection and re-places the hologram in front of you, which
+  is also how you recover if you have walked away from it or it ended up at
+  the wrong height. Right-stick click opens Sensors, and B/Y closes it again.
 - Ships render at true physical scale. Homeworld's N-LIPS scaling, which
   inflates a ship in proportion to its camera depth to keep small craft
   readable on a flat monitor, is disabled in VR: nothing cancels it through
