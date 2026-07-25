@@ -3,9 +3,20 @@
 ## Goal
 
 No screen during gameplay: selection, orders and camera control happen
-directly in the 3D holographic battle space. Grab the space with the grip
-buttons to pan/orbit it, pinch with both hands to zoom, point at ships to
-select, and issue orders with the controller ray. Dense 2D interfaces
+directly in the 3D holographic battle space. Orbit with the left stick,
+pinch with both hands to zoom, point at ships to select, and issue orders
+with the controller ray.
+
+There is deliberately **no pan**. Homeworld's camera is focus-locked by
+design: every camera verb is a focus verb (`ccFocus`, `ccFocusFar`,
+`ccFocusOnMyMothership`, `ccForwardFocus`, `ccCancelFocus`), and
+`NewSetFocusPoint` recomputes `remembercam.lookatpoint` from the focus
+bounding box every tick, so a pan would be overwritten every frame. Looking
+elsewhere means focusing on something, which the command wheel, hotkey group
+recall and right-grip fleet cycling all expose. Recentring the hologram
+(left-stick click) is a separate, presentation-only concern: it moves where
+the hologram sits in the room via `vr.worldOffset`, not the game camera
+through the world. Dense 2D interfaces
 (Build/Research/Sensors managers, menus, tutorial wizard) live on a small
 panel attached to the left wrist; out of game the panel is a lazy-follow
 floating screen.
@@ -61,8 +72,8 @@ cutscenes.
   (`vecLineIntersectWithXYPlane`), height offset in a second stage,
   commit via `clWrapMove` (+`Game_Move*` tutorial messages), ghost disc
   and vertical line drawn as overlays.
-- **Grips**: one grip = grab space (pan lookatpoint + wrist orbit);
-  both grips = pinch zoom (`cameraZoom`) + pair rotation (orbit).
+- **Grips**: both grips = pinch zoom (`cameraZoom`) + pair rotation (orbit).
+  One grip does not pan - see the note above.
 - **Overlays** (aim rays, hover ring, selection rings, sweep preview,
   move disc) drawn in game-world space with `primLine3` /
   `primCircleOutline3` inside each eye pass right after
@@ -85,9 +96,9 @@ cutscenes.
 ## Verification (on Quest 3 via wireless adb)
 
 1. Identity refactor: image identical to previous build.
-2. Grab pan/orbit/zoom: 1:1, no rubber-banding (CameraChase converged),
+2. Pinch zoom/orbit: 1:1, no rubber-banding (CameraChase converged),
    persists on release; residual X engages only past clamps and unwinds
-   first; reset gesture recovers.
+   first; recentre recovers.
 3. Hover ring lands on pointed ships in both eyes at multiple scales
    (validates the whole inverse chain).
 4. Select/additive/sweep; orders (move with disc ghost, attack, harvest,

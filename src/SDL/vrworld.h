@@ -120,8 +120,14 @@ sdword vrWorldPathPointCount(void);
 /* Camera manipulation (grab gestures). Deltas in LOCAL metres / radians;
    conversion to game units happens inside. Returns the residual fraction
    the camera clamps refused (0 = fully applied), for folding into the
-   free VR transform. */
-void vrWorldCameraPan(real32 const deltaMetres[3]);
+   free VR transform.
+
+   There is deliberately no pan. Homeworld's camera is focus-locked by
+   design - every camera verb is a focus verb, and NewSetFocusPoint
+   recomputes remembercam.lookatpoint from the focus bounding box every
+   tick - so panning would fight the focus stack every frame. Looking
+   somewhere else is done by focusing on something, which the command wheel
+   and fleet cycling both expose. */
 real32 vrWorldCameraOrbit(real32 deltaYaw, real32 deltaPitch);
 real32 vrWorldCameraZoom(real32 ratio);
 void vrWorldCameraFocusSelection(void);

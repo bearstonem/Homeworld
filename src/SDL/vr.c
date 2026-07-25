@@ -266,18 +266,16 @@ typedef struct {
     bool32       managerPlaced;     /* panel pose established in space */
     bool32       managerPoseValid;  /* this frame's pose is submittable */
     bool32       managerFollowing;  /* panel gliding back into view */
-    bool32       grabValid[VR_HAND_COUNT];
-    XrVector3f   grabPrev[VR_HAND_COUNT];
     bool32       pinchValid;
     real32       pinchPrevDist;
     real32       pinchPrevAzimuth;
     real32       pinchPrevElev;
-    XrVector3f   crawlVel;          /* throw-glide velocity, metres/frame */
     sdword       prevCycleDir;      /* right-stick flick edge state */
-    XrVector3f   worldOffset;       /* free hologram translation, metres (the
-                                       game camera cannot pan: it is focus-
-                                       locked, so drags translate the world
-                                       in LOCAL space instead) */
+    XrVector3f   worldOffset;       /* where the hologram sits in the room,
+                                       metres. Set by recentring, which is a
+                                       presentation concern - it moves the
+                                       hologram around the player, not the
+                                       game camera through the world. */
     rawGlGetIntegerv_t          rawGetIntegerv;
     rawGlGetError_t             rawGetError;
     rawGlGenFramebuffers_t      rawGenFramebuffers;
@@ -2402,8 +2400,6 @@ static void vrUpdateInput(XrTime time)
             vr.pinchPrevAzimuth = azimuth;
             vr.pinchPrevElev = elev;
             vr.pinchValid = TRUE;
-            vr.grabValid[VR_HAND_LEFT] = vr.grabValid[VR_HAND_RIGHT] = FALSE;
-            vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
         }
         else
         {
@@ -2411,7 +2407,6 @@ static void vrUpdateInput(XrTime time)
                focus on it (left stick click). Single-grip drags do nothing;
                two-grip pinch handles orbit/zoom above. */
             vr.pinchValid = FALSE;
-            vr.grabValid[VR_HAND_LEFT] = vr.grabValid[VR_HAND_RIGHT] = FALSE;
         }
     }
 
@@ -3067,7 +3062,6 @@ static void vrUpdateInput(XrTime time)
                            the main menu. */
                         vrWorldCameraFocusSelection();
                         vrRecentreHologram(time);
-                        vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
                         vr.prevStickClick[hand] = pressed;
                         vr.stickClickKey[hand] = 0;
                         continue;

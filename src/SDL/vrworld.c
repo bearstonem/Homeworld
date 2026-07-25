@@ -1664,28 +1664,6 @@ static void vrwCameraTouched(sdword flags)
     }
 }
 
-void vrWorldCameraPan(real32 const deltaMetres[3])
-{
-    vector deltaCam, deltaWorld, newLookat;
-
-    if (vrwCameraLocked())
-    {
-        return;
-    }
-    /* hand delta is in LOCAL space = (scaled) camera space; rotate into the
-       world with the lookat inverse so "drag right" pans consistently */
-    deltaCam.x = -deltaMetres[0] * vrw.scale;
-    deltaCam.y = -deltaMetres[1] * vrw.scale;
-    deltaCam.z = -deltaMetres[2] * vrw.scale;
-    vrwTransformDir(vrw.lookatInv, &deltaCam, &deltaWorld);
-
-    vecAdd(newLookat, vrwRememberCamera()->lookatpoint, deltaWorld);
-    cameraChangeLookatpoint(vrwRememberCamera(), &newLookat);
-    vecAdd(newLookat, vrwActualCamera()->lookatpoint, deltaWorld);
-    cameraChangeLookatpoint(vrwActualCamera(), &newLookat);
-    vrwCameraTouched(CAM_USER_MOVED);
-}
-
 real32 vrWorldCameraOrbit(real32 deltaYaw, real32 deltaPitch)
 {
     real32 beforeDecl, applied;
