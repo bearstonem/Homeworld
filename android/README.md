@@ -100,9 +100,12 @@ Touch controls in the 3D world:
   ships of the same type. (The left trigger opens the command wheel instead,
   see below.)
 - Pull the right trigger on empty space, sweep the ray across ships, then
-  release to commit the group selection. The sweep is a brush, not a hairline: its
-  capture radius widens with distance the way a screen-space band box does
-  with depth, and it takes every ship the beam passes over.
+  release to commit the group selection. The sweep is a brush, not a hairline:
+  its capture radius widens with distance the way a screen-space band box does
+  with depth, and it takes every ship the beam passes over. While sweeping,
+  rings down the beam show the capture cone at the fleet's depth and a trail
+  shows the region already swept - drawn as a cone rather than a box, because
+  a cone is the shape that actually decides which ships are caught.
 - The trigger both selects and issues the default order, told apart by what is
   under it, exactly as Homeworld's left mouse button does in `mrObjectClick`:
   one of your own ships selects it, while a hostile ship, a resource or a
@@ -176,8 +179,17 @@ Touch controls in the 3D world:
   manager detaches the taskbar regions from the region tree and modal
   front-end screens stop events propagating to it, so those buttons are inert
   by the original game's design, not by omission here.
-- Right-grip+B/Y opens the Build Manager, and an unmodified B/Y closes any
-  open manager - Construction, Launch, Research, Trade or Sensors. Sensors is
+- The two hands have distinct jobs. The **left** is the commander's: the
+  trigger opens the command wheel, X is undo, Y shows and hides the wrist
+  panel and its cards, the stick orbits and its click focuses the selection
+  and recentres the hologram. The **right** is the pointer: the trigger
+  selects and issues default orders, A previews and commits a smart order, B
+  cancels or closes, the stick zooms and sets order depth, and the grip means
+  navigate and nothing else - flick the right stick under it to cycle the
+  fleet, or squeeze both grips to pinch the hologram. The right grip used to
+  carry four unrelated meanings; Build and the dock chord moved to the wheel
+  and the smart order respectively.
+- An unmodified B closes any - Construction, Launch, Research, Trade or Sensors. Sensors is
   full-screen and suppresses the main view like the rest, so it is treated as
   a manager too rather than being squeezed onto the wrist panel. Manager
   screens are dense 2D UI, so they are presented as a

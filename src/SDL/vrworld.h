@@ -159,10 +159,6 @@ char const* vrWorldManagerName(void);
    manager's panel ever became presentable. Returns TRUE when none remain. */
 bool32 vrWorldCloseManagers(void);
 
-/* Right-grip+B: open the Build Manager, or close it when already open.
-   Returns TRUE when the state was toggled. */
-bool32 vrWorldToggleBuildManager(void);
-
 /*-----------------------------------------------------------------------------
     Command wheel
 

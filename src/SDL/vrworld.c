@@ -66,6 +66,7 @@ extern bool32 gameIsRunning;                                //Globals.c
                                        a group rather than threading between
                                        ships one aim-cone at a time */
 #define VRW_SWEEP_MARGIN   1.60f    /* collision inflation while sweeping */
+#define VRW_SWEEP_TRAIL    48       /* samples of the swept path to remember */
 #define VRW_RAY_LENGTH     100000.0f
 #define VRW_CURSOR_MIN     400.0f   /* nearest the cursor may sit: 50 units is
                                        5cm of hologram, i.e. inside the hand */
@@ -103,6 +104,9 @@ static struct {
     bool32  sweepActive;
     sdword  sweepHand;
     MaxSelection sweepPreview;
+    vector  sweepTrail[VRW_SWEEP_TRAIL];    /* far edge of the brush, recent */
+    sdword  sweepTrailCount;
+    real32  sweepReach;                     /* how far down the ray to draw */
 
     /* move order */
     bool32  moveActive;
@@ -195,6 +199,7 @@ static bool32 vrwFinite(real32 v)
 }
 
 static void vrwPathFollow(void);
+static real32 vrwDistance(vector const* a, vector const* b);
 static bool32 vrwOrdersBlocked(void);
 static bool32 vrwPlayerShipSelectable(SpaceObjRotImpTarg const* obj);
 
@@ -408,27 +413,6 @@ bool32 vrWorldManagerPanelAnchor(real32 outPosMetres[3], real32* outRadiusMetres
     outPosMetres[2] = local.z / vrw.scale;
     *outRadiusMetres = radius < 0.0f ? 0.0f : (radius > 20.0f ? 20.0f : radius);
     return TRUE;
-}
-
-bool32 vrWorldToggleBuildManager(void)
-{
-    if (!vrw.worldValid)
-    {
-        return FALSE;
-    }
-    if (cmActive)
-    {
-        cmCloseIfOpen();
-        return !cmActive;
-    }
-
-    /* Manager modes are mutually exclusive. Match the taskbar behavior by
-       closing another full-screen manager before opening Construction. */
-    lmCloseIfOpen();
-    rmCloseIfOpen();
-    tutGameMessage("KB_Build");
-    mrBuildShips(NULL, NULL);
-    return cmActive;
 }
 
 /*-----------------------------------------------------------------------------
@@ -873,6 +857,34 @@ static void vrwSweepAccumulate(vrwray const* ray)
 {
     Node* node;
 
+    /* Remember where the brush has been so the overlay can show the region
+       actually swept, not just which ships it happened to catch. */
+    {
+        vector far;
+
+        far.x = ray->origin.x + ray->dir.x * vrw.sweepReach;
+        far.y = ray->origin.y + ray->dir.y * vrw.sweepReach;
+        far.z = ray->origin.z + ray->dir.z * vrw.sweepReach;
+        if (vrw.sweepTrailCount == 0
+            || vrwDistance(&far, &vrw.sweepTrail[vrw.sweepTrailCount - 1])
+               > vrw.sweepReach * 0.02f)
+        {
+            if (vrw.sweepTrailCount >= VRW_SWEEP_TRAIL)
+            {
+                sdword i;
+
+                /* keep the whole stroke by halving resolution, as the path
+                   sampler does, rather than dropping the start of it */
+                for (i = 0; i * 2 < vrw.sweepTrailCount; i++)
+                {
+                    vrw.sweepTrail[i] = vrw.sweepTrail[i * 2];
+                }
+                vrw.sweepTrailCount = i;
+            }
+            vrw.sweepTrail[vrw.sweepTrailCount++] = far;
+        }
+    }
+
     for (node = universe.RenderList.head;
          node != NULL && vrw.sweepPreview.numShips < COMMAND_MAX_SHIPS;
          node = node->next)
@@ -1130,9 +1142,31 @@ bool32 vrWorldSelectType(sdword hand, bool32 additive)
 
 void vrWorldSweepBegin(sdword hand)
 {
+    vrwray const* ray = &vrw.ray[hand];
+
     vrw.sweepActive = TRUE;
     vrw.sweepHand = hand;
     vrw.sweepPreview.numShips = 0;
+    vrw.sweepTrailCount = 0;
+
+    /* How far to draw the brush. The capture cone is unbounded, so pick a
+       reach the player can actually judge: the fleet's depth along the ray,
+       since that is where their ships are and therefore where the brush
+       matters. */
+    if (selSelected.numShips > 0 || vrw.sweepPreview.numShips > 0)
+    {
+        selCentrePointCompute();
+    }
+    {
+        vector toFleet;
+
+        vecSub(toFleet, selCentrePoint, ray->origin);
+        vrw.sweepReach = vecDotProduct(toFleet, ray->dir);
+    }
+    if (!(vrw.sweepReach > 1000.0f))
+    {
+        vrw.sweepReach = 3.0f * vrw.scale;                  //3 metres of hologram
+    }
 }
 
 bool32 vrWorldSweepCommit(sdword hand, bool32 additive)
@@ -1170,6 +1204,7 @@ bool32 vrWorldSweepCommit(sdword hand, bool32 additive)
             (int)vrw.sweepPreview.numShips, (int)selSelected.numShips,
             (int)additive);
     vrw.sweepPreview.numShips = 0;
+    vrw.sweepTrailCount = 0;
     return changed;
 }
 
@@ -1177,6 +1212,7 @@ void vrWorldSweepCancel(void)
 {
     vrw.sweepActive = FALSE;
     vrw.sweepPreview.numShips = 0;
+    vrw.sweepTrailCount = 0;
 }
 
 /*-----------------------------------------------------------------------------
@@ -2019,6 +2055,44 @@ void vrWorldDrawOverlays(void)
         primCircleOutline3(&ship->collInfo.collPosition,
                            ship->staticinfo->staticheader.staticCollInfo.collspheresize * 1.1f,
                            24, 0, selColor, Z_AXIS);
+    }
+
+    /* Sweep gizmo. The brush is a cone widening from the hand, not a box, so
+       that is what gets drawn - a box would misstate which ships are actually
+       inside it. Rings down the ray show the capture volume, and the trail of
+       recent far-edge positions shows the region already swept. */
+    if (vrw.sweepActive && vrw.sweepHand >= 0
+        && vrw.ray[vrw.sweepHand].valid && vrw.sweepReach > 0.0f)
+    {
+        vrwray const* ray = &vrw.ray[vrw.sweepHand];
+        color const brush = colRGB(90, 220, 255);
+        color const trailColor = colRGB(50, 130, 170);
+        sdword const rings = 4;
+        sdword step;
+
+        for (step = 1; step <= rings; step++)
+        {
+            real32 t = vrw.sweepReach * (real32)step / (real32)rings;
+            vector centre;
+
+            centre.x = ray->origin.x + ray->dir.x * t;
+            centre.y = ray->origin.y + ray->dir.y * t;
+            centre.z = ray->origin.z + ray->dir.z * t;
+            /* same radius the accumulator uses at this depth, so the gizmo
+               cannot promise a reach the picker does not honour */
+            primCircleOutline3(&centre, t * VRW_SWEEP_CONE_TAN, 20, 0, brush,
+                               Z_AXIS);
+        }
+        for (i = 1; i < vrw.sweepTrailCount; i++)
+        {
+            primLine3(&vrw.sweepTrail[i - 1], &vrw.sweepTrail[i], trailColor);
+        }
+        if (vrw.sweepTrailCount > 0)
+        {
+            primLine3(&ray->origin, &vrw.sweepTrail[0], trailColor);
+            primLine3(&ray->origin,
+                      &vrw.sweepTrail[vrw.sweepTrailCount - 1], trailColor);
+        }
     }
 
     for (i = 0; i < vrw.sweepPreview.numShips; i++)

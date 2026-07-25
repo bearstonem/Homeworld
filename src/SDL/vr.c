@@ -111,7 +111,6 @@
 #define VR_CONTEXT_PANEL         1
 #define VR_CONTEXT_ORDER         2
 #define VR_CONTEXT_MOVE          3
-#define VR_CONTEXT_KEY           4
 
 #define VR_DOUBLE_TRIGGER_NS 350000000LL
 #define VR_MOVE_DEPTH_DEADZONE 0.20f
@@ -239,7 +238,6 @@ typedef struct {
     XrTime       lastSelectTime[VR_HAND_COUNT];
     sdword       contextGestureHand;
     sdword       contextGestureMode;
-    sdword       contextKey;        /* key held by an active context chord */
     sdword       backKey[VR_HAND_COUNT];
     sdword       stickClickKey[VR_HAND_COUNT];
     bool32       stickRotating;     /* left stick currently orbiting the camera */
@@ -1616,29 +1614,28 @@ static void vrCardDrawControls(vrcard const* card)
         {"derelict + salvcorv", "salvage"},
         {"damaged + repcorv",   "repair"},
         {"",                    NULL},
-        {"ORDERS  hold A/X",    NULL},
+        {"ORDERS  hold A",      NULL},
         {"on enemy",            "attack"},
         {"on resource",         "harvest"},
         {"on own ship",         "dock"},
         {"on empty",            "move"},
-        {"R-grip + A/X",        "dock order"},
-        {"R-stick Y",           "move height"},
+        {"R-stick Y",           "order depth"},
         {"+ trigger, sweep",    "draw path"},
-        {"release A/X",         "fly path"},
-        {"B/Y",                 "cancel"},
+        {"release A",           "fly path"},
+        {"B",                   "cancel"},
         {"",                    NULL},
         {"CAMERA",              NULL},
         {"L-stick",             "orbit"},
         {"R-stick Y",           "zoom"},
         {"both grips",          "pinch zoom"},
         {"R-grip + R-stick X",  "cycle fleet"},
-        {"L-stick click",       "focus sel"},
+        {"L-stick click",       "focus + recentre"},
         {"R-stick click",       "sensors"},
         {"",                    NULL},
-        {"PANELS",              NULL},
-        {"R-grip + B/Y",        "build mgr"},
-        {"B/Y",                 "close mgr"},
-        {"L-grip + B/Y",        "hide panel"},
+        {"LEFT = COMMANDER",    NULL},
+        {"X",                   "undo"},
+        {"Y",                   "hide panel"},
+        {"B (right)",           "close mgr"},
     };
     sdword const count = (sdword)(sizeof(rows) / sizeof(rows[0]));
     color const heading = colRGB(120, 230, 255);
@@ -2932,12 +2929,18 @@ static void vrUpdateInput(XrTime time)
         {
             if (vr.contextGestureHand < 0 && vr.selectGestureHand < 0)
             {
-                if (grip[VR_HAND_RIGHT] && !managerActive)
+                if (hand == VR_HAND_LEFT && vr.worldInteractive && !managerActive)
                 {
-                    vr.contextKey = SDLK_d;
-                    vrPushKey(SDLK_d, SDL_SCANCODE_D, TRUE);
-                    vr.contextGestureHand = hand;
-                    vr.contextGestureMode = VR_CONTEXT_KEY;
+                    /* Left hand is the commander's: X is undo, not a mirror of
+                       the right hand's order button. The old right-grip+A/X
+                       chord that pushed the Dock key is gone - the smart order
+                       already docks when aimed at a friendly ship, so it was a
+                       third meaning on the right grip for nothing. */
+                    bool32 undone = vrWorldCommand(VRW_CMD_UNDO, 0);
+
+                    vrHapticPulse(hand, undone ? 0.34f : 0.12f,
+                                  undone ? 30000000 : 16000000);
+                    SDL_Log("VR: undo via left X, applied=%d", (int)undone);
                 }
                 else if (panelOwns[hand])
                 {
@@ -3024,11 +3027,6 @@ static void vrUpdateInput(XrTime time)
                     vr.selectGestureHand = -1;
                     vr.selectGestureMode = VR_GESTURE_NONE;
                 }
-            }
-            else if (vr.contextGestureMode == VR_CONTEXT_KEY)
-            {
-                vrPushKey(vr.contextKey, SDL_SCANCODE_D, FALSE);
-                vr.contextKey = 0;
             }
             if (issued)
             {
@@ -3154,46 +3152,27 @@ static void vrUpdateInput(XrTime time)
                 }
                 vrHapticPulse(hand, 0.38f, 35000000);
             }
-            else if (grip[VR_HAND_LEFT])
+            else if (hand == VR_HAND_LEFT)
             {
+                /* Y on the commander's hand shows and hides the wrist panel
+                   and its cards. This used to need left-grip+B/Y, and Build
+                   used to need right-grip+B/Y - both chords are gone, so the
+                   right grip now means one thing only: navigate. Build lives
+                   on the wheel, which reaches every manager. */
                 vr.panelHidden = !vr.panelHidden;
                 vrHapticPulse(hand, 0.25f, 25000000);
                 SDL_Log("VR: wrist panel %s", vr.panelHidden ? "hidden" : "shown");
             }
-            else if (grip[VR_HAND_RIGHT] && vr.worldInteractive)
-            {
-                bool32 opened = vrWorldToggleBuildManager();
-
-                vrHapticPulse(hand, opened ? 0.42f : 0.10f,
-                              opened ? 40000000 : 18000000);
-                SDL_Log("VR: Build Manager open requested handled=%d manager=%s",
-                        (int)opened, vrWorldManagerName());
-                if (opened)
-                {
-                    /* vrUpdateScreenPose normally runs just before input.
-                       Place the panel now so a newly opened manager never
-                       spends its first compositor frame at the wrist pose. */
-                    vrUpdateScreenPose(time);
-                }
-            }
             else
             {
-                vr.backKey[hand] = grip[VR_HAND_RIGHT] ? SDLK_b : SDLK_ESCAPE;
-                SDL_Log("VR: hand %u dispatching %s key",
-                        (unsigned)hand,
-                        vr.backKey[hand] == SDLK_b ? "Build" : "Escape");
-                vrPushKey(vr.backKey[hand],
-                          (vr.backKey[hand] == SDLK_b)
-                              ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE,
-                          TRUE);
+                vr.backKey[hand] = SDLK_ESCAPE;
+                SDL_Log("VR: hand %u dispatching Escape", (unsigned)hand);
+                vrPushKey(SDLK_ESCAPE, SDL_SCANCODE_ESCAPE, TRUE);
             }
         }
         else if (!back[hand] && vr.prevBack[hand] && vr.backKey[hand] != 0)
         {
-            vrPushKey(vr.backKey[hand],
-                      (vr.backKey[hand] == SDLK_b)
-                          ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE,
-                      FALSE);
+            vrPushKey(vr.backKey[hand], SDL_SCANCODE_ESCAPE, FALSE);
             vr.backKey[hand] = 0;
         }
         vr.prevBack[hand] = back[hand];
@@ -3227,10 +3206,6 @@ static void vrUpdateInput(XrTime time)
                 if (vr.contextGestureMode == VR_CONTEXT_MOVE)
                 {
                     intent = VRW_INTENT_MOVE;
-                }
-                else if (vr.contextGestureMode == VR_CONTEXT_KEY)
-                {
-                    intent = VRW_INTENT_DOCK;
                 }
                 else
                 {
@@ -3360,10 +3335,6 @@ static void vrReleaseInputCapture(void)
     {
         vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
     }
-    else if (vr.contextGestureMode == VR_CONTEXT_KEY && vr.contextKey != 0)
-    {
-        vrPushKey(vr.contextKey, SDL_SCANCODE_D, FALSE);
-    }
     if (vrWorldMoveActive())
     {
         vrWorldMoveCancel();
@@ -3380,10 +3351,7 @@ static void vrReleaseInputCapture(void)
     {
         if (vr.backKey[hand] != 0)
         {
-            vrPushKey(vr.backKey[hand],
-                      vr.backKey[hand] == SDLK_b
-                          ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE,
-                      FALSE);
+            vrPushKey(vr.backKey[hand], SDL_SCANCODE_ESCAPE, FALSE);
         }
         if (vr.stickClickKey[hand] != 0)
         {
@@ -3411,7 +3379,6 @@ static void vrReleaseInputCapture(void)
     vr.selectGestureMode = VR_GESTURE_NONE;
     vr.contextGestureHand = -1;
     vr.contextGestureMode = VR_GESTURE_NONE;
-    vr.contextKey = 0;
     vr.stickRotating = FALSE;
     vr.pointerValid = FALSE;
     vr.pointerHand = -1;
