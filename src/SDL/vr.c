@@ -140,6 +140,13 @@ typedef struct {
     bool32       worldInteractive;  /* game world exists; native 3D interaction on */
     sdword       activeHand;
     real32       moveHeight;        /* metres of vertical offset in a move order */
+    bool32       panelHidden;       /* wrist panel toggled off in-game */
+    bool32       grabValid[VR_HAND_COUNT];
+    XrVector3f   grabPrev[VR_HAND_COUNT];
+    bool32       pinchValid;
+    real32       pinchPrevDist;
+    real32       pinchPrevAzimuth;
+    real32       pinchPrevElev;
     rawGlGetIntegerv_t          rawGetIntegerv;
     rawGlGetError_t             rawGetError;
     rawGlGenFramebuffers_t      rawGenFramebuffers;
@@ -675,16 +682,20 @@ static bool32 vrUpdateWristPanel(XrTime displayTime)
     vr.quadPose.position.y = grip.pose.position.y + worldOffset.y;
     vr.quadPose.position.z = grip.pose.position.z + worldOffset.z;
 
-    /* billboard the panel toward the head */
-    toPanel.x = vr.quadPose.position.x - head.pose.position.x;
-    toPanel.y = vr.quadPose.position.y - head.pose.position.y;
-    toPanel.z = vr.quadPose.position.z - head.pose.position.z;
-    mag = sqrtf(toPanel.x * toPanel.x + toPanel.y * toPanel.y + toPanel.z * toPanel.z);
-    if (mag > 1e-4f)
+    /* watch-face orientation: locked to the wrist, tilted so the panel
+       faces the user when the arm is raised naturally */
     {
-        toPanel.x /= mag; toPanel.y /= mag; toPanel.z /= mag;
-        vrLookOrientation(toPanel, &vr.quadPose.orientation);
+        XrQuaternionf tilt = {0.0f, -0.7071068f, 0.7071068f, 0.0f};  /* +90degX then 180degZ roll */
+        XrQuaternionf q = grip.pose.orientation;
+
+        vr.quadPose.orientation.w = q.w * tilt.w - q.x * tilt.x - q.y * tilt.y - q.z * tilt.z;
+        vr.quadPose.orientation.x = q.w * tilt.x + q.x * tilt.w + q.y * tilt.z - q.z * tilt.y;
+        vr.quadPose.orientation.y = q.w * tilt.y - q.x * tilt.z + q.y * tilt.w + q.z * tilt.x;
+        vr.quadPose.orientation.z = q.w * tilt.z + q.x * tilt.y - q.y * tilt.x + q.z * tilt.w;
     }
+    (void)head;
+    (void)toPanel;
+    (void)mag;
     vr.quadWidth = VR_WRIST_PANEL_WIDTH;
     vr.quadPlaced = TRUE;
     return TRUE;
@@ -700,10 +711,10 @@ static void vrUpdateScreenPose(XrTime displayTime)
 
     if (vr.worldInteractive)
     {
-        if (vrUpdateWristPanel(displayTime))
-        {
-            return;
-        }
+        /* if the controller loses tracking, the panel holds its last wrist
+           pose instead of reverting to the big floating screen */
+        vrUpdateWristPanel(displayTime);
+        return;
     }
     else
     {
@@ -934,17 +945,78 @@ static void vrUpdateInput(XrTime time)
     if (vr.worldInteractive)
     {
         uword hand;
+        real32 pos[VR_HAND_COUNT][3], dir[VR_HAND_COUNT][3];
+        bool32 tracked[VR_HAND_COUNT];
+        bool32 grip[VR_HAND_COUNT];
 
         for (hand = 0; hand < VR_HAND_COUNT; hand++)
         {
-            real32 pos[3], dir[3];
-            bool32 ok = vrHandAimLocal(hand, time, pos, dir);
-
-            vrWorldSetRay((sdword)hand, pos, dir, ok);
+            tracked[hand] = vrHandAimLocal(hand, time, pos[hand], dir[hand]);
+            grip[hand] = vrActionPressedHand(vr.gripAction, hand);
+            vrWorldSetRay((sdword)hand, pos[hand], dir[hand], tracked[hand]);
         }
         vr.activeHand = vrWorldHandHasTarget(VR_HAND_RIGHT) ? VR_HAND_RIGHT
                       : vrWorldHandHasTarget(VR_HAND_LEFT) ? VR_HAND_LEFT
                       : VR_HAND_RIGHT;
+
+        /* grab-the-space gestures. Two grips: pinch zoom + pair rotation.
+           One grip: 1:1 pan (your hand drags the hologram). */
+        if (grip[VR_HAND_LEFT] && grip[VR_HAND_RIGHT]
+            && tracked[VR_HAND_LEFT] && tracked[VR_HAND_RIGHT])
+        {
+            real32 dx = pos[VR_HAND_RIGHT][0] - pos[VR_HAND_LEFT][0];
+            real32 dy = pos[VR_HAND_RIGHT][1] - pos[VR_HAND_LEFT][1];
+            real32 dz = pos[VR_HAND_RIGHT][2] - pos[VR_HAND_LEFT][2];
+            real32 dist = sqrtf(dx * dx + dy * dy + dz * dz);
+            real32 azimuth = atan2f(dz, dx);
+            real32 elev = (dist > 1e-4f) ? asinf(dy / dist) : 0.0f;
+
+            if (vr.pinchValid && dist > 0.05f && vr.pinchPrevDist > 0.05f)
+            {
+                real32 dAz = azimuth - vr.pinchPrevAzimuth;
+
+                if (dAz > 3.14159f)  dAz -= 6.28318f;
+                if (dAz < -3.14159f) dAz += 6.28318f;
+                vrWorldCameraZoom(vr.pinchPrevDist / dist);
+                vrWorldCameraOrbit(dAz, elev - vr.pinchPrevElev);
+            }
+            vr.pinchPrevDist = dist;
+            vr.pinchPrevAzimuth = azimuth;
+            vr.pinchPrevElev = elev;
+            vr.pinchValid = TRUE;
+            vr.grabValid[VR_HAND_LEFT] = vr.grabValid[VR_HAND_RIGHT] = FALSE;
+        }
+        else
+        {
+            vr.pinchValid = FALSE;
+            for (hand = 0; hand < VR_HAND_COUNT; hand++)
+            {
+                if (grip[hand] && tracked[hand])
+                {
+                    if (vr.grabValid[hand])
+                    {
+                        real32 delta[3] = {pos[hand][0] - vr.grabPrev[hand].x,
+                                           pos[hand][1] - vr.grabPrev[hand].y,
+                                           pos[hand][2] - vr.grabPrev[hand].z};
+                        real32 magSqr = delta[0] * delta[0] + delta[1] * delta[1]
+                                      + delta[2] * delta[2];
+
+                        if (magSqr > 4e-6f)                 //2mm dead-zone
+                        {
+                            vrWorldCameraPan(delta);
+                        }
+                    }
+                    vr.grabPrev[hand].x = pos[hand][0];
+                    vr.grabPrev[hand].y = pos[hand][1];
+                    vr.grabPrev[hand].z = pos[hand][2];
+                    vr.grabValid[hand] = TRUE;
+                }
+                else
+                {
+                    vr.grabValid[hand] = FALSE;
+                }
+            }
+        }
     }
 
     if (!vr.worldInteractive)
@@ -1022,9 +1094,10 @@ static void vrUpdateInput(XrTime time)
     }
 
     /* panel pointer from the aim ray (right hand wins). In-game the panel
-       only receives the pointer when no ship is hovered (wizard clicks). */
+       only receives the pointer when no ship is hovered (wizard clicks),
+       and never while hidden. */
     if (!vr.stickRotating
-        && !(vr.worldInteractive && vrWorldHandHasTarget(vr.activeHand)))
+        && !(vr.worldInteractive && (vrWorldHandHasTarget(vr.activeHand) || vr.panelHidden)))
     {
         if (vrPointerFromHand(VR_HAND_RIGHT, time, &px, &py)
             || vrPointerFromHand(VR_HAND_LEFT, time, &px, &py))
@@ -1112,6 +1185,14 @@ static void vrUpdateInput(XrTime time)
         if (back && !vr.prevBack && vrWorldMoveActive())
         {
             vrWorldMoveCancel();
+            vr.prevBack = back;                             //swallow this ESC
+        }
+        else if (back && !vr.prevBack
+                 && vrActionPressedHand(vr.gripAction, VR_HAND_LEFT))
+        {
+            /* left grip + B/Y: toggle the wrist panel */
+            vr.panelHidden = !vr.panelHidden;
+            SDL_Log("VR: wrist panel %s", vr.panelHidden ? "hidden" : "shown");
             vr.prevBack = back;                             //swallow this ESC
         }
     }
@@ -1741,17 +1822,20 @@ void vrFrame(void)
                 layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&vr.projLayer;
             }
 
-            memset(&quad, 0, sizeof(quad));
-            quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
-            quad.space = vr.space;
-            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-            quad.subImage.swapchain = vr.swapchain;
-            quad.subImage.imageRect.extent.width = vr.width;
-            quad.subImage.imageRect.extent.height = vr.height;
-            quad.pose = vr.quadPose;
-            quad.size.width = vr.quadWidth;
-            quad.size.height = vr.quadWidth * (real32)vr.height / (real32)vr.width;
-            layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&quad;
+            if (!(vr.worldInteractive && vr.panelHidden))
+            {
+                memset(&quad, 0, sizeof(quad));
+                quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+                quad.space = vr.space;
+                quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad.subImage.swapchain = vr.swapchain;
+                quad.subImage.imageRect.extent.width = vr.width;
+                quad.subImage.imageRect.extent.height = vr.height;
+                quad.pose = vr.quadPose;
+                quad.size.width = vr.quadWidth;
+                quad.size.height = vr.quadWidth * (real32)vr.height / (real32)vr.width;
+                layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&quad;
+            }
         }
     }
 
