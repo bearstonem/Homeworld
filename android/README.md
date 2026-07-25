@@ -87,6 +87,40 @@ Homeworld data files instead.)
 
 Settings, saves and screenshots are written to the same directory.
 
+### Running the full game instead of the demo
+
+If you own the Homeworld Remastered Collection, its `Homeworld1Classic/Data`
+directory is the original 1999 game and this port reads it directly —
+`BigFile.c` already recognises the Remastered packaging of `homeworld.big`
+(it detects the TOC by its 13887-file count and reads the wider entry struct).
+That gets you the full 16-mission campaign instead of the demo's handful.
+
+Build with `-Ddemo=false`, then push, **renaming as you go** — the binary opens
+`Homeworld.big`, `HW_Music.wxd` and `HW_comp.vce`, and note the lowercase `c`
+in the last one, which does not match the shipped `HW_Comp.vce`:
+
+```sh
+SRC=".../steamapps/common/Homeworld/Homeworld1Classic/Data"
+DST=/sdcard/Android/data/org.gardensofkadesh.homeworld/files
+adb push "$SRC/homeworld.big" $DST/Homeworld.big
+adb push "$SRC/HW_Music.wxd"  $DST/HW_Music.wxd
+adb push "$SRC/HW_Comp.vce"   $DST/HW_comp.vce
+```
+
+**Delete the demo assets first**, `Update.big` above all. It sits *first* in
+`bigFilePrecedence`, so leaving the demo's copy in place silently overrides
+files from the full `Homeworld.big` with demo content:
+
+```sh
+adb shell "cd $DST && rm -f HomeworldDL.big DL_Music.wxd DL_demo.vce Update.big"
+```
+
+The movies are `.bik` and are not needed unless you build with `-Dmovies=true`.
+
+Nothing from the Remastered Collection is redistributed here; this reads the
+copy you already own. `tools/sga_extract.py` unpacks the Remastered
+`_ARCHIVE` (Relic SGA v2) `.big` files for the same reason.
+
 > **Do not restore a backup of that directory with `adb push` alone.** Push
 > writes files as the *shell* user (uid 2000, mode 644); the game runs as its
 > own uid and is only in the group, so it can read them but not write them.
