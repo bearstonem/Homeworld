@@ -120,8 +120,11 @@ typedef struct {
     XrAction     stickClickAction;  /* left click   -> M, right click -> Space
                                        (chord left  -> R)                       */
     XrAction     gripAction;        /* left grip    -> Shift, right grip = chord */
+    XrAction     gripPoseAction;
     XrPath       handPath[VR_HAND_COUNT];
     XrSpace      aimSpace[VR_HAND_COUNT];
+    XrSpace      gripSpace[VR_HAND_COUNT];
+    real32       quadWidth;         /* current screen width in metres */
     bool32       prevSelect;
     bool32       prevContext;
     bool32       prevBack;
@@ -482,8 +485,13 @@ static bool32 vrCreateActions(void)
     strcpy(actionInfo.localizedActionName, "Thumbstick");
     VR_CHECK("xrCreateAction thumbstick", xrCreateAction(vr.actionSet, &actionInfo, &vr.stickAction));
 
+    actionInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    strcpy(actionInfo.actionName, "grip_pose");
+    strcpy(actionInfo.localizedActionName, "Grip pose");
+    VR_CHECK("xrCreateAction grip_pose", xrCreateAction(vr.actionSet, &actionInfo, &vr.gripPoseAction));
+
     {
-        struct { XrAction action; char const* path; } layout[14] = {
+        struct { XrAction action; char const* path; } layout[16] = {
             { vr.aimAction,        "/user/hand/left/input/aim/pose" },
             { vr.aimAction,        "/user/hand/right/input/aim/pose" },
             { vr.selectAction,     "/user/hand/left/input/trigger/value" },
@@ -498,8 +506,10 @@ static bool32 vrCreateActions(void)
             { vr.stickClickAction, "/user/hand/right/input/thumbstick/click" },
             { vr.gripAction,       "/user/hand/left/input/squeeze/value" },
             { vr.gripAction,       "/user/hand/right/input/squeeze/value" },
+            { vr.gripPoseAction,   "/user/hand/left/input/grip/pose" },
+            { vr.gripPoseAction,   "/user/hand/right/input/grip/pose" },
         };
-        for (i = 0; i < 14; i++)
+        for (i = 0; i < 16; i++)
         {
             bindings[i].action = layout[i].action;
             xrStringToPath(vr.instance, layout[i].path, &bindings[i].binding);
@@ -529,6 +539,12 @@ static bool32 vrCreateActions(void)
     {
         spaceInfo.subactionPath = vr.handPath[i];
         VR_CHECK("xrCreateActionSpace", xrCreateActionSpace(vr.session, &spaceInfo, &vr.aimSpace[i]));
+    }
+    spaceInfo.action = vr.gripPoseAction;
+    for (i = 0; i < VR_HAND_COUNT; i++)
+    {
+        spaceInfo.subactionPath = vr.handPath[i];
+        VR_CHECK("xrCreateActionSpace (grip)", xrCreateActionSpace(vr.session, &spaceInfo, &vr.gripSpace[i]));
     }
 
     return TRUE;
@@ -561,6 +577,119 @@ static void vrNlerp(XrQuaternionf a, XrQuaternionf b, real32 t, XrQuaternionf* o
     }
 }
 
+/* orientation looking along f (unit, LOCAL space) with world up */
+static void vrLookOrientation(XrVector3f f, XrQuaternionf* out)
+{
+    XrVector3f zaxis = {-f.x, -f.y, -f.z};                  /* local -Z = forward */
+    XrVector3f xaxis, yaxis;
+    real32 mag, trace;
+
+    xaxis.x = 1.0f * zaxis.z - 0.0f * zaxis.y;              /* up(0,1,0) x z */
+    xaxis.y = 0.0f * zaxis.x - 0.0f * zaxis.z;
+    xaxis.z = 0.0f * zaxis.y - 1.0f * zaxis.x;
+    mag = sqrtf(xaxis.x * xaxis.x + xaxis.y * xaxis.y + xaxis.z * xaxis.z);
+    if (mag < 1e-4f)
+    {
+        out->x = out->y = out->z = 0.0f;
+        out->w = 1.0f;
+        return;
+    }
+    xaxis.x /= mag; xaxis.y /= mag; xaxis.z /= mag;
+    yaxis.x = zaxis.y * xaxis.z - zaxis.z * xaxis.y;
+    yaxis.y = zaxis.z * xaxis.x - zaxis.x * xaxis.z;
+    yaxis.z = zaxis.x * xaxis.y - zaxis.y * xaxis.x;
+
+    /* rotation matrix (columns x,y,z) -> quaternion */
+    trace = xaxis.x + yaxis.y + zaxis.z;
+    if (trace > 0.0f)
+    {
+        real32 s = sqrtf(trace + 1.0f) * 2.0f;
+
+        out->w = 0.25f * s;
+        out->x = (yaxis.z - zaxis.y) / s;
+        out->y = (zaxis.x - xaxis.z) / s;
+        out->z = (xaxis.y - yaxis.x) / s;
+    }
+    else if (xaxis.x > yaxis.y && xaxis.x > zaxis.z)
+    {
+        real32 s = sqrtf(1.0f + xaxis.x - yaxis.y - zaxis.z) * 2.0f;
+
+        out->w = (yaxis.z - zaxis.y) / s;
+        out->x = 0.25f * s;
+        out->y = (yaxis.x + xaxis.y) / s;
+        out->z = (zaxis.x + xaxis.z) / s;
+    }
+    else if (yaxis.y > zaxis.z)
+    {
+        real32 s = sqrtf(1.0f + yaxis.y - xaxis.x - zaxis.z) * 2.0f;
+
+        out->w = (zaxis.x - xaxis.z) / s;
+        out->x = (yaxis.x + xaxis.y) / s;
+        out->y = 0.25f * s;
+        out->z = (zaxis.y + yaxis.z) / s;
+    }
+    else
+    {
+        real32 s = sqrtf(1.0f + zaxis.z - xaxis.x - yaxis.y) * 2.0f;
+
+        out->w = (xaxis.y - yaxis.x) / s;
+        out->x = (zaxis.x + xaxis.z) / s;
+        out->y = (zaxis.y + yaxis.z) / s;
+        out->z = 0.25f * s;
+    }
+}
+
+#define VR_WRIST_PANEL_WIDTH 0.32f
+
+/* In-game the screen becomes a small panel riding the left wrist */
+static bool32 vrUpdateWristPanel(XrTime displayTime)
+{
+    XrSpaceLocation grip, head;
+    XrVector3f offset = {0.0f, 0.06f, -0.05f}, worldOffset, toPanel;
+    real32 mag;
+
+    memset(&grip, 0, sizeof(grip));
+    grip.type = XR_TYPE_SPACE_LOCATION;
+    memset(&head, 0, sizeof(head));
+    head.type = XR_TYPE_SPACE_LOCATION;
+    /* the aim pose is used (grip pose returns no tracking on this runtime) */
+    if (XR_FAILED(xrLocateSpace(vr.aimSpace[VR_HAND_LEFT], vr.space, displayTime, &grip))
+        || !(grip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+        || !(grip.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)
+        || XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &head))
+        || !(head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+    {
+        if (vr.frameCount % 300 == 1)
+        {
+            SDL_Log("VR: wrist panel: left aim not tracked (flags 0x%x)",
+                    (unsigned)grip.locationFlags);
+        }
+        return FALSE;
+    }
+
+    offset.x = 0.0f;
+    offset.y = 0.10f;                                       //above the controller
+    offset.z = 0.06f;                                       //slightly toward the wrist
+    vrQuatRotate(grip.pose.orientation, offset, &worldOffset);
+    vr.quadPose.position.x = grip.pose.position.x + worldOffset.x;
+    vr.quadPose.position.y = grip.pose.position.y + worldOffset.y;
+    vr.quadPose.position.z = grip.pose.position.z + worldOffset.z;
+
+    /* billboard the panel toward the head */
+    toPanel.x = vr.quadPose.position.x - head.pose.position.x;
+    toPanel.y = vr.quadPose.position.y - head.pose.position.y;
+    toPanel.z = vr.quadPose.position.z - head.pose.position.z;
+    mag = sqrtf(toPanel.x * toPanel.x + toPanel.y * toPanel.y + toPanel.z * toPanel.z);
+    if (mag > 1e-4f)
+    {
+        toPanel.x /= mag; toPanel.y /= mag; toPanel.z /= mag;
+        vrLookOrientation(toPanel, &vr.quadPose.orientation);
+    }
+    vr.quadWidth = VR_WRIST_PANEL_WIDTH;
+    vr.quadPlaced = TRUE;
+    return TRUE;
+}
+
 static void vrUpdateScreenPose(XrTime displayTime)
 {
     XrSpaceLocation location;
@@ -568,6 +697,18 @@ static void vrUpdateScreenPose(XrTime displayTime)
     XrVector3f gaze = {0.0f, 0.0f, -1.0f}, facing, toQuad;
     XrPosef desired;
     real32 mag, dot;
+
+    if (vr.worldInteractive)
+    {
+        if (vrUpdateWristPanel(displayTime))
+        {
+            return;
+        }
+    }
+    else
+    {
+        vr.quadWidth = VR_SCREEN_WIDTH;
+    }
 
     memset(&location, 0, sizeof(location));
     location.type = XR_TYPE_SPACE_LOCATION;
@@ -661,8 +802,8 @@ static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
         return FALSE;
     }
 
-    quadHeight = VR_SCREEN_WIDTH * (real32)vr.height / (real32)vr.width;
-    u = (local.x + t * localDir.x) / VR_SCREEN_WIDTH + 0.5f;
+    quadHeight = vr.quadWidth * (real32)vr.height / (real32)vr.width;
+    u = (local.x + t * localDir.x) / vr.quadWidth + 0.5f;
     v = 0.5f - (local.y + t * localDir.y) / quadHeight;
     if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
     {
@@ -1047,6 +1188,14 @@ static void vrUpdateInput(XrTime time)
             {
                 if (hand == VR_HAND_LEFT)
                 {
+                    if (vr.worldInteractive)
+                    {
+                        /* F equivalent: focus the camera on the selection */
+                        vrWorldCameraFocusSelection();
+                        vr.prevStickClick[hand] = pressed;
+                        vr.stickClickKey[hand] = 0;
+                        continue;
+                    }
                     vr.stickClickKey[hand] =
                         vrActionPressedHand(vr.gripAction, VR_HAND_RIGHT) ? SDLK_r : SDLK_m;
                 }
@@ -1059,7 +1208,7 @@ static void vrUpdateInput(XrTime time)
                           (vr.stickClickKey[hand] == SDLK_m) ? SDL_SCANCODE_M : SDL_SCANCODE_SPACE,
                           TRUE);
             }
-            else
+            else if (vr.stickClickKey[hand] != 0)
             {
                 vrPushKey(vr.stickClickKey[hand],
                           (vr.stickClickKey[hand] == SDLK_r) ? SDL_SCANCODE_R :
@@ -1379,6 +1528,7 @@ bool32 vrInit(sdword width, sdword height)
     memset(&vr, 0, sizeof(vr));
     vr.width = width;
     vr.height = height;
+    vr.quadWidth = VR_SCREEN_WIDTH;
     vr.state = XR_SESSION_STATE_UNKNOWN;
 
     if (!vrLoadRawGles() || !vrInitLoader() || !vrCreateInstance() || !vrCreateSession()
@@ -1546,8 +1696,6 @@ void vrFrame(void)
         XrSwapchainImageReleaseInfo releaseInfo;
         uint32_t imageIndex = 0;
 
-        vrUpdateScreenPose(frameState.predictedDisplayTime);
-
         /* capture the pure game camera matrix (the eye passes overwrite
            rndCameraMatrix later) and refresh the LOCAL->world transforms */
         {
@@ -1559,9 +1707,16 @@ void vrFrame(void)
                                     vr.anchorPose.orientation.z,
                                     vr.anchorPose.orientation.w};
 
+            bool32 was = vr.worldInteractive;
+
             vr.worldInteractive = vrWorldFrameBegin(anchorPos, anchorQuat, VR_WORLD_SCALE);
+            if (vr.worldInteractive != was)
+            {
+                SDL_Log("VR: world interactive -> %d", (int)vr.worldInteractive);
+            }
         }
 
+        vrUpdateScreenPose(frameState.predictedDisplayTime);
         vrUpdateInput(frameState.predictedDisplayTime);
 
         memset(&acquireInfo, 0, sizeof(acquireInfo));
@@ -1594,8 +1749,8 @@ void vrFrame(void)
             quad.subImage.imageRect.extent.width = vr.width;
             quad.subImage.imageRect.extent.height = vr.height;
             quad.pose = vr.quadPose;
-            quad.size.width = VR_SCREEN_WIDTH;
-            quad.size.height = VR_SCREEN_WIDTH * (real32)vr.height / (real32)vr.width;
+            quad.size.width = vr.quadWidth;
+            quad.size.height = vr.quadWidth * (real32)vr.height / (real32)vr.width;
             layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&quad;
         }
     }
@@ -1638,6 +1793,10 @@ void vrShutdown(void)
         if (vr.aimSpace[i] != XR_NULL_HANDLE)
         {
             xrDestroySpace(vr.aimSpace[i]);
+        }
+        if (vr.gripSpace[i] != XR_NULL_HANDLE)
+        {
+            xrDestroySpace(vr.gripSpace[i]);
         }
     }
     if (vr.actionSet != XR_NULL_HANDLE)

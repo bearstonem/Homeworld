@@ -640,6 +640,15 @@ void vrWorldDrawOverlays(void)
         end.z = ray->origin.z + ray->dir.z * length;
         primLine3(&ray->origin, &end, rayColor);
 
+        /* controller gizmo: three axis rings around the hand position */
+        {
+            real32 gizmoRadius = 0.02f * vrw.scale;
+
+            primCircleOutline3(&ray->origin, gizmoRadius, 12, 0, rayColor, X_AXIS);
+            primCircleOutline3(&ray->origin, gizmoRadius, 12, 0, rayColor, 1);
+            primCircleOutline3(&ray->origin, gizmoRadius, 12, 0, rayColor, Z_AXIS);
+        }
+
         if (ray->hover != NULL)
         {
             primCircleOutline3(&ray->hover->collInfo.collPosition,
