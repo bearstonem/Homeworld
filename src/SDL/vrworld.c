@@ -80,6 +80,11 @@ static struct {
     vector  movePlanePoint;         /* ray/plane intersection (XY at height) */
     vector  moveDestination;        /* plane point + vertical offset */
     real32  movePlaneZ;
+
+    /* diagnostics */
+    udword  debugFrame;
+    vector  dbgLocalPos[VRW_HAND_COUNT];
+    vector  dbgLocalDir[VRW_HAND_COUNT];
 } vrw;
 
 /*-----------------------------------------------------------------------------
@@ -184,6 +189,34 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
     vrw.anchorFwd[15] = 1.0f;
 
     vrw.worldValid = TRUE;
+
+    /* periodic diagnostics: camera matrix health + ray roundtrip */
+    vrw.debugFrame++;
+    if (vrw.debugFrame % 600 == 1)
+    {
+        SDL_Log("VRDBG L: rot0=(%.3f %.3f %.3f) t=(%.1f %.1f %.1f) camEye=(%.1f %.1f %.1f)",
+                look[0], look[4], look[8], look[12], look[13], look[14],
+                mrCamera->eyeposition.x, mrCamera->eyeposition.y, mrCamera->eyeposition.z);
+        if (vrw.ray[1].valid)
+        {
+            vector backCam, backLocal;
+
+            /* roundtrip the stored world origin through the forward chain */
+            vrwTransformPoint(vrw.lookatFwd, &vrw.ray[1].origin, &backCam);
+            vrwTransformPoint(vrw.anchorFwd, &backCam, &backLocal);
+            SDL_Log("VRDBG R-hand: local=(%.3f %.3f %.3f) dirL=(%.2f %.2f %.2f)",
+                    vrw.dbgLocalPos[1].x, vrw.dbgLocalPos[1].y, vrw.dbgLocalPos[1].z,
+                    vrw.dbgLocalDir[1].x, vrw.dbgLocalDir[1].y, vrw.dbgLocalDir[1].z);
+            SDL_Log("VRDBG R-hand: world=(%.1f %.1f %.1f) dirW=(%.2f %.2f %.2f) hover=%d",
+                    vrw.ray[1].origin.x, vrw.ray[1].origin.y, vrw.ray[1].origin.z,
+                    vrw.ray[1].dir.x, vrw.ray[1].dir.y, vrw.ray[1].dir.z,
+                    vrw.ray[1].hover != NULL);
+            SDL_Log("VRDBG roundtrip: local*S=(%.1f %.1f %.1f) back=(%.1f %.1f %.1f)",
+                    vrw.dbgLocalPos[1].x * vrw.scale, vrw.dbgLocalPos[1].y * vrw.scale,
+                    vrw.dbgLocalPos[1].z * vrw.scale,
+                    backLocal.x, backLocal.y, backLocal.z);
+        }
+    }
     return TRUE;
 }
 
@@ -319,6 +352,12 @@ void vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], boo
     {
         return;
     }
+    vrw.dbgLocalPos[hand].x = origin[0];
+    vrw.dbgLocalPos[hand].y = origin[1];
+    vrw.dbgLocalPos[hand].z = origin[2];
+    vrw.dbgLocalDir[hand].x = dir[0];
+    vrw.dbgLocalDir[hand].y = dir[1];
+    vrw.dbgLocalDir[hand].z = dir[2];
     vrwLocalToWorld(origin, &ray->origin);
     vrwLocalDirToWorld(dir, &ray->dir);
     ray->hover = vrwPick(ray, FALSE, &ray->hoverT);
