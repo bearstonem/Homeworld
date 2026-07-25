@@ -57,9 +57,9 @@ extern bool32 gameIsRunning;                                //Globals.c
 
 #define VRW_HAND_COUNT     2
 #define VRW_PICK_MARGIN    1.25f    /* collision sphere inflation for picking */
-#define VRW_PICK_STICKY    0.92f    /* score discount for the previous target */
 #define VRW_PICK_MARGIN_MAX 150.0f  /* cap the margin so capitals stay fair */
-#define VRW_PICK_MISS_BIAS  2.5f    /* how much an off-centre aim is punished */
+#define VRW_PICK_TIE_ANGLE  0.004f  /* aims this close in angle count as equal */
+#define VRW_PICK_STICKY_ANGLE 0.002f /* angular credit for the previous target */
 #define VRW_PICK_CONE_TAN  0.012f   /* ~0.7 degree controller selection cone */
 #define VRW_PICK_CONE_MAX  180.0f   /* cap distant-target assistance */
 #define VRW_SWEEP_CONE_TAN 0.070f   /* ~4 degree brush: sweeping paints over
@@ -745,18 +745,31 @@ static bool32 vrwPlayerShipSelectable(SpaceObjRotImpTarg const* obj)
 /* Best ray/sphere hit along the render list. selectableOnly restricts to the
    current player's selectable ships.
 
-   Candidates are ranked by the depth of their CENTRE, penalised for how far
-   off-centre the aim is - not by the depth at which the ray enters the
-   sphere. Entry depth sounds right and is badly wrong when sizes differ by
-   two orders of magnitude: the Mothership's hull begins some 2600 units
-   ahead of its centre, so ranking by entry made it beat every fighter parked
-   in front of it, no matter how precisely the beam was on the fighter. */
+   Candidates are ranked by how directly the beam points at their centre, in
+   plain angle, with depth only breaking near-ties. Two earlier attempts got
+   this wrong in instructive ways:
+
+   Ranking by the depth at which the ray ENTERS the sphere fails because a
+   large sphere's surface begins far ahead of its centre - the Mothership's
+   hull starts some 2600 units in front of its own middle, so it beat every
+   fighter parked ahead of it however precisely the beam was on the fighter.
+
+   Ranking by centre depth with a penalty for miss distance expressed as a
+   FRACTION OF THE OBJECT'S OWN RADIUS fails for the same underlying reason,
+   just less obviously. A Mothership's effective radius is around 2800 units,
+   so nearly any aim is "well centred" for it, while a fighter's is under 100
+   and a 30-unit tremor already reads as badly off. Normalising by size
+   therefore favours whatever is biggest - the precise opposite of what is
+   needed. Absolute angle does not care how big the target is, which is what
+   makes it match the player's intent: the ship they are pointing most
+   directly at is the ship they mean. */
 static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
                                    SpaceObjRotImpTarg const* preferred, real32* hitT)
 {
     Node* node;
     SpaceObjRotImpTarg* best = NULL;
-    real32 bestScore = REALlyBig;
+    real32 bestAngle = REALlyBig;
+    real32 bestT = REALlyBig;
     real32 bestSurface = 0.0f;
 
     for (node = universe.RenderList.head; node != NULL; node = node->next)
@@ -764,7 +777,8 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
         SpaceObjRotImpTarg* obj = (SpaceObjRotImpTarg*)listGetStructOfNode(node);
         vector toObj;
         real32 radius, tCentre, distSqr, discr, root;
-        real32 hull, margin, assist, missFrac, score;
+        real32 hull, margin, assist, angle;
+        bool32 better;
 
         if (obj->objtype != OBJ_ShipType && obj->objtype != OBJ_AsteroidType
             && obj->objtype != OBJ_DustType && obj->objtype != OBJ_GasType
@@ -816,20 +830,30 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
         }
         root = fsqrt(discr);
 
-        /* 0 when the beam is dead on the centre, 1 when it just grazes. A
-           grazing hit has to be much nearer to win than a centred one. */
-        missFrac = radius > 0.0f ? distSqr / (radius * radius) : 1.0f;
-        score = tCentre * (1.0f + missFrac * VRW_PICK_MISS_BIAS);
+        /* angle between the beam and this object's centre, in radians */
+        angle = fsqrt(distSqr) / (tCentre > 1.0f ? tCentre : 1.0f);
         if (obj == preferred)
         {
-            /* hysteresis belongs in the ranking, not the geometry: inflating
+            /* hysteresis in the ranking rather than the geometry: inflating
                the previous target's sphere made big ships stickier than small
                ones, which is backwards */
-            score *= VRW_PICK_STICKY;
+            angle -= VRW_PICK_STICKY_ANGLE;
+            if (angle < 0.0f)
+            {
+                angle = 0.0f;
+            }
         }
-        if (score < bestScore)
+        /* clearly better aim wins; among aims too close to tell apart, the
+           nearer centre wins, so a ship in front beats one behind it */
+        better = angle < bestAngle - VRW_PICK_TIE_ANGLE
+              || (angle < bestAngle + VRW_PICK_TIE_ANGLE && tCentre < bestT);
+        if (better)
         {
-            bestScore = score;
+            if (angle < bestAngle)
+            {
+                bestAngle = angle;
+            }
+            bestT = tCentre;
             best = obj;
             /* the drawn beam still wants the surface, not the centre. The
                controller can sit inside a capital ship's sphere, so fall
