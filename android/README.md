@@ -141,6 +141,23 @@ Touch controls in the 3D world:
   status readout (resource units, ship and selection counts, sensors level,
   class totals) rides the right wrist. Both are their own compositor layers
   drawn from live game state, and both follow the wrist panel's visibility.
+- Six buttons cannot carry Homeworld's twenty-odd verbs, so the rest live on a
+  command wheel: hold the left trigger and a radial appears at that hand, the
+  left stick picks a wedge, and releasing the trigger runs it. Dwelling on a
+  category wedge descends into it; B/Y steps back up a level, then closes.
+  Formations, tactics, hotkey groups, halt, harvest, dock, special ability,
+  kamikaze, retire, scuttle, the Build/Launch/Research managers, hyperspace,
+  focus and undo are all reachable there. Entries the current selection cannot
+  perform are dimmed rather than hidden - the wedge positions stay fixed so
+  the wheel becomes a flick once learned - and the formation and tactic
+  already in effect are marked. In the hotkey group wheel, holding the left
+  grip turns recall into store, and each wedge shows its ship count.
+  The wheel takes its position from the left wrist but its orientation from
+  your head, so stick direction always maps to the same wedge no matter how
+  your wrist is turned.
+- Wheel entries call the game's own right-click-menu callbacks rather than
+  synthesizing keystrokes, because `mrKeyPress` routes mappable keys through
+  `kbCheckBindings`, which discards keys the player has unbound.
 - Right-grip+B/Y opens the Build Manager, and an unmodified B/Y closes any
   open manager - Construction, Launch, Research, Trade or Sensors. Sensors is
   full-screen and suppresses the main view like the rest, so it is treated as

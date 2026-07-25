@@ -132,6 +132,14 @@ void mrRegionDraw(regionhandle reg);
 //command wheel so it offers exactly what the right-click menu would
 udword mrSelectionActionMask(void);
 
+//apply a formation immediately, parade special-case and speech included.
+//The TAB path only stages a name and a timer, committing later from
+//mrRegionDraw, which is no use to a menu that wants it applied now.
+//Typed udword rather than TypeOfFormation (Formation.h) so that every
+//includer of this header does not have to pull that in; they are the same
+//type, see the typedef there.
+void mrSetTheFormation(udword formationtype);
+
 //right-click callback functions
 void mrDockingOrders(char *string, featom *atom);
 void mrDeltaFormation(char *string, featom *atom);

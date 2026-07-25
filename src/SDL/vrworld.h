@@ -156,6 +156,82 @@ bool32 vrWorldCloseManagers(void);
    Returns TRUE when the state was toggled. */
 bool32 vrWorldToggleBuildManager(void);
 
+/*-----------------------------------------------------------------------------
+    Command wheel
+
+    Six buttons cannot carry Homeworld's twenty-odd verbs, so the rest live on
+    a radial. vr.c owns the radial's presentation and input; this layer owns
+    what each entry means, whether the current selection permits it, and which
+    entries are already in effect.
+
+    Leaves call the mr* right-click-menu callbacks or clWrap* directly rather
+    than synthesizing keystrokes: mrKeyPress runs every mappable key through
+    kbCheckBindings, which returns 0 for a key the player has unbound, so a
+    synthesized command can silently vanish.
+----------------------------------------------------------------------------*/
+typedef enum
+{
+    VRW_CMD_NONE = 0,
+
+    /* formations, in FormationDefs.h order */
+    VRW_CMD_FORM_DELTA,
+    VRW_CMD_FORM_BROAD,
+    VRW_CMD_FORM_X,
+    VRW_CMD_FORM_CLAW,
+    VRW_CMD_FORM_WALL,
+    VRW_CMD_FORM_SPHERE,
+    VRW_CMD_FORM_CUSTOM,
+
+    /* tactics */
+    VRW_CMD_TACTIC_EVASIVE,
+    VRW_CMD_TACTIC_NEUTRAL,
+    VRW_CMD_TACTIC_AGGRESSIVE,
+
+    /* orders that need no target */
+    VRW_CMD_HALT,
+    VRW_CMD_SPECIAL,                /* self-activated ability, as Z-release */
+    VRW_CMD_KAMIKAZE,
+    VRW_CMD_HARVEST,
+    VRW_CMD_DOCK,
+    VRW_CMD_RETIRE,
+    VRW_CMD_SCUTTLE,
+
+    /* full-screen managers */
+    VRW_CMD_BUILD,
+    VRW_CMD_LAUNCH,
+    VRW_CMD_RESEARCH,
+    VRW_CMD_HYPERSPACE,
+
+    /* selection and view */
+    VRW_CMD_SELECT_ALL,
+    VRW_CMD_MOTHERSHIP,
+    VRW_CMD_FOCUS_NEXT,
+    VRW_CMD_FOCUS_PREV,
+    VRW_CMD_SENSORS,
+    VRW_CMD_UNDO,
+
+    /* hotkey groups; the group index comes in as arg */
+    VRW_CMD_GROUP_RECALL,
+    VRW_CMD_GROUP_STORE,
+
+    VRW_CMD_COUNT
+} vrworldcommand;
+
+/* TRUE when the current selection and game state permit this command. Mirrors
+   the action mask mrRightClickMenu composes, so the wheel dims exactly what
+   the right-click menu would omit. */
+bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg);
+
+/* TRUE when this command describes the state already in effect - the current
+   formation, the current tactic - so the wheel can mark it. */
+bool32 vrWorldCommandActive(vrworldcommand cmd);
+
+/* Run it. Returns TRUE when something was actually issued. */
+bool32 vrWorldCommand(vrworldcommand cmd, sdword arg);
+
+/* Number of ships stored in a hotkey group, for labelling the group wheel */
+sdword vrWorldGroupSize(sdword group);
+
 #endif /* HW_ENABLE_VR */
 
 #endif

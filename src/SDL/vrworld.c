@@ -30,6 +30,10 @@
 #include "LaunchMgr.h"
 #include "ResearchGUI.h"
 #include "Sensors.h"
+#include "CommandLayer.h"
+#include "Formation.h"
+#include "FormationDefs.h"
+#include "Undo.h"
 #include "CommandWrap.h"
 #include "Dock.h"
 #include "InfoOverlay.h"
@@ -188,6 +192,8 @@ static bool32 vrwFinite(real32 v)
 }
 
 static void vrwPathFollow(void);
+static bool32 vrwOrdersBlocked(void);
+static bool32 vrwPlayerShipSelectable(SpaceObjRotImpTarg const* obj);
 
 /* Place the move cursor on a hand's ray at the current depth. Shared so the
    destination is consistent whether the ray moved or the depth did. */
@@ -420,6 +426,247 @@ bool32 vrWorldToggleBuildManager(void)
     tutGameMessage("KB_Build");
     mrBuildShips(NULL, NULL);
     return cmActive;
+}
+
+/*-----------------------------------------------------------------------------
+    Command wheel dispatch
+
+    Every leaf here goes through a seam the mouse already uses: the mr*
+    right-click-menu callbacks (all of which guard atom != NULL, so (NULL,
+    NULL) is safe), or clWrap* for the orders with no menu entry. Never a
+    synthesized keystroke, and never a bare cl* - CommandWrap.c is what
+    marshals multiplayer packets and recordings.
+----------------------------------------------------------------------------*/
+static TypeOfFormation const vrwCommandFormation[] = {
+    DELTA_FORMATION, BROAD_FORMATION, DELTA3D_FORMATION, CLAW_FORMATION,
+    WALL_FORMATION, SPHERE_FORMATION, CUSTOM_FORMATION
+};
+
+static bool32 vrwCommandIsFormation(vrworldcommand cmd)
+{
+    return cmd >= VRW_CMD_FORM_DELTA && cmd <= VRW_CMD_FORM_CUSTOM;
+}
+
+static TacticsType vrwCommandTactic(vrworldcommand cmd)
+{
+    return (TacticsType)(Evasive + (cmd - VRW_CMD_TACTIC_EVASIVE));
+}
+
+sdword vrWorldGroupSize(sdword group)
+{
+    if (group < 0 || group >= SEL_NumberHotKeyGroups)
+    {
+        return 0;
+    }
+    return selHotKeyGroup[group].numShips;
+}
+
+bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
+{
+    udword mask;
+
+    if (!vrw.worldValid)
+    {
+        return FALSE;
+    }
+    /* selection-independent navigation stays available at all times */
+    switch (cmd)
+    {
+        case VRW_CMD_SELECT_ALL:
+        case VRW_CMD_MOTHERSHIP:
+        case VRW_CMD_FOCUS_NEXT:
+        case VRW_CMD_FOCUS_PREV:
+        case VRW_CMD_SENSORS:
+        case VRW_CMD_UNDO:
+            return TRUE;
+        case VRW_CMD_GROUP_RECALL:
+            return vrWorldGroupSize(arg) > 0;
+        case VRW_CMD_GROUP_STORE:
+            return selSelected.numShips > 0;
+        default:
+            break;
+    }
+    if (selSelected.numShips == 0)
+    {
+        return FALSE;
+    }
+
+    mask = mrSelectionActionMask();
+    if (vrwCommandIsFormation(cmd))
+    {
+        return (mask & MAM_Formations) != 0
+            && selSelected.numShips >= MIN_SHIPS_IN_FORMATION;
+    }
+    switch (cmd)
+    {
+        case VRW_CMD_TACTIC_EVASIVE:
+        case VRW_CMD_TACTIC_NEUTRAL:
+        case VRW_CMD_TACTIC_AGGRESSIVE: return (mask & MAM_Tactics) != 0;
+        case VRW_CMD_HARVEST:           return (mask & MAM_Harvest) != 0;
+        case VRW_CMD_DOCK:              return (mask & MAM_Dock) != 0;
+        case VRW_CMD_RETIRE:            return (mask & MAM_Retire) != 0;
+        case VRW_CMD_SCUTTLE:           return (mask & MAM_Scuttle) != 0;
+        case VRW_CMD_BUILD:             return (mask & MAM_Build) != 0;
+        case VRW_CMD_LAUNCH:            return (mask & MAM_Launch) != 0;
+        case VRW_CMD_RESEARCH:          return (mask & MAM_Research) != 0;
+        case VRW_CMD_HYPERSPACE:        return (mask & MAM_Hyperspace) != 0;
+        case VRW_CMD_HALT:
+        case VRW_CMD_SPECIAL:
+        case VRW_CMD_KAMIKAZE:          return !vrwOrdersBlocked();
+        default:                        return FALSE;
+    }
+}
+
+bool32 vrWorldCommandActive(vrworldcommand cmd)
+{
+    if (!vrw.worldValid || selSelected.numShips == 0)
+    {
+        return FALSE;
+    }
+    if (vrwCommandIsFormation(cmd))
+    {
+        return clSelectionAlreadyInFormation(&universe.mainCommandLayer,
+                                            (SelectCommand*)&selSelected)
+            == vrwCommandFormation[cmd - VRW_CMD_FORM_DELTA];
+    }
+    if (cmd >= VRW_CMD_TACTIC_EVASIVE && cmd <= VRW_CMD_TACTIC_AGGRESSIVE)
+    {
+        return selSelected.ShipPtr[0]->tacticstype == vrwCommandTactic(cmd);
+    }
+    return FALSE;
+}
+
+/* "Select all visible" cannot borrow the keyboard path: mainrgn's E key runs
+   selRectSelect over a full-screen rect against the mono camera, which in VR
+   is an invisible frustum unrelated to what the player sees. Select the
+   player's selectable ships out of the render list instead. */
+static bool32 vrwSelectAllVisible(void)
+{
+    Node* node;
+    bool32 changed = FALSE;
+
+    for (node = universe.RenderList.head;
+         node != NULL && selSelected.numShips < COMMAND_MAX_SHIPS;
+         node = node->next)
+    {
+        SpaceObjRotImpTarg* obj = (SpaceObjRotImpTarg*)listGetStructOfNode(node);
+
+        if (vrwPlayerShipSelectable(obj)
+            && !selShipInSelection(selSelected.ShipPtr, selSelected.numShips,
+                                   (Ship*)obj))
+        {
+            selSelectionAddSingleShip(&selSelected, (Ship*)obj);
+            changed = TRUE;
+        }
+    }
+    if (changed)
+    {
+        ioUpdateShipTotals();
+        tutGameMessage("Game_SelectingRect");
+    }
+    return changed;
+}
+
+static bool32 vrwGroupStore(sdword group)
+{
+    if (group < 0 || group >= SEL_NumberHotKeyGroups
+        || selSelected.numShips == 0)
+    {
+        return FALSE;
+    }
+    selHotKeyGroupRemoveReferences(group);
+    selSelectionCopy((MaxAnySelection*)&selHotKeyGroup[group],
+                     (MaxAnySelection*)&selSelected);
+    selHotKeyNumbersSet(group);
+    return TRUE;
+}
+
+static bool32 vrwGroupRecall(sdword group)
+{
+    if (vrWorldGroupSize(group) == 0)
+    {
+        return FALSE;
+    }
+    selSelectHotKeyGroup(&selHotKeyGroup[group]);
+    selHotKeyNumbersSet(group);
+    ioUpdateShipTotals();
+    return TRUE;
+}
+
+bool32 vrWorldCommand(vrworldcommand cmd, sdword arg)
+{
+    MaxSelection capable;
+
+    if (!vrWorldCommandEnabled(cmd, arg))
+    {
+        SDL_Log("VR: wheel command %d rejected (arg=%d)", (int)cmd, (int)arg);
+        return FALSE;
+    }
+    if (vrwCommandIsFormation(cmd))
+    {
+        /* mrSetTheFormation, not the TAB path: TAB only stages a name and a
+           timer, committing later from mrRegionDraw after MR_FormationDelay.
+           This applies it now, parade special-case and speech included. */
+        mrSetTheFormation(vrwCommandFormation[cmd - VRW_CMD_FORM_DELTA]);
+        return TRUE;
+    }
+
+    switch (cmd)
+    {
+        case VRW_CMD_TACTIC_EVASIVE:    mrEvasiveTactics(NULL, NULL);   break;
+        case VRW_CMD_TACTIC_NEUTRAL:    mrNeutralTactics(NULL, NULL);   break;
+        case VRW_CMD_TACTIC_AGGRESSIVE: mrAgressiveTactics(NULL, NULL); break;
+
+        case VRW_CMD_HALT:
+            clWrapHalt(&universe.mainCommandLayer,
+                       (SelectCommand*)&selSelected);
+            break;
+        case VRW_CMD_SPECIAL:
+            /* NULL targets is the self-activate form, matching Z-release */
+            clWrapSpecial(&universe.mainCommandLayer,
+                          (SelectCommand*)&selSelected, NULL);
+            break;
+        case VRW_CMD_KAMIKAZE:
+            capable = selSelected;
+            if (!MakeSelectionKamikazeCapable((SelectCommand*)&capable))
+            {
+                return FALSE;
+            }
+            clWrapSetKamikaze(&universe.mainCommandLayer,
+                              (SelectCommand*)&capable);
+            break;
+
+        case VRW_CMD_HARVEST:    mrHarvestResources(NULL, NULL); break;
+        case VRW_CMD_DOCK:       mrDockingOrders(NULL, NULL);    break;
+        case VRW_CMD_RETIRE:     mrRetire(NULL, NULL);           break;
+        case VRW_CMD_SCUTTLE:    mrScuttle(NULL, NULL);          break;
+        case VRW_CMD_BUILD:      mrBuildShips(NULL, NULL);       break;
+        case VRW_CMD_LAUNCH:     mrLaunch(NULL, NULL);           break;
+        case VRW_CMD_RESEARCH:   mrResearch(NULL, NULL);         break;
+        case VRW_CMD_HYPERSPACE: mrHyperspace(NULL, NULL);       break;
+
+        case VRW_CMD_SELECT_ALL: return vrwSelectAllVisible();
+        case VRW_CMD_MOTHERSHIP:
+            ccFocusOnMyMothership(&universe.mainCameraCommand);
+            break;
+        case VRW_CMD_FOCUS_NEXT:
+            ccForwardFocus(&universe.mainCameraCommand);
+            break;
+        case VRW_CMD_FOCUS_PREV:
+            ccCancelFocus(&universe.mainCameraCommand);
+            break;
+        case VRW_CMD_SENSORS:    smSensorsBegin(NULL, NULL);     break;
+        case VRW_CMD_UNDO:       udLatestThingUndo();            break;
+
+        case VRW_CMD_GROUP_RECALL: return vrwGroupRecall(arg);
+        case VRW_CMD_GROUP_STORE:  return vrwGroupStore(arg);
+
+        default:
+            return FALSE;
+    }
+    SDL_Log("VR: wheel command %d issued (arg=%d, selection=%d)", (int)cmd,
+            (int)arg, (int)selSelected.numShips);
+    return TRUE;
 }
 
 /*-----------------------------------------------------------------------------

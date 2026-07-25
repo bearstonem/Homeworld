@@ -71,7 +71,20 @@
    blitted out of a scratch corner of the window framebuffer. */
 #define VR_CARD_CONTROLS   0
 #define VR_CARD_STATUS     1
-#define VR_CARD_COUNT      2
+#define VR_CARD_WHEEL      2
+#define VR_CARD_COUNT      3
+
+/* Command wheel. Fixed slots, always the same count, never reordered and
+   never hidden when unavailable - direction is what makes a radial memorable,
+   and shifting wedges to hide inapplicable entries destroys that exactly when
+   the player is under pressure. Unavailable entries draw dim and keep their
+   place. */
+#define VR_WHEEL_SLOTS       8
+#define VR_WHEEL_WIN_W       300    /* layout size, logical UI pixels */
+#define VR_WHEEL_WIN_H       300
+#define VR_WHEEL_WIDTH       0.26f  /* physical width, metres */
+#define VR_WHEEL_DEADZONE    0.45f  /* stick past this picks a wedge */
+#define VR_WHEEL_HOLD_NS     260000000LL  /* dwell before a submenu opens */
 
 #define VR_CARD_CONTROLS_WIN_W   330    /* layout size, logical UI pixels */
 #define VR_CARD_CONTROLS_WIN_H   540
@@ -242,6 +255,11 @@ typedef struct {
     fonthandle   cardFont;
     bool32       cardFontTried;
     bool32       cardOverflowLogged;
+    bool32       wheelOpen;
+    sdword       wheelPage;         /* index into vrWheelPage[] */
+    sdword       wheelSlot;         /* highlighted wedge, -1 = none */
+    XrTime       wheelSlotSince;    /* when the highlight last changed */
+    bool32       wheelSubOpened;    /* dwell already opened a submenu */
     vrmanagerstate managerState;
     udword       managerFrames;     /* frames since the manager opened */
     udword       managerPendingFrames; /* consecutive frames not presentable */
@@ -1448,6 +1466,10 @@ static void vrDrawManagerBorder(void)
 /*-----------------------------------------------------------------------------
     Wrist cards
 ----------------------------------------------------------------------------*/
+static bool32 vrActionPressedHand(XrAction action, uword hand);
+static void vrActionStick(uword hand, real32* x, real32* y);
+static void vrHapticPulse(uword hand, real32 amplitude, XrDuration duration);
+
 static void vrCardInit(void)
 {
     vr.card[VR_CARD_CONTROLS].winWidth = VR_CARD_CONTROLS_WIN_W;
@@ -1456,6 +1478,10 @@ static void vrCardInit(void)
     vr.card[VR_CARD_STATUS].winWidth = VR_CARD_STATUS_WIN_W;
     vr.card[VR_CARD_STATUS].winHeight = VR_CARD_STATUS_WIN_H;
     vr.card[VR_CARD_STATUS].widthMetres = VR_CARD_STATUS_WIDTH;
+    vr.card[VR_CARD_WHEEL].winWidth = VR_WHEEL_WIN_W;
+    vr.card[VR_CARD_WHEEL].winHeight = VR_WHEEL_WIN_H;
+    vr.card[VR_CARD_WHEEL].widthMetres = VR_WHEEL_WIDTH;
+    vr.wheelSlot = -1;
 }
 
 /* Created on first use, like the eye buffers: a card is a convenience, so a
@@ -1541,8 +1567,15 @@ static void vrCardRow(sdword x, sdword y, sdword width, char const* label,
 static void vrCardDrawControls(vrcard const* card)
 {
     static char const* rows[][2] = {
+        {"COMMAND WHEEL",       NULL},
+        {"hold L-trigger",      "open wheel"},
+        {"L-stick",             "pick wedge"},
+        {"dwell on wedge",      "submenu"},
+        {"release L-trigger",   "do it"},
+        {"B/Y",                 "back / close"},
+        {"",                    NULL},
         {"SELECT",              NULL},
-        {"trigger",             "select"},
+        {"R-trigger",           "select"},
         {"L-grip + trigger",    "add / toggle"},
         {"trigger x2",          "all of type"},
         {"empty + sweep",       "group brush"},
@@ -1619,6 +1652,222 @@ static void vrCardDrawControls(vrcard const* card)
                 "(lineHeight=%d, need ~%d px, have %d) - raise "
                 "VR_CARD_CONTROLS_WIN_H", (int)i, (int)count, (int)lineHeight,
                 (int)(count * lineHeight + inner * 2), (int)card->winHeight);
+    }
+}
+
+/*-----------------------------------------------------------------------------
+    Command wheel pages
+----------------------------------------------------------------------------*/
+#define VR_WHEEL_PAGE_ROOT       0
+#define VR_WHEEL_PAGE_FORMATIONS 1
+#define VR_WHEEL_PAGE_TACTICS    2
+#define VR_WHEEL_PAGE_ORDERS     3
+#define VR_WHEEL_PAGE_MANAGERS   4
+#define VR_WHEEL_PAGE_VIEW       5
+#define VR_WHEEL_PAGE_GROUPS     6
+#define VR_WHEEL_PAGE_COUNT      7
+
+typedef struct {
+    char const*    label;
+    vrworldcommand cmd;         /* VRW_CMD_NONE when this only opens a page */
+    sdword         arg;
+    sdword         page;        /* submenu to open, -1 for none */
+} vrwheelslot;
+
+typedef struct {
+    char const*  title;
+    sdword       slotCount;
+    vrwheelslot  slot[10];
+} vrwheelpage;
+
+/* A wedge with both a cmd and a page does the cmd on a flick and opens the
+   page on a dwell, so the common case stays a single gesture. */
+static vrwheelpage const vrWheelPage[VR_WHEEL_PAGE_COUNT] = {
+    { "COMMAND", 8, {
+        { "Formation",  VRW_CMD_NONE,        0, VR_WHEEL_PAGE_FORMATIONS },
+        { "Groups",     VRW_CMD_NONE,        0, VR_WHEEL_PAGE_GROUPS },
+        { "Tactics",    VRW_CMD_NONE,        0, VR_WHEEL_PAGE_TACTICS },
+        { "Build",      VRW_CMD_BUILD,       0, -1 },
+        { "Undo",       VRW_CMD_UNDO,        0, -1 },
+        { "Research",   VRW_CMD_RESEARCH,    0, -1 },
+        { "View",       VRW_CMD_NONE,        0, VR_WHEEL_PAGE_VIEW },
+        { "Orders",     VRW_CMD_NONE,        0, VR_WHEEL_PAGE_ORDERS },
+    }},
+    { "FORMATION", 7, {
+        { "Delta",      VRW_CMD_FORM_DELTA,  0, -1 },
+        { "Broad",      VRW_CMD_FORM_BROAD,  0, -1 },
+        { "X",          VRW_CMD_FORM_X,      0, -1 },
+        { "Claw",       VRW_CMD_FORM_CLAW,   0, -1 },
+        { "Wall",       VRW_CMD_FORM_WALL,   0, -1 },
+        { "Sphere",     VRW_CMD_FORM_SPHERE, 0, -1 },
+        { "Custom",     VRW_CMD_FORM_CUSTOM, 0, -1 },
+    }},
+    { "TACTICS", 3, {
+        { "Evasive",    VRW_CMD_TACTIC_EVASIVE,    0, -1 },
+        { "Neutral",    VRW_CMD_TACTIC_NEUTRAL,    0, -1 },
+        { "Aggressive", VRW_CMD_TACTIC_AGGRESSIVE, 0, -1 },
+    }},
+    { "ORDERS", 7, {
+        { "Halt",       VRW_CMD_HALT,      0, -1 },
+        { "Harvest",    VRW_CMD_HARVEST,   0, -1 },
+        { "Dock",       VRW_CMD_DOCK,      0, -1 },
+        { "Special",    VRW_CMD_SPECIAL,   0, -1 },
+        { "Kamikaze",   VRW_CMD_KAMIKAZE,  0, -1 },
+        { "Retire",     VRW_CMD_RETIRE,    0, -1 },
+        { "Scuttle",    VRW_CMD_SCUTTLE,   0, -1 },
+    }},
+    { "MANAGERS", 4, {
+        { "Build",      VRW_CMD_BUILD,      0, -1 },
+        { "Launch",     VRW_CMD_LAUNCH,     0, -1 },
+        { "Research",   VRW_CMD_RESEARCH,   0, -1 },
+        { "Hyperspace", VRW_CMD_HYPERSPACE, 0, -1 },
+    }},
+    { "VIEW", 5, {
+        { "Mothership", VRW_CMD_MOTHERSHIP, 0, -1 },
+        { "Next focus", VRW_CMD_FOCUS_NEXT, 0, -1 },
+        { "Prev focus", VRW_CMD_FOCUS_PREV, 0, -1 },
+        { "Select all", VRW_CMD_SELECT_ALL, 0, -1 },
+        { "Sensors",    VRW_CMD_SENSORS,    0, -1 },
+    }},
+    /* group labels are rewritten per frame with their ship counts */
+    { "GROUPS", 10, {
+        { "1", VRW_CMD_GROUP_RECALL, 1, -1 },
+        { "2", VRW_CMD_GROUP_RECALL, 2, -1 },
+        { "3", VRW_CMD_GROUP_RECALL, 3, -1 },
+        { "4", VRW_CMD_GROUP_RECALL, 4, -1 },
+        { "5", VRW_CMD_GROUP_RECALL, 5, -1 },
+        { "6", VRW_CMD_GROUP_RECALL, 6, -1 },
+        { "7", VRW_CMD_GROUP_RECALL, 7, -1 },
+        { "8", VRW_CMD_GROUP_RECALL, 8, -1 },
+        { "9", VRW_CMD_GROUP_RECALL, 9, -1 },
+        { "0", VRW_CMD_GROUP_RECALL, 0, -1 },
+    }},
+};
+
+static vrwheelpage const* vrWheelCurrentPage(void)
+{
+    sdword page = vr.wheelPage;
+
+    if (page < 0 || page >= VR_WHEEL_PAGE_COUNT)
+    {
+        page = VR_WHEEL_PAGE_ROOT;
+    }
+    return &vrWheelPage[page];
+}
+
+/* Wedge under the stick, or -1 inside the deadzone. Slot 0 is straight up and
+   they run clockwise, so a slot's direction never depends on how many slots
+   the page happens to have... except in count, which is why every page keeps
+   its slots in a fixed order. */
+static sdword vrWheelSlotFromStick(real32 x, real32 y, sdword slotCount)
+{
+    real32 angle;
+    sdword slot;
+
+    if (slotCount <= 0 || x * x + y * y < VR_WHEEL_DEADZONE * VR_WHEEL_DEADZONE)
+    {
+        return -1;
+    }
+    angle = atan2f(x, y);                                   //0 = up, cw
+    if (angle < 0.0f)
+    {
+        angle += 6.2831853f;
+    }
+    slot = (sdword)((angle / 6.2831853f) * (real32)slotCount + 0.5f);
+    return slot % slotCount;
+}
+
+/* Is this slot's command available right now? Store-modifier aware. */
+static bool32 vrWheelSlotEnabled(vrwheelslot const* slot, bool32 storeModifier)
+{
+    if (slot->cmd == VRW_CMD_NONE)
+    {
+        return slot->page >= 0;
+    }
+    if (slot->cmd == VRW_CMD_GROUP_RECALL && storeModifier)
+    {
+        return vrWorldCommandEnabled(VRW_CMD_GROUP_STORE, slot->arg);
+    }
+    return vrWorldCommandEnabled(slot->cmd, slot->arg);
+}
+
+static void vrCardDrawWheel(vrcard const* card)
+{
+    vrwheelpage const* page = vrWheelCurrentPage();
+    bool32 storeModifier = vrActionPressedHand(vr.gripAction, VR_HAND_LEFT);
+    color const rim = colRGB(60, 150, 190);
+    color const on = colRGB(255, 235, 150);
+    color const off = colRGB(95, 105, 115);
+    color const marked = colRGB(120, 255, 170);
+    color const titleCol = colRGB(120, 230, 255);
+    sdword centreX = card->winWidth / 2;
+    sdword centreY = card->winHeight / 2;
+    sdword radius = (card->winWidth < card->winHeight ? card->winWidth
+                                                      : card->winHeight) / 2 - 34;
+    sdword lineHeight = fontHeight("Ay");
+    sdword i;
+
+    if (lineHeight <= 0)
+    {
+        lineHeight = 12;
+    }
+    primGLCircleOutline2((real32)centreX, (real32)centreY, (real32)radius + 16.0f,
+                         48, rim);
+    fontPrint(centreX - fontWidth((char*)page->title) / 2,
+              centreY - lineHeight / 2, titleCol, (char*)page->title);
+
+    for (i = 0; i < page->slotCount; i++)
+    {
+        vrwheelslot const* slot = &page->slot[i];
+        real32 angle = 6.2831853f * (real32)i / (real32)page->slotCount;
+        sdword x = centreX + (sdword)(sinf(angle) * (real32)radius);
+        sdword y = centreY - (sdword)(cosf(angle) * (real32)radius);
+        bool32 enabled = vrWheelSlotEnabled(slot, storeModifier);
+        bool32 selected = (i == vr.wheelSlot);
+        char const* label = slot->label;
+        char text[32];
+        color c;
+
+        if (slot->cmd == VRW_CMD_GROUP_RECALL)
+        {
+            sdword size = vrWorldGroupSize(slot->arg);
+
+            if (size > 0)
+            {
+                sprintf(text, "%s:%d", slot->label, (int)size);
+            }
+            else
+            {
+                sprintf(text, "%s:-", slot->label);
+            }
+            label = text;
+        }
+        c = !enabled ? off : (vrWorldCommandActive(slot->cmd) ? marked : on);
+
+        if (selected)
+        {
+            rectangle box;
+
+            box.x0 = x - fontWidth((char*)label) / 2 - 5;
+            box.y0 = y - lineHeight / 2 - 3;
+            box.x1 = x + fontWidth((char*)label) / 2 + 5;
+            box.y1 = y + lineHeight / 2 + 3;
+            primRectSolid2(&box, colRGB(30, 60, 85));
+            primRectOutline2(&box, 2, enabled ? on : off);
+        }
+        fontPrint(x - fontWidth((char*)label) / 2, y - lineHeight / 2, c,
+                  (char*)label);
+    }
+
+    /* the group page is the one place the modifier changes what commits, so
+       say which it will be rather than making the player remember */
+    if (page->slot[0].cmd == VRW_CMD_GROUP_RECALL)
+    {
+        char const* mode = storeModifier ? "L-grip: STORE" : "recall";
+
+        fontPrint(centreX - fontWidth((char*)mode) / 2,
+                  centreY + lineHeight, storeModifier ? marked : off,
+                  (char*)mode);
     }
 }
 
@@ -1713,6 +1962,10 @@ static void vrCardRender(sdword index, uint32_t imageIndex)
     {
         vrCardDrawControls(card);
     }
+    else if (index == VR_CARD_WHEEL)
+    {
+        vrCardDrawWheel(card);
+    }
     else
     {
         vrCardDrawStatus(card);
@@ -1780,6 +2033,48 @@ static void vrUpdateCardPoses(XrTime displayTime)
         status->pose = pose;
         status->poseValid = vrPoseSubmittable(&status->pose);
     }
+}
+
+/* The wheel takes its position from the left wrist so it feels attached to
+   the commanding hand, but its orientation from the head. A watch-face pose
+   would roll with the wrist, and a radial whose "up" rotates has no stable
+   mapping from stick direction to wedge - which is the whole point of it. */
+static void vrUpdateWheelPose(XrTime displayTime)
+{
+    vrcard* wheel = &vr.card[VR_CARD_WHEEL];
+    XrSpaceLocation head;
+    XrPosef wrist;
+    XrVector3f toWheel;
+    real32 mag;
+
+    wheel->poseValid = FALSE;
+    if (!vr.wheelOpen)
+    {
+        return;
+    }
+    memset(&head, 0, sizeof(head));
+    head.type = XR_TYPE_SPACE_LOCATION;
+    if (!vrWristPose(VR_HAND_LEFT, displayTime, &wrist)
+        || XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &head))
+        || !(head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+    {
+        return;
+    }
+    wheel->pose.position = wrist.position;
+    toWheel.x = wrist.position.x - head.pose.position.x;
+    toWheel.y = wrist.position.y - head.pose.position.y;
+    toWheel.z = wrist.position.z - head.pose.position.z;
+    mag = sqrtf(toWheel.x * toWheel.x + toWheel.y * toWheel.y
+              + toWheel.z * toWheel.z);
+    if (!(mag > 0.05f) || !vrFinite(mag))
+    {
+        return;
+    }
+    toWheel.x /= mag;
+    toWheel.y /= mag;
+    toWheel.z /= mag;
+    vrLookOrientation(toWheel, &wheel->pose.orientation);
+    wheel->poseValid = vrPoseSubmittable(&wheel->pose);
 }
 
 /* Draw, blit and describe one card as a quad layer. Returns FALSE when the
@@ -1885,6 +2180,101 @@ static bool32 vrHandAimLocal(uword hand, XrTime time, real32 pos[3], real32 dir[
     return TRUE;
 }
 
+/* Close the wheel, optionally running whatever wedge is highlighted. */
+static void vrWheelClose(bool32 commit)
+{
+    if (!vr.wheelOpen)
+    {
+        return;
+    }
+    if (commit && vr.wheelSlot >= 0)
+    {
+        vrwheelpage const* page = vrWheelCurrentPage();
+
+        if (vr.wheelSlot < page->slotCount)
+        {
+            vrwheelslot const* slot = &page->slot[vr.wheelSlot];
+            vrworldcommand cmd = slot->cmd;
+
+            /* the group page is the one place a modifier changes the verb */
+            if (cmd == VRW_CMD_GROUP_RECALL
+                && vrActionPressedHand(vr.gripAction, VR_HAND_LEFT))
+            {
+                cmd = VRW_CMD_GROUP_STORE;
+            }
+            if (cmd != VRW_CMD_NONE && vrWorldCommand(cmd, slot->arg))
+            {
+                vrHapticPulse(VR_HAND_LEFT, 0.50f, 40000000);
+            }
+        }
+    }
+    SDL_Log("VR: wheel closed (commit=%d page=%d slot=%d)", (int)commit,
+            (int)vr.wheelPage, (int)vr.wheelSlot);
+    vr.wheelOpen = FALSE;
+    vr.wheelPage = VR_WHEEL_PAGE_ROOT;
+    vr.wheelSlot = -1;
+    vr.wheelSubOpened = FALSE;
+}
+
+/* Left trigger holds the wheel open, the left stick picks a wedge, release
+   commits. Dwelling on a category wedge descends into it. */
+static void vrUpdateWheelInput(XrTime time, bool32 held)
+{
+    vrwheelpage const* page;
+    real32 lx, ly;
+    sdword slot;
+
+    if (held && !vr.wheelOpen)
+    {
+        vr.wheelOpen = TRUE;
+        vr.wheelPage = VR_WHEEL_PAGE_ROOT;
+        vr.wheelSlot = -1;
+        vr.wheelSlotSince = time;
+        vr.wheelSubOpened = FALSE;
+        vrHapticPulse(VR_HAND_LEFT, 0.25f, 20000000);
+        SDL_Log("VR: wheel opened");
+        return;
+    }
+    if (!vr.wheelOpen)
+    {
+        return;
+    }
+    if (!held)
+    {
+        vrWheelClose(TRUE);
+        return;
+    }
+
+    page = vrWheelCurrentPage();
+    vrActionStick(VR_HAND_LEFT, &lx, &ly);
+    slot = vrWheelSlotFromStick(lx, ly, page->slotCount);
+    if (slot != vr.wheelSlot)
+    {
+        vr.wheelSlot = slot;
+        vr.wheelSlotSince = time;
+        vr.wheelSubOpened = FALSE;
+        if (slot >= 0)
+        {
+            vrHapticPulse(VR_HAND_LEFT, 0.16f, 10000000);
+        }
+        return;
+    }
+    /* dwell on a category descends. Reset the highlight on the way in so the
+       stick's current direction cannot immediately commit something on the
+       new page - the player has to aim again, which is what they expect. */
+    if (slot >= 0 && !vr.wheelSubOpened && slot < page->slotCount
+        && page->slot[slot].page >= 0
+        && time - vr.wheelSlotSince >= VR_WHEEL_HOLD_NS)
+    {
+        vr.wheelPage = page->slot[slot].page;
+        vr.wheelSlot = -1;
+        vr.wheelSlotSince = time;
+        vr.wheelSubOpened = TRUE;
+        vrHapticPulse(VR_HAND_LEFT, 0.30f, 22000000);
+        SDL_Log("VR: wheel descended to page %d", (int)vr.wheelPage);
+    }
+}
+
 static void vrUpdateInput(XrTime time)
 {
     XrActiveActionSet activeSet;
@@ -1941,6 +2331,17 @@ static void vrUpdateInput(XrTime time)
        of every control they could use to recover. */
     managerOpen = vr.worldInteractive && vrWorldManagerActive();
     managerActive = managerOpen && vr.managerState == VR_MGR_VISIBLE;
+
+    /* The command wheel owns the left hand while it is up. In menus the left
+       trigger keeps its ordinary click, so this is in-game only. */
+    if (vr.worldInteractive && !managerOpen)
+    {
+        vrUpdateWheelInput(time, select[VR_HAND_LEFT]);
+    }
+    else if (vr.wheelOpen)
+    {
+        vrWheelClose(FALSE);
+    }
 
     /* feed both aim rays into the world-interaction layer (in-game only;
        vrWorldFrameBegin gates on a live game world) */
@@ -2061,7 +2462,7 @@ static void vrUpdateInput(XrTime time)
                     (int)(lx * lx + ly * ly > 0.04f));
         }
         traversing = grip[VR_HAND_RIGHT] && !managerActive;
-        if (!managerActive && lx * lx + ly * ly > 0.04f)
+        if (!managerActive && !vr.wheelOpen && lx * lx + ly * ly > 0.04f)
         {
             vrWorldCameraOrbit(-lx * 0.035f, ly * 0.025f);
         }
@@ -2194,6 +2595,11 @@ static void vrUpdateInput(XrTime time)
     for (orderIndex = 0; orderIndex < VR_HAND_COUNT; orderIndex++)
     {
         hand = handOrder[orderIndex];
+        if (hand == VR_HAND_LEFT && vr.worldInteractive && !managerOpen)
+        {
+            vr.prevSelect[hand] = select[hand];             //wheel owns it
+            continue;
+        }
         if (select[hand] && !vr.prevSelect[hand])
         {
             /* The trigger is otherwise unbound during a move preview, so it
@@ -2456,7 +2862,23 @@ static void vrUpdateInput(XrTime time)
                     (unsigned)hand, (int)grip[VR_HAND_LEFT],
                     (int)grip[VR_HAND_RIGHT], (int)vrWorldMoveActive(),
                     vrWorldManagerName(), (int)vr.managerState);
-            if (vrWorldMoveActive() || vrWorldPathDrawing()
+            if (vr.wheelOpen)
+            {
+                if (vr.wheelPage != VR_WHEEL_PAGE_ROOT)
+                {
+                    vr.wheelPage = VR_WHEEL_PAGE_ROOT;      //back up a level
+                    vr.wheelSlot = -1;
+                    vr.wheelSlotSince = time;
+                    vr.wheelSubOpened = FALSE;
+                    SDL_Log("VR: wheel back to root");
+                }
+                else
+                {
+                    vrWheelClose(FALSE);
+                }
+                vrHapticPulse(hand, 0.22f, 18000000);
+            }
+            else if (vrWorldMoveActive() || vrWorldPathDrawing()
                 || vrWorldPathActive())
             {
                 vrWorldMoveCancel();
@@ -2734,6 +3156,11 @@ static void vrReleaseInputCapture(void)
                                                         SDL_SCANCODE_SPACE,
                       FALSE);
         }
+    }
+
+    if (vr.wheelOpen)
+    {
+        vrWheelClose(FALSE);
     }
 
     memset(vr.prevSelect, 0, sizeof(vr.prevSelect));
@@ -3437,7 +3864,7 @@ static void vrFrameInner(void)
     XrFrameEndInfo endInfo;
     XrCompositionLayerQuad quad;
     XrCompositionLayerQuad cardQuad[VR_CARD_COUNT];
-    bool32 cardReady[VR_CARD_COUNT] = {FALSE, FALSE};
+    bool32 cardReady[VR_CARD_COUNT] = {FALSE, FALSE, FALSE};
     XrCompositionLayerBaseHeader const* layers[2 + VR_CARD_COUNT];
     uint32_t layerCount = 0;
     bool32 managerQuadSubmitted = FALSE;
@@ -3499,6 +3926,7 @@ static void vrFrameInner(void)
         vrUpdateScreenPose(frameState.predictedDisplayTime);
         vrUpdateInput(frameState.predictedDisplayTime);
         vrUpdateCardPoses(frameState.predictedDisplayTime);
+        vrUpdateWheelPose(frameState.predictedDisplayTime);
         vrDrawManagerBorder();
         vrDrawPanelReticle();
 
