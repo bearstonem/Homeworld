@@ -13,6 +13,7 @@
 #ifdef HW_ENABLE_VR
 
 #include "vr.h"
+#include "vrworld.h"
 
 #include <math.h>
 #include <string.h>
@@ -89,7 +90,7 @@ typedef struct {
     bool32       quadPlaced;
     XrPosef      quadPose;
     XrPosef      anchorPose;        /* head pose the world is anchored to */
-    udword       offScreenFrames;   /* frames the screen has been out of view */
+    bool32       quadFollowing;     /* screen gliding back into view */
     XrSwapchain  swapchain;
     XrSwapchain  eyeSwapchain[VR_EYE_COUNT];
     uint32_t     eyeImageCount[VR_EYE_COUNT];
@@ -111,16 +112,31 @@ typedef struct {
     unsigned int blitFbo;
     XrActionSet  actionSet;
     XrAction     aimAction;
-    XrAction     selectAction;      /* trigger  -> left mouse button  */
-    XrAction     contextAction;     /* A/X      -> right mouse button */
-    XrAction     backAction;        /* B/Y      -> Escape key         */
+    XrAction     selectAction;      /* trigger      -> left mouse button        */
+    XrAction     contextAction;     /* A/X          -> right mouse (chord: D)   */
+    XrAction     backAction;        /* B/Y          -> Escape      (chord: B)   */
+    XrAction     stickAction;       /* left stick   -> camera orbit (RMB drag)
+                                       right stick  -> zoom (mouse wheel)       */
+    XrAction     stickClickAction;  /* left click   -> M, right click -> Space
+                                       (chord left  -> R)                       */
+    XrAction     gripAction;        /* left grip    -> Shift, right grip = chord */
     XrPath       handPath[VR_HAND_COUNT];
     XrSpace      aimSpace[VR_HAND_COUNT];
     bool32       prevSelect;
     bool32       prevContext;
     bool32       prevBack;
+    bool32       prevGripLeft;
+    bool32       prevStickClick[VR_HAND_COUNT];
+    sdword       contextKey;        /* key sent at press, released on release (0 = mouse) */
+    sdword       backKey;
+    sdword       stickClickKey[VR_HAND_COUNT];
+    bool32       stickRotating;     /* left stick currently orbiting the camera */
+    real32       wheelAccum;
     sdword       pointerX, pointerY;
     bool32       pointerValid;
+    bool32       worldInteractive;  /* game world exists; native 3D interaction on */
+    sdword       activeHand;
+    real32       moveHeight;        /* metres of vertical offset in a move order */
     rawGlGetIntegerv_t          rawGetIntegerv;
     rawGlGetError_t             rawGetError;
     rawGlGenFramebuffers_t      rawGenFramebuffers;
@@ -325,80 +341,6 @@ static void vrQuatRotate(XrQuaternionf q, XrVector3f v, XrVector3f* out)
     out->z = v.z + q.w * t.z + c.z;
 }
 
-/* Anchor the virtual screen in front of wherever the user is actually
-   looking on the first tracked frame (the LOCAL origin is wherever the
-   headset happened to be at app start, which may be nowhere useful). */
-static void vrPlaceQuad(XrTime displayTime)
-{
-    XrSpaceLocation location;
-    XrVector3f forward = {0.0f, 0.0f, -VR_SCREEN_DISTANCE};
-    XrVector3f offset;
-
-    memset(&location, 0, sizeof(location));
-    location.type = XR_TYPE_SPACE_LOCATION;
-    if (XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &location))
-        || !(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
-        || !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
-    {
-        return;                                             //try again next frame
-    }
-
-    vrQuatRotate(location.pose.orientation, forward, &offset);
-    vr.quadPose.position.x = location.pose.position.x + offset.x;
-    vr.quadPose.position.y = location.pose.position.y + offset.y;
-    vr.quadPose.position.z = location.pose.position.z + offset.z;
-    vr.quadPose.orientation = location.pose.orientation;
-    vr.anchorPose = location.pose;
-    vr.quadPlaced = TRUE;
-    vr.offScreenFrames = 0;
-    SDL_Log("VR: screen anchored at (%.2f, %.2f, %.2f)",
-            vr.quadPose.position.x, vr.quadPose.position.y, vr.quadPose.position.z);
-}
-
-/* Anchor events (donning the headset, recentering) are not reliably
-   delivered, so also re-anchor behaviourally: when the screen has been
-   well outside the user's view for over a second, bring it to them. */
-static void vrCheckScreenVisible(XrTime displayTime)
-{
-    XrSpaceLocation location;
-    XrVector3f forward = {0.0f, 0.0f, -1.0f}, facing, toQuad;
-    real32 mag, dot;
-
-    memset(&location, 0, sizeof(location));
-    location.type = XR_TYPE_SPACE_LOCATION;
-    if (XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &location))
-        || !(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
-        || !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
-    {
-        return;
-    }
-
-    vrQuatRotate(location.pose.orientation, forward, &facing);
-    toQuad.x = vr.quadPose.position.x - location.pose.position.x;
-    toQuad.y = vr.quadPose.position.y - location.pose.position.y;
-    toQuad.z = vr.quadPose.position.z - location.pose.position.z;
-    mag = sqrtf(toQuad.x * toQuad.x + toQuad.y * toQuad.y + toQuad.z * toQuad.z);
-    if (mag < 0.25f)
-    {
-        return;                                             //head is basically at the screen
-    }
-    dot = (facing.x * toQuad.x + facing.y * toQuad.y + facing.z * toQuad.z) / mag;
-
-    if (dot < 0.35f)                                        //screen > ~70 degrees off gaze
-    {
-        vr.offScreenFrames++;
-        if (vr.offScreenFrames > 90)                        //~1.25s at 72Hz
-        {
-            SDL_Log("VR: screen out of view, re-anchoring");
-            vr.quadPlaced = FALSE;
-        }
-    }
-    else
-    {
-        vr.offScreenFrames = 0;
-    }
-}
-
 static bool32 vrCreateSwapchain(void)
 {
     int64_t formats[256];
@@ -488,7 +430,7 @@ static bool32 vrCreateActions(void)
 {
     XrActionSetCreateInfo setInfo;
     XrActionCreateInfo actionInfo;
-    XrActionSuggestedBinding bindings[8];
+    XrActionSuggestedBinding bindings[14];
     XrInteractionProfileSuggestedBinding suggested;
     XrSessionActionSetsAttachInfo attachInfo;
     XrActionSpaceCreateInfo spaceInfo;
@@ -527,18 +469,37 @@ static bool32 vrCreateActions(void)
     strcpy(actionInfo.localizedActionName, "Back");
     VR_CHECK("xrCreateAction back", xrCreateAction(vr.actionSet, &actionInfo, &vr.backAction));
 
+    strcpy(actionInfo.actionName, "stick_click");
+    strcpy(actionInfo.localizedActionName, "Stick click");
+    VR_CHECK("xrCreateAction stick_click", xrCreateAction(vr.actionSet, &actionInfo, &vr.stickClickAction));
+
+    strcpy(actionInfo.actionName, "grip");
+    strcpy(actionInfo.localizedActionName, "Grip");
+    VR_CHECK("xrCreateAction grip", xrCreateAction(vr.actionSet, &actionInfo, &vr.gripAction));
+
+    actionInfo.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
+    strcpy(actionInfo.actionName, "thumbstick");
+    strcpy(actionInfo.localizedActionName, "Thumbstick");
+    VR_CHECK("xrCreateAction thumbstick", xrCreateAction(vr.actionSet, &actionInfo, &vr.stickAction));
+
     {
-        struct { XrAction action; char const* path; } layout[8] = {
-            { vr.aimAction,     "/user/hand/left/input/aim/pose" },
-            { vr.aimAction,     "/user/hand/right/input/aim/pose" },
-            { vr.selectAction,  "/user/hand/left/input/trigger/value" },
-            { vr.selectAction,  "/user/hand/right/input/trigger/value" },
-            { vr.contextAction, "/user/hand/left/input/x/click" },
-            { vr.contextAction, "/user/hand/right/input/a/click" },
-            { vr.backAction,    "/user/hand/left/input/y/click" },
-            { vr.backAction,    "/user/hand/right/input/b/click" },
+        struct { XrAction action; char const* path; } layout[14] = {
+            { vr.aimAction,        "/user/hand/left/input/aim/pose" },
+            { vr.aimAction,        "/user/hand/right/input/aim/pose" },
+            { vr.selectAction,     "/user/hand/left/input/trigger/value" },
+            { vr.selectAction,     "/user/hand/right/input/trigger/value" },
+            { vr.contextAction,    "/user/hand/left/input/x/click" },
+            { vr.contextAction,    "/user/hand/right/input/a/click" },
+            { vr.backAction,       "/user/hand/left/input/y/click" },
+            { vr.backAction,       "/user/hand/right/input/b/click" },
+            { vr.stickAction,      "/user/hand/left/input/thumbstick" },
+            { vr.stickAction,      "/user/hand/right/input/thumbstick" },
+            { vr.stickClickAction, "/user/hand/left/input/thumbstick/click" },
+            { vr.stickClickAction, "/user/hand/right/input/thumbstick/click" },
+            { vr.gripAction,       "/user/hand/left/input/squeeze/value" },
+            { vr.gripAction,       "/user/hand/right/input/squeeze/value" },
         };
-        for (i = 0; i < 8; i++)
+        for (i = 0; i < 14; i++)
         {
             bindings[i].action = layout[i].action;
             xrStringToPath(vr.instance, layout[i].path, &bindings[i].binding);
@@ -549,7 +510,7 @@ static bool32 vrCreateActions(void)
     memset(&suggested, 0, sizeof(suggested));
     suggested.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
     suggested.interactionProfile = profilePath;
-    suggested.countSuggestedBindings = 8;
+    suggested.countSuggestedBindings = 14;
     suggested.suggestedBindings = bindings;
     VR_CHECK("xrSuggestInteractionProfileBindings",
              xrSuggestInteractionProfileBindings(vr.instance, &suggested));
@@ -580,9 +541,90 @@ static void vrQuatUnrotate(XrQuaternionf q, XrVector3f v, XrVector3f* out)
     vrQuatRotate(conj, v, out);
 }
 
-/* The command screen lives in VIEW space (head-relative), so it can never
-   be lost regardless of anchoring/recentering: straight ahead, 2m out. */
-static XrPosef const vrScreenPose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -VR_SCREEN_DISTANCE}};
+/* Lazy-follow screen: stable in space while being read/clicked, and glides
+   over when the user turns well away - so it can never be lost either. */
+
+static void vrNlerp(XrQuaternionf a, XrQuaternionf b, real32 t, XrQuaternionf* out)
+{
+    real32 dot = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    real32 sign = (dot < 0.0f) ? -1.0f : 1.0f;
+    real32 mag;
+
+    out->x = a.x + (b.x * sign - a.x) * t;
+    out->y = a.y + (b.y * sign - a.y) * t;
+    out->z = a.z + (b.z * sign - a.z) * t;
+    out->w = a.w + (b.w * sign - a.w) * t;
+    mag = sqrtf(out->x * out->x + out->y * out->y + out->z * out->z + out->w * out->w);
+    if (mag > 0.0f)
+    {
+        out->x /= mag; out->y /= mag; out->z /= mag; out->w /= mag;
+    }
+}
+
+static void vrUpdateScreenPose(XrTime displayTime)
+{
+    XrSpaceLocation location;
+    XrVector3f forward = {0.0f, 0.0f, -VR_SCREEN_DISTANCE}, offset;
+    XrVector3f gaze = {0.0f, 0.0f, -1.0f}, facing, toQuad;
+    XrPosef desired;
+    real32 mag, dot;
+
+    memset(&location, 0, sizeof(location));
+    location.type = XR_TYPE_SPACE_LOCATION;
+    if (XR_FAILED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &location))
+        || !(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+        || !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+    {
+        return;
+    }
+
+    vrQuatRotate(location.pose.orientation, forward, &offset);
+    desired.position.x = location.pose.position.x + offset.x;
+    desired.position.y = location.pose.position.y + offset.y;
+    desired.position.z = location.pose.position.z + offset.z;
+    desired.orientation = location.pose.orientation;
+
+    if (!vr.quadPlaced)
+    {
+        vr.quadPose = desired;
+        vr.anchorPose = location.pose;                      //world anchor
+        vr.quadPlaced = TRUE;
+        vr.quadFollowing = FALSE;
+        SDL_Log("VR: screen anchored at (%.2f, %.2f, %.2f)",
+                desired.position.x, desired.position.y, desired.position.z);
+        return;
+    }
+
+    /* how far off gaze is the screen? */
+    vrQuatRotate(location.pose.orientation, gaze, &facing);
+    toQuad.x = vr.quadPose.position.x - location.pose.position.x;
+    toQuad.y = vr.quadPose.position.y - location.pose.position.y;
+    toQuad.z = vr.quadPose.position.z - location.pose.position.z;
+    mag = sqrtf(toQuad.x * toQuad.x + toQuad.y * toQuad.y + toQuad.z * toQuad.z);
+    if (mag < 0.25f)
+    {
+        return;
+    }
+    dot = (facing.x * toQuad.x + facing.y * toQuad.y + facing.z * toQuad.z) / mag;
+
+    if (dot < 0.55f)                                        //> ~57 degrees off gaze
+    {
+        vr.quadFollowing = TRUE;
+    }
+    if (vr.quadFollowing)
+    {
+        real32 const alpha = 0.08f;                         //~0.4s glide at 72Hz
+
+        vr.quadPose.position.x += (desired.position.x - vr.quadPose.position.x) * alpha;
+        vr.quadPose.position.y += (desired.position.y - vr.quadPose.position.y) * alpha;
+        vr.quadPose.position.z += (desired.position.z - vr.quadPose.position.z) * alpha;
+        vrNlerp(vr.quadPose.orientation, desired.orientation, alpha, &vr.quadPose.orientation);
+        if (dot > 0.996f)                                   //settled in front again
+        {
+            vr.quadFollowing = FALSE;
+        }
+    }
+}
 
 /* Intersect a hand's aim ray with the virtual screen; returns TRUE and the
    game-window pixel coordinates on hit. */
@@ -594,7 +636,7 @@ static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
 
     memset(&location, 0, sizeof(location));
     location.type = XR_TYPE_SPACE_LOCATION;
-    if (XR_FAILED(xrLocateSpace(vr.aimSpace[hand], vr.viewSpace, time, &location))
+    if (XR_FAILED(xrLocateSpace(vr.aimSpace[hand], vr.space, time, &location))
         || !(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
         || !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
     {
@@ -603,11 +645,11 @@ static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py)
 
     /* ray into the quad's local frame (quad plane is z=0) */
     vrQuatRotate(location.pose.orientation, forward, &direction);
-    origin.x = location.pose.position.x - vrScreenPose.position.x;
-    origin.y = location.pose.position.y - vrScreenPose.position.y;
-    origin.z = location.pose.position.z - vrScreenPose.position.z;
-    vrQuatUnrotate(vrScreenPose.orientation, origin, &local);
-    vrQuatUnrotate(vrScreenPose.orientation, direction, &localDir);
+    origin.x = location.pose.position.x - vr.quadPose.position.x;
+    origin.y = location.pose.position.y - vr.quadPose.position.y;
+    origin.z = location.pose.position.z - vr.quadPose.position.z;
+    vrQuatUnrotate(vr.quadPose.orientation, origin, &local);
+    vrQuatUnrotate(vr.quadPose.orientation, direction, &localDir);
 
     if (localDir.z > -1e-5f)                                //parallel or pointing away
     {
@@ -660,27 +702,67 @@ static void vrPushKey(SDL_Keycode sym, SDL_Scancode scancode, bool32 down)
     SDL_PushEvent(&event);
 }
 
-static bool32 vrActionPressed(XrAction action)
+static bool32 vrActionPressedHand(XrAction action, uword hand)
 {
     XrActionStateGetInfo getInfo;
     XrActionStateBoolean state;
-    uword hand;
 
     memset(&getInfo, 0, sizeof(getInfo));
     getInfo.type = XR_TYPE_ACTION_STATE_GET_INFO;
     getInfo.action = action;
-    for (hand = 0; hand < VR_HAND_COUNT; hand++)
+    getInfo.subactionPath = vr.handPath[hand];
+    memset(&state, 0, sizeof(state));
+    state.type = XR_TYPE_ACTION_STATE_BOOLEAN;
+    return XR_SUCCEEDED(xrGetActionStateBoolean(vr.session, &getInfo, &state))
+           && state.isActive && state.currentState;
+}
+
+static bool32 vrActionPressed(XrAction action)
+{
+    return vrActionPressedHand(action, VR_HAND_LEFT) || vrActionPressedHand(action, VR_HAND_RIGHT);
+}
+
+static void vrActionStick(uword hand, real32* x, real32* y)
+{
+    XrActionStateGetInfo getInfo;
+    XrActionStateVector2f state;
+
+    *x = *y = 0.0f;
+    memset(&getInfo, 0, sizeof(getInfo));
+    getInfo.type = XR_TYPE_ACTION_STATE_GET_INFO;
+    getInfo.action = vr.stickAction;
+    getInfo.subactionPath = vr.handPath[hand];
+    memset(&state, 0, sizeof(state));
+    state.type = XR_TYPE_ACTION_STATE_VECTOR2F;
+    if (XR_SUCCEEDED(xrGetActionStateVector2f(vr.session, &getInfo, &state)) && state.isActive)
     {
-        getInfo.subactionPath = vr.handPath[hand];
-        memset(&state, 0, sizeof(state));
-        state.type = XR_TYPE_ACTION_STATE_BOOLEAN;
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(vr.session, &getInfo, &state))
-            && state.isActive && state.currentState)
-        {
-            return TRUE;
-        }
+        *x = state.currentState.x;
+        *y = state.currentState.y;
     }
-    return FALSE;
+}
+
+/* Aim pose of a hand in LOCAL space: position in metres + forward dir */
+static bool32 vrHandAimLocal(uword hand, XrTime time, real32 pos[3], real32 dir[3])
+{
+    XrSpaceLocation location;
+    XrVector3f forward = {0.0f, 0.0f, -1.0f}, d;
+
+    memset(&location, 0, sizeof(location));
+    location.type = XR_TYPE_SPACE_LOCATION;
+    if (XR_FAILED(xrLocateSpace(vr.aimSpace[hand], vr.space, time, &location))
+        || !(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+        || !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+    {
+        return FALSE;
+    }
+    pos[0] = location.pose.position.x;
+    pos[1] = location.pose.position.y;
+    pos[2] = location.pose.position.z;
+    vrQuatRotate(location.pose.orientation, forward, &d);
+    dir[0] = d.x;
+    dir[1] = d.y;
+    dir[2] = d.z;
+    return TRUE;
 }
 
 static void vrUpdateInput(XrTime time)
@@ -706,16 +788,117 @@ static void vrUpdateInput(XrTime time)
         return;
     }
 
-    /* right hand wins when both point at the screen */
-    if (vrPointerFromHand(VR_HAND_RIGHT, time, &px, &py)
-        || vrPointerFromHand(VR_HAND_LEFT, time, &px, &py))
+    /* feed both aim rays into the world-interaction layer (in-game only;
+       vrWorldFrameBegin gates on a live game world) */
+    if (vr.worldInteractive)
     {
-        vr.pointerX = px;
-        vr.pointerY = py;
-        vr.pointerValid = TRUE;
-        SDL_WarpMouseInWindow(sdlwindow, (int)px, (int)py);
+        uword hand;
+
+        for (hand = 0; hand < VR_HAND_COUNT; hand++)
+        {
+            real32 pos[3], dir[3];
+            bool32 ok = vrHandAimLocal(hand, time, pos, dir);
+
+            vrWorldSetRay((sdword)hand, pos, dir, ok);
+        }
+        vr.activeHand = vrWorldHandHasTarget(VR_HAND_RIGHT) ? VR_HAND_RIGHT
+                      : vrWorldHandHasTarget(VR_HAND_LEFT) ? VR_HAND_LEFT
+                      : VR_HAND_RIGHT;
+    }
+
+    if (!vr.worldInteractive)
+    {
+        /* menu mode: left stick synthesizes Homeworld's right-button drag */
+        real32 lx, ly;
+
+        vrActionStick(VR_HAND_LEFT, &lx, &ly);
+        if (lx * lx + ly * ly > 0.04f)
+        {
+            if (!vr.stickRotating)
+            {
+                vrPushMouseButton(SDL_BUTTON_RIGHT, TRUE);
+                vr.stickRotating = TRUE;
+            }
+            vr.pointerX += (sdword)(lx * 22.0f);
+            vr.pointerY -= (sdword)(ly * 22.0f);
+            if (vr.pointerX < 0) vr.pointerX = 0;
+            if (vr.pointerY < 0) vr.pointerY = 0;
+            if (vr.pointerX >= vr.width)  vr.pointerX = vr.width - 1;
+            if (vr.pointerY >= vr.height) vr.pointerY = vr.height - 1;
+            SDL_WarpMouseInWindow(sdlwindow, (int)vr.pointerX, (int)vr.pointerY);
+        }
+        else if (vr.stickRotating)
+        {
+            vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
+            vr.stickRotating = FALSE;
+        }
     }
     else
+    {
+        /* in-game: sticks drive the real camera natively (interim until the
+           grab gestures land): left stick orbits, right stick Y zooms */
+        real32 lx, ly, rx, ry;
+
+        vrActionStick(VR_HAND_LEFT, &lx, &ly);
+        if (lx * lx + ly * ly > 0.04f)
+        {
+            vrWorldCameraOrbit(-lx * 0.035f, ly * 0.025f);
+        }
+        vrActionStick(VR_HAND_RIGHT, &rx, &ry);
+        if (ry > 0.25f || ry < -0.25f)
+        {
+            vrWorldCameraZoom(1.0f - ry * 0.02f);
+        }
+        if (vr.stickRotating)
+        {
+            vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
+            vr.stickRotating = FALSE;
+        }
+    }
+
+    if (!vr.worldInteractive)
+    {
+        /* zoom: right stick Y accumulates into mouse wheel ticks */
+        real32 rx, ry;
+
+        vrActionStick(VR_HAND_RIGHT, &rx, &ry);
+        if (ry > 0.25f || ry < -0.25f)
+        {
+            vr.wheelAccum += ry * 0.12f;
+        }
+        while (vr.wheelAccum >= 1.0f || vr.wheelAccum <= -1.0f)
+        {
+            SDL_Event event;
+            sdword step = (vr.wheelAccum > 0.0f) ? 1 : -1;
+
+            memset(&event, 0, sizeof(event));
+            event.type = SDL_MOUSEWHEEL;
+            event.wheel.windowID = SDL_GetWindowID(sdlwindow);
+            event.wheel.y = step;
+            SDL_PushEvent(&event);
+            vr.wheelAccum -= (real32)step;
+        }
+    }
+
+    /* panel pointer from the aim ray (right hand wins). In-game the panel
+       only receives the pointer when no ship is hovered (wizard clicks). */
+    if (!vr.stickRotating
+        && !(vr.worldInteractive && vrWorldHandHasTarget(vr.activeHand)))
+    {
+        if (vrPointerFromHand(VR_HAND_RIGHT, time, &px, &py)
+            || vrPointerFromHand(VR_HAND_LEFT, time, &px, &py))
+        {
+            vr.pointerX = px;
+            vr.pointerY = py;
+            vr.pointerValid = TRUE;
+            SDL_WarpMouseInWindow(sdlwindow, (int)px, (int)py);
+        }
+        else
+        {
+            vr.pointerValid = FALSE;
+        }
+    }
+    else if (vr.worldInteractive)
     {
         vr.pointerValid = FALSE;
     }
@@ -724,20 +907,167 @@ static void vrUpdateInput(XrTime time)
     context = vrActionPressed(vr.contextAction);
     back = vrActionPressed(vr.backAction);
 
-    if (select != vr.prevSelect && (vr.pointerValid || !select))
+    if (select != vr.prevSelect)
     {
-        vrPushMouseButton(SDL_BUTTON_LEFT, select);
-        vr.prevSelect = select;
+        if (vr.worldInteractive && !vr.pointerValid)
+        {
+            /* native selection */
+            bool32 additive = vrActionPressedHand(vr.gripAction, VR_HAND_LEFT);
+
+            if (select)
+            {
+                if (vrWorldHandHasTarget(vr.activeHand))
+                {
+                    vrWorldSelectClick(vr.activeHand, additive);
+                }
+                else
+                {
+                    vrWorldSweepBegin(vr.activeHand);
+                }
+            }
+            else
+            {
+                vrWorldSweepCommit(vr.activeHand, additive);
+            }
+            vr.prevSelect = select;
+        }
+        else if (vr.pointerValid || !select)
+        {
+            vrPushMouseButton(SDL_BUTTON_LEFT, select);
+            vr.prevSelect = select;
+        }
     }
-    if (context != vr.prevContext && (vr.pointerValid || !context))
+
+    /* in-game native context orders / move on A-X */
+    if (vr.worldInteractive && !vr.pointerValid)
     {
-        vrPushMouseButton(SDL_BUTTON_RIGHT, context);
+        if (context != vr.prevContext)
+        {
+            if (context)
+            {
+                if (!vrWorldContextOrder(vr.activeHand))
+                {
+                    vrWorldMoveBegin(vr.activeHand);
+                }
+            }
+            else
+            {
+                vrWorldMoveCommit();
+            }
+            vr.prevContext = context;
+        }
+        if (vrWorldMoveActive())
+        {
+            real32 rx, ry;
+
+            vrActionStick(VR_HAND_RIGHT, &rx, &ry);
+            vr.moveHeight += ry * 0.004f;
+            vrWorldMoveUpdate(vr.activeHand, vr.moveHeight);
+        }
+        else
+        {
+            vr.moveHeight = 0.0f;
+        }
+        if (back && !vr.prevBack && vrWorldMoveActive())
+        {
+            vrWorldMoveCancel();
+            vr.prevBack = back;                             //swallow this ESC
+        }
+    }
+
+    /* A/X: right mouse button, or Dock with the right-grip chord */
+    if (context != vr.prevContext)
+    {
+        if (context)
+        {
+            vr.contextKey = vrActionPressedHand(vr.gripAction, VR_HAND_RIGHT) ? SDLK_d : 0;
+            if (vr.contextKey)
+            {
+                vrPushKey(vr.contextKey, SDL_SCANCODE_D, TRUE);
+            }
+            else if (vr.pointerValid)
+            {
+                vrPushMouseButton(SDL_BUTTON_RIGHT, TRUE);
+            }
+        }
+        else
+        {
+            if (vr.contextKey)
+            {
+                vrPushKey(vr.contextKey, SDL_SCANCODE_D, FALSE);
+                vr.contextKey = 0;
+            }
+            else
+            {
+                vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
+            }
+        }
         vr.prevContext = context;
     }
+
+    /* B/Y: Escape, or Build manager with the right-grip chord */
     if (back != vr.prevBack)
     {
-        vrPushKey(SDLK_ESCAPE, SDL_SCANCODE_ESCAPE, back);
+        if (back)
+        {
+            vr.backKey = vrActionPressedHand(vr.gripAction, VR_HAND_RIGHT) ? SDLK_b : SDLK_ESCAPE;
+            vrPushKey(vr.backKey, (vr.backKey == SDLK_b) ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE, TRUE);
+        }
+        else
+        {
+            vrPushKey(vr.backKey, (vr.backKey == SDLK_b) ? SDL_SCANCODE_B : SDL_SCANCODE_ESCAPE, FALSE);
+        }
         vr.prevBack = back;
+    }
+
+    /* left grip: Shift (additive selection / band-box) */
+    {
+        bool32 gripLeft = vrActionPressedHand(vr.gripAction, VR_HAND_LEFT);
+
+        if (gripLeft != vr.prevGripLeft)
+        {
+            vrPushKey(SDLK_LSHIFT, SDL_SCANCODE_LSHIFT, gripLeft);
+            vr.prevGripLeft = gripLeft;
+        }
+    }
+
+    /* stick clicks: left = Move order (chord: Research), right = Sensors */
+    {
+        uword hand;
+
+        for (hand = 0; hand < VR_HAND_COUNT; hand++)
+        {
+            bool32 pressed = vrActionPressedHand(vr.stickClickAction, hand);
+
+            if (pressed == vr.prevStickClick[hand])
+            {
+                continue;
+            }
+            if (pressed)
+            {
+                if (hand == VR_HAND_LEFT)
+                {
+                    vr.stickClickKey[hand] =
+                        vrActionPressedHand(vr.gripAction, VR_HAND_RIGHT) ? SDLK_r : SDLK_m;
+                }
+                else
+                {
+                    vr.stickClickKey[hand] = SDLK_SPACE;
+                }
+                vrPushKey(vr.stickClickKey[hand],
+                          (vr.stickClickKey[hand] == SDLK_r) ? SDL_SCANCODE_R :
+                          (vr.stickClickKey[hand] == SDLK_m) ? SDL_SCANCODE_M : SDL_SCANCODE_SPACE,
+                          TRUE);
+            }
+            else
+            {
+                vrPushKey(vr.stickClickKey[hand],
+                          (vr.stickClickKey[hand] == SDLK_r) ? SDL_SCANCODE_R :
+                          (vr.stickClickKey[hand] == SDLK_m) ? SDL_SCANCODE_M : SDL_SCANCODE_SPACE,
+                          FALSE);
+            }
+            vr.prevStickClick[hand] = pressed;
+        }
     }
 }
 
@@ -1017,6 +1347,7 @@ static bool32 vrRenderEyes(XrTime displayTime)
 
         vr.eyeActive = TRUE;
         rndMainViewRenderFunction(mrCamera);
+        vrWorldDrawOverlays();                              //rays, rings, move disc
         vr.eyeActive = FALSE;
         glFlush();
 
@@ -1215,10 +1546,22 @@ void vrFrame(void)
         XrSwapchainImageReleaseInfo releaseInfo;
         uint32_t imageIndex = 0;
 
-        if (!vr.quadPlaced)
+        vrUpdateScreenPose(frameState.predictedDisplayTime);
+
+        /* capture the pure game camera matrix (the eye passes overwrite
+           rndCameraMatrix later) and refresh the LOCAL->world transforms */
         {
-            vrPlaceQuad(frameState.predictedDisplayTime);   //world anchor only
+            real32 anchorPos[3] = {vr.anchorPose.position.x,
+                                   vr.anchorPose.position.y,
+                                   vr.anchorPose.position.z};
+            real32 anchorQuat[4] = {vr.anchorPose.orientation.x,
+                                    vr.anchorPose.orientation.y,
+                                    vr.anchorPose.orientation.z,
+                                    vr.anchorPose.orientation.w};
+
+            vr.worldInteractive = vrWorldFrameBegin(anchorPos, anchorQuat, VR_WORLD_SCALE);
         }
+
         vrUpdateInput(frameState.predictedDisplayTime);
 
         memset(&acquireInfo, 0, sizeof(acquireInfo));
@@ -1245,12 +1588,12 @@ void vrFrame(void)
 
             memset(&quad, 0, sizeof(quad));
             quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
-            quad.space = vr.viewSpace;                      //head-locked: cannot be lost
+            quad.space = vr.space;
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = vr.swapchain;
             quad.subImage.imageRect.extent.width = vr.width;
             quad.subImage.imageRect.extent.height = vr.height;
-            quad.pose = vrScreenPose;
+            quad.pose = vr.quadPose;
             quad.size.width = VR_SCREEN_WIDTH;
             quad.size.height = VR_SCREEN_WIDTH * (real32)vr.height / (real32)vr.width;
             layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&quad;
