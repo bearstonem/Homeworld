@@ -127,6 +127,12 @@ Touch controls in the 3D world:
   plane, a vertical line and a line back to the fleet make the depth readable,
   the beam ends exactly at the destination, and the right wrist card shows the
   depth as a number. B/Y cancels.
+- To attack several things at once, hold A on one enemy and then, still
+  holding it, pull the trigger and sweep across the others. Each one picked up
+  is ringed in red, and releasing A sends a single attack order against all of
+  them - the same order the desktop's ctrl-drag band box issues. It is the same
+  grammar as drawing a route: A previews an order, and sweeping the trigger
+  during that preview elaborates it.
 - To fly a route rather than a straight line, hold the trigger during a move
   preview and sweep: the swept points are smoothed into a Catmull-Rom spline
   and resampled by arc length into evenly spaced waypoints, drawn as a curve

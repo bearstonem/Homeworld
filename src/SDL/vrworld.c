@@ -109,6 +109,11 @@ static struct {
     sdword  sweepTrailCount;
     real32  sweepReach;                     /* how far down the ray to draw */
 
+    /* attack target sweep, during an A/X order preview */
+    bool32  targetSweepActive;
+    sdword  targetSweepHand;
+    MaxAnySelection targetSweep;
+
     /* move order */
     bool32  moveActive;
     sdword  moveHand;
@@ -731,6 +736,24 @@ static void vrwLocalDirToWorld(real32 const dir[3], vector* out)
     }
 }
 
+/* Something this player may be ordered to shoot at. Mirrors the enemy branch
+   of vrWorldContextIntent; the game's own MakeTargetsOnlyNonForceAttackTargets
+   does the final pruning at commit. */
+static bool32 vrwAttackable(SpaceObjRotImpTarg const* obj)
+{
+    if (obj == NULL || (obj->flags & SOF_Dead))
+    {
+        return FALSE;
+    }
+    if (obj->objtype == OBJ_DerelictType)
+    {
+        return TRUE;
+    }
+    return obj->objtype == OBJ_ShipType
+        && ((Ship const*)obj)->playerowner != universe.curPlayerPtr
+        && !allianceIsShipAlly((Ship*)obj, universe.curPlayerPtr);
+}
+
 static bool32 vrwPlayerShipSelectable(SpaceObjRotImpTarg const* obj)
 {
     udword const blocked = SOF_Dead | SOF_Hide | SOF_Disabled
@@ -875,6 +898,41 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
     return best;
 }
 
+/* Remember where the brush has been, so the overlay can show the region
+   actually swept rather than only which objects it happened to catch. Shared
+   by both sweeps - selecting ships and picking attack targets use the same
+   brush, so they should look the same while in progress. */
+static void vrwSweepTrailRecord(vrwray const* ray)
+{
+    vector far;
+
+    if (!(vrw.sweepReach > 0.0f))
+    {
+        return;
+    }
+    far.x = ray->origin.x + ray->dir.x * vrw.sweepReach;
+    far.y = ray->origin.y + ray->dir.y * vrw.sweepReach;
+    far.z = ray->origin.z + ray->dir.z * vrw.sweepReach;
+    if (vrw.sweepTrailCount == 0
+        || vrwDistance(&far, &vrw.sweepTrail[vrw.sweepTrailCount - 1])
+           > vrw.sweepReach * 0.02f)
+    {
+        if (vrw.sweepTrailCount >= VRW_SWEEP_TRAIL)
+        {
+            sdword i;
+
+            /* keep the whole stroke by halving resolution, as the path
+               sampler does, rather than dropping the start of it */
+            for (i = 0; i * 2 < vrw.sweepTrailCount; i++)
+            {
+                vrw.sweepTrail[i] = vrw.sweepTrail[i * 2];
+            }
+            vrw.sweepTrailCount = i;
+        }
+        vrw.sweepTrail[vrw.sweepTrailCount++] = far;
+    }
+}
+
 /* Sweep-select brush. This is the VR stand-in for the desktop band-box, so
    it behaves like one: every selectable player ship the beam passes over
    joins the preview - not just the nearest - and the capture radius widens
@@ -884,33 +942,7 @@ static void vrwSweepAccumulate(vrwray const* ray)
 {
     Node* node;
 
-    /* Remember where the brush has been so the overlay can show the region
-       actually swept, not just which ships it happened to catch. */
-    {
-        vector far;
-
-        far.x = ray->origin.x + ray->dir.x * vrw.sweepReach;
-        far.y = ray->origin.y + ray->dir.y * vrw.sweepReach;
-        far.z = ray->origin.z + ray->dir.z * vrw.sweepReach;
-        if (vrw.sweepTrailCount == 0
-            || vrwDistance(&far, &vrw.sweepTrail[vrw.sweepTrailCount - 1])
-               > vrw.sweepReach * 0.02f)
-        {
-            if (vrw.sweepTrailCount >= VRW_SWEEP_TRAIL)
-            {
-                sdword i;
-
-                /* keep the whole stroke by halving resolution, as the path
-                   sampler does, rather than dropping the start of it */
-                for (i = 0; i * 2 < vrw.sweepTrailCount; i++)
-                {
-                    vrw.sweepTrail[i] = vrw.sweepTrail[i * 2];
-                }
-                vrw.sweepTrailCount = i;
-            }
-            vrw.sweepTrail[vrw.sweepTrailCount++] = far;
-        }
-    }
+    vrwSweepTrailRecord(ray);
 
     for (node = universe.RenderList.head;
          node != NULL && vrw.sweepPreview.numShips < COMMAND_MAX_SHIPS;
@@ -948,6 +980,57 @@ static void vrwSweepAccumulate(vrwray const* ray)
                                 vrw.sweepPreview.numShips, (Ship*)obj))
         {
             vrw.sweepPreview.ShipPtr[vrw.sweepPreview.numShips++] = (Ship*)obj;
+        }
+    }
+}
+
+/* Same brush as selection sweeping, aimed at things to shoot rather than
+   things to command, so "paint over them" feels identical either way. */
+static void vrwTargetSweepAccumulate(vrwray const* ray)
+{
+    Node* node;
+    sdword i;
+
+    vrwSweepTrailRecord(ray);
+    for (node = universe.RenderList.head;
+         node != NULL && vrw.targetSweep.numTargets < COMMAND_MAX_SHIPS;
+         node = node->next)
+    {
+        SpaceObjRotImpTarg* obj = (SpaceObjRotImpTarg*)listGetStructOfNode(node);
+        vector toObj;
+        real32 radius, tCentre, distSqr, margin;
+        bool32 already = FALSE;
+
+        if (!vrwAttackable(obj))
+        {
+            continue;
+        }
+        vecSub(toObj, obj->collInfo.collPosition, ray->origin);
+        tCentre = vecDotProduct(toObj, ray->dir);
+        if (tCentre < 0.0f)
+        {
+            continue;
+        }
+        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
+        margin = radius * (VRW_SWEEP_MARGIN - 1.0f);
+        radius += margin > VRW_PICK_MARGIN_MAX ? VRW_PICK_MARGIN_MAX : margin;
+        radius += tCentre * VRW_SWEEP_CONE_TAN;
+        distSqr = vecMagnitudeSquared(toObj) - tCentre * tCentre;
+        if (distSqr > radius * radius)
+        {
+            continue;
+        }
+        for (i = 0; i < vrw.targetSweep.numTargets; i++)
+        {
+            if (vrw.targetSweep.TargetPtr[i] == obj)
+            {
+                already = TRUE;
+                break;
+            }
+        }
+        if (!already)
+        {
+            vrw.targetSweep.TargetPtr[vrw.targetSweep.numTargets++] = obj;
         }
     }
 }
@@ -1012,6 +1095,10 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
     if (vrw.sweepActive && hand == vrw.sweepHand)
     {
         vrwSweepAccumulate(ray);
+    }
+    if (vrw.targetSweepActive && hand == vrw.targetSweepHand)
+    {
+        vrwTargetSweepAccumulate(ray);
     }
 
     /* Move order rides the ray at the cursor depth. A controller has six
@@ -1167,33 +1254,32 @@ bool32 vrWorldSelectType(sdword hand, bool32 additive)
     return changed;
 }
 
-void vrWorldSweepBegin(sdword hand)
+/* How far down the beam to draw the brush. The capture cone is unbounded, so
+   pick a reach the player can judge: the fleet's depth along the ray, since
+   that is where their ships are and therefore where the width matters. */
+static real32 vrwSweepReachFor(sdword hand)
 {
     vrwray const* ray = &vrw.ray[hand];
+    vector toFleet;
+    real32 reach;
 
+    if (selSelected.numShips > 0)
+    {
+        selCentrePointCompute();
+    }
+    vecSub(toFleet, selCentrePoint, ray->origin);
+    reach = vecDotProduct(toFleet, ray->dir);
+    return reach > 1000.0f ? reach : 3.0f * vrw.scale;      //else 3m of hologram
+}
+
+void vrWorldSweepBegin(sdword hand)
+{
     vrw.sweepActive = TRUE;
     vrw.sweepHand = hand;
     vrw.sweepPreview.numShips = 0;
     vrw.sweepTrailCount = 0;
 
-    /* How far to draw the brush. The capture cone is unbounded, so pick a
-       reach the player can actually judge: the fleet's depth along the ray,
-       since that is where their ships are and therefore where the brush
-       matters. */
-    if (selSelected.numShips > 0 || vrw.sweepPreview.numShips > 0)
-    {
-        selCentrePointCompute();
-    }
-    {
-        vector toFleet;
-
-        vecSub(toFleet, selCentrePoint, ray->origin);
-        vrw.sweepReach = vecDotProduct(toFleet, ray->dir);
-    }
-    if (!(vrw.sweepReach > 1000.0f))
-    {
-        vrw.sweepReach = 3.0f * vrw.scale;                  //3 metres of hologram
-    }
+    vrw.sweepReach = vrwSweepReachFor(hand);
 }
 
 bool32 vrWorldSweepCommit(sdword hand, bool32 additive)
@@ -1233,6 +1319,79 @@ bool32 vrWorldSweepCommit(sdword hand, bool32 additive)
     vrw.sweepPreview.numShips = 0;
     vrw.sweepTrailCount = 0;
     return changed;
+}
+
+void vrWorldTargetSweepBegin(sdword hand)
+{
+    SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
+
+    vrw.targetSweepActive = TRUE;
+    vrw.targetSweepHand = hand;
+    vrw.targetSweep.numTargets = 0;
+    /* the two sweeps are mutually exclusive - one needs the trigger free, the
+       other needs it during an order preview - so they share the brush state
+       the gizmo draws from */
+    vrw.sweepHand = hand;
+    vrw.sweepTrailCount = 0;
+    vrw.sweepReach = vrwSweepReachFor(hand);
+    /* seed with whatever the order preview is already aimed at, so the first
+       target does not have to be swept over a second time */
+    if (vrwAttackable(obj))
+    {
+        vrw.targetSweep.TargetPtr[vrw.targetSweep.numTargets++] = obj;
+    }
+    SDL_Log("VR: attack target sweep begin, seeded %d",
+            (int)vrw.targetSweep.numTargets);
+}
+
+sdword vrWorldTargetSweepCount(void)
+{
+    return vrw.targetSweepActive ? vrw.targetSweep.numTargets : 0;
+}
+
+bool32 vrWorldTargetSweepCommit(void)
+{
+    MaxSelection attackers;
+    MaxAnySelection targets;
+
+    if (!vrw.targetSweepActive)
+    {
+        return FALSE;
+    }
+    vrw.targetSweepActive = FALSE;
+    targets = vrw.targetSweep;
+    vrw.targetSweep.numTargets = 0;
+    if (targets.numTargets == 0 || selSelected.numShips == 0
+        || vrwOrdersBlocked())
+    {
+        return FALSE;
+    }
+    if (!MakeShipsAttackCapable((SelectCommand*)&attackers,
+                                (SelectCommand*)&selSelected))
+    {
+        return FALSE;
+    }
+    /* the game's own filter decides what is legitimately shootable without a
+       force-attack, exactly as the ctrl-band-box path does */
+    MakeTargetsOnlyNonForceAttackTargets((SelectAnyCommand*)&targets,
+                                         universe.curPlayerPtr);
+    if (targets.numTargets == 0)
+    {
+        return FALSE;
+    }
+    MakeShipMastersIncludeSlaves((SelectCommand*)&targets);
+    clWrapAttack(&universe.mainCommandLayer, (SelectCommand*)&attackers,
+                 (SelectAnyCommand*)&targets);
+    tutGameMessage("Game_ClickAttack");
+    SDL_Log("VR: multi-attack issued: %d ships -> %d targets",
+            (int)attackers.numShips, (int)targets.numTargets);
+    return TRUE;
+}
+
+void vrWorldTargetSweepCancel(void)
+{
+    vrw.targetSweepActive = FALSE;
+    vrw.targetSweep.numTargets = 0;
 }
 
 void vrWorldSweepCancel(void)
@@ -2134,7 +2293,8 @@ void vrWorldDrawOverlays(void)
        that is what gets drawn - a box would misstate which ships are actually
        inside it. Rings down the ray show the capture volume, and the trail of
        recent far-edge positions shows the region already swept. */
-    if (vrw.sweepActive && vrw.sweepHand >= 0
+    if ((vrw.sweepActive || vrw.targetSweepActive)
+        && vrw.sweepHand >= 0
         && vrw.ray[vrw.sweepHand].valid && vrw.sweepReach > 0.0f)
     {
         vrwray const* ray = &vrw.ray[vrw.sweepHand];
@@ -2165,6 +2325,20 @@ void vrWorldDrawOverlays(void)
             primLine3(&ray->origin, &vrw.sweepTrail[0], trailColor);
             primLine3(&ray->origin,
                       &vrw.sweepTrail[vrw.sweepTrailCount - 1], trailColor);
+        }
+    }
+
+    if (vrw.targetSweepActive)
+    {
+        color const attackColor = colRGB(255, 80, 70);
+
+        for (i = 0; i < vrw.targetSweep.numTargets; i++)
+        {
+            SpaceObjRotImpTarg* obj = vrw.targetSweep.TargetPtr[i];
+
+            primCircleOutline3(&obj->collInfo.collPosition,
+                               obj->staticinfo->staticheader.staticCollInfo.collspheresize * 1.3f,
+                               20, 0, attackColor, Z_AXIS);
         }
     }
 

@@ -83,6 +83,17 @@ void vrWorldSweepBegin(sdword hand);
 bool32 vrWorldSweepCommit(sdword hand, bool32 additive);
 void vrWorldSweepCancel(void);
 
+/* Multi-target attack. Homeworld's clWrapAttack takes a whole target list, and
+   the desktop reaches it with a ctrl-drag band box. In VR it extends the order
+   grammar already in place: A previews an order, and sweeping the trigger
+   during that preview elaborates it - a route during a move, a target list
+   during an attack. Committing is still the A release, so one order goes out
+   against everything swept. */
+void   vrWorldTargetSweepBegin(sdword hand);
+bool32 vrWorldTargetSweepCommit(void);
+void   vrWorldTargetSweepCancel(void);
+sdword vrWorldTargetSweepCount(void);
+
 /* Context order with the hand's hovered target: attack enemy, harvest
    resource, dock at friendly. Returns TRUE if an order was issued. */
 vrworldintent vrWorldContextIntent(sdword hand);

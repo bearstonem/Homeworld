@@ -110,6 +110,7 @@
 #define VR_SELECT_CLICK          2
 #define VR_SELECT_SWEEP          3
 #define VR_SELECT_PATH           4
+#define VR_SELECT_TARGETS        5
 #define VR_CONTEXT_PANEL         1
 #define VR_CONTEXT_ORDER         2
 #define VR_CONTEXT_MOVE          3
@@ -1628,6 +1629,7 @@ static void vrCardDrawControls(vrcard const* card)
         {"on resource",         "harvest"},
         {"on own ship",         "dock"},
         {"on empty",            "move"},
+        {"+ trigger on foes",   "multi-attack"},
         {"R-stick Y",           "order depth"},
         {"+ trigger, sweep",    "draw path"},
         {"release A",           "fly path"},
@@ -2919,6 +2921,19 @@ static void vrUpdateInput(XrTime time)
                 vr.selectGestureMode = VR_SELECT_PATH;
                 vrHapticPulse(hand, 0.30f, 22000000);
             }
+            /* Same grammar one step across: A previews an order, and sweeping
+               the trigger during it elaborates that order. During a move it
+               draws a route; during an attack it collects more targets, which
+               all go out as one clWrapAttack when A is released. */
+            else if (vr.contextGestureMode == VR_CONTEXT_ORDER
+                     && vr.contextGestureHand == (sdword)hand
+                     && vrWorldContextIntent((sdword)hand) == VRW_INTENT_ATTACK)
+            {
+                vrWorldTargetSweepBegin((sdword)hand);
+                vr.selectGestureHand = hand;
+                vr.selectGestureMode = VR_SELECT_TARGETS;
+                vrHapticPulse(hand, 0.30f, 22000000);
+            }
             else if (vr.selectGestureHand < 0 && vr.contextGestureHand < 0)
             {
                 if (panelOwns[hand])
@@ -3023,6 +3038,12 @@ static void vrUpdateInput(XrTime time)
                         (unsigned)hand, (int)changed,
                         (int)vrWorldPathPointCount());
             }
+            else if (vr.selectGestureMode == VR_SELECT_TARGETS)
+            {
+                /* keep the list; A/X release is what issues the order */
+                SDL_Log("VR: hand %u target sweep holding %d target(s)",
+                        (unsigned)hand, (int)vrWorldTargetSweepCount());
+            }
             if (changed)
             {
                 vrHapticPulse(hand, 0.42f, 35000000);
@@ -3110,9 +3131,26 @@ static void vrUpdateInput(XrTime time)
             }
             else if (vr.contextGestureMode == VR_CONTEXT_ORDER)
             {
-                issued = vrWorldContextOrder((sdword)hand);
-                SDL_Log("VR: hand %u smart-order commit issued=%d",
-                        (unsigned)hand, (int)issued);
+                if (vrWorldTargetSweepCount() > 0)
+                {
+                    sdword targets = vrWorldTargetSweepCount();
+
+                    issued = vrWorldTargetSweepCommit();
+                    SDL_Log("VR: hand %u multi-attack commit issued=%d targets=%d",
+                            (unsigned)hand, (int)issued, (int)targets);
+                }
+                else
+                {
+                    vrWorldTargetSweepCancel();
+                    issued = vrWorldContextOrder((sdword)hand);
+                    SDL_Log("VR: hand %u smart-order commit issued=%d",
+                            (unsigned)hand, (int)issued);
+                }
+                if (vr.selectGestureMode == VR_SELECT_TARGETS)
+                {
+                    vr.selectGestureHand = -1;
+                    vr.selectGestureMode = VR_GESTURE_NONE;
+                }
             }
             else if (vr.contextGestureMode == VR_CONTEXT_MOVE)
             {
@@ -3229,23 +3267,25 @@ static void vrUpdateInput(XrTime time)
                 vrHapticPulse(hand, 0.22f, 18000000);
             }
             else if (vrWorldMoveActive() || vrWorldPathDrawing()
-                || vrWorldPathActive())
+                || vrWorldPathActive() || vrWorldTargetSweepCount() > 0)
             {
                 vrWorldMoveCancel();
                 vrWorldPathCancel();
+                vrWorldTargetSweepCancel();
                 if (vr.contextGestureMode == VR_CONTEXT_MOVE)
                 {
                     vr.contextGestureHand = -1;
                     vr.contextGestureMode = VR_GESTURE_NONE;
                     vr.moveDepthInput = 0.0f;
                 }
-                if (vr.selectGestureMode == VR_SELECT_PATH)
+                if (vr.selectGestureMode == VR_SELECT_PATH
+                    || vr.selectGestureMode == VR_SELECT_TARGETS)
                 {
                     vr.selectGestureHand = -1;
                     vr.selectGestureMode = VR_GESTURE_NONE;
                 }
                 vrHapticPulse(hand, 0.30f, 30000000);
-                SDL_Log("VR: move preview / flight path cancelled");
+                SDL_Log("VR: order preview cancelled");
             }
             else if (vrWorldManagerActive())
             {
@@ -3462,6 +3502,10 @@ static void vrReleaseInputCapture(void)
         {
             vrWorldPathCancel();
         }
+    }
+    else if (vr.selectGestureMode == VR_SELECT_TARGETS)
+    {
+        vrWorldTargetSweepCancel();
     }
     if (vr.contextGestureMode == VR_CONTEXT_PANEL)
     {
