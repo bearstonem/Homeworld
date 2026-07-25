@@ -716,6 +716,39 @@ static void vrUpdateScreenPose(XrTime displayTime)
 
     if (vr.worldInteractive)
     {
+        real32 panelPos[3];
+
+        if (vrWorldManagerPanelAnchor(panelPos))
+        {
+            /* Build/Launch/Research manager open: the game frame floats
+               beside the ship it concerns, billboarded to the head */
+            XrSpaceLocation head;
+            XrVector3f toPanel;
+            real32 mag;
+
+            vr.quadPose.position.x = panelPos[0];
+            vr.quadPose.position.y = panelPos[1];
+            vr.quadPose.position.z = panelPos[2];
+            memset(&head, 0, sizeof(head));
+            head.type = XR_TYPE_SPACE_LOCATION;
+            if (XR_SUCCEEDED(xrLocateSpace(vr.viewSpace, vr.space, displayTime, &head))
+                && (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+            {
+                toPanel.x = vr.quadPose.position.x - head.pose.position.x;
+                toPanel.y = vr.quadPose.position.y - head.pose.position.y;
+                toPanel.z = vr.quadPose.position.z - head.pose.position.z;
+                mag = sqrtf(toPanel.x * toPanel.x + toPanel.y * toPanel.y + toPanel.z * toPanel.z);
+                if (mag > 1e-4f)
+                {
+                    toPanel.x /= mag; toPanel.y /= mag; toPanel.z /= mag;
+                    vrLookOrientation(toPanel, &vr.quadPose.orientation);
+                }
+            }
+            vr.quadWidth = 0.85f;
+            vr.quadPlaced = TRUE;
+            return;
+        }
+
         /* if the controller loses tracking, the panel holds its last wrist
            pose instead of reverting to the big floating screen */
         vrUpdateWristPanel(displayTime);
@@ -1139,7 +1172,8 @@ static void vrUpdateInput(XrTime time)
        only receives the pointer when no ship is hovered (wizard clicks),
        and never while hidden. */
     if (!vr.stickRotating
-        && !(vr.worldInteractive && (vrWorldHandHasTarget(vr.activeHand) || vr.panelHidden)))
+        && !(vr.worldInteractive && !vrWorldManagerActive()
+             && (vrWorldHandHasTarget(vr.activeHand) || vr.panelHidden)))
     {
         if (vrPointerFromHand(VR_HAND_RIGHT, time, &px, &py)
             || vrPointerFromHand(VR_HAND_LEFT, time, &px, &py))

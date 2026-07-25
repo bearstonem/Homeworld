@@ -66,6 +66,14 @@ void vrWorldCameraFocusSelection(void);
    rndMainViewRenderFunction (matrices still current). */
 void vrWorldDrawOverlays(void);
 
+/* When a full-screen manager (Build/Launch/Research) is open, the game
+   frame should be shown as a panel floating beside the ship it concerns:
+   returns TRUE and the LOCAL-space anchor position (metres). */
+bool32 vrWorldManagerPanelAnchor(real32 outPosMetres[3]);
+
+/* TRUE while a full-screen manager is open (panel should own the pointer) */
+bool32 vrWorldManagerActive(void);
+
 #endif /* HW_ENABLE_VR */
 
 #endif

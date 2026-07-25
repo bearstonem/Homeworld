@@ -22,7 +22,10 @@
 
 #include "Camera.h"
 #include "CameraCommand.h"
+#include "ConsMgr.h"
 #include "FastMath.h"
+#include "LaunchMgr.h"
+#include "ResearchGUI.h"
 #include "CommandWrap.h"
 #include "Dock.h"
 #include "InfoOverlay.h"
@@ -61,6 +64,8 @@ static struct {
     real32  scale;                  /* metres -> game units */
     real32  lookatInv[16];          /* inverse of the game camera lookat */
     real32  anchorInv[16];          /* inverse of the scaled anchor pose */
+    real32  lookatFwd[16];          /* forward transforms (world -> LOCAL) */
+    real32  anchorFwd[16];
     vrwray  ray[VRW_HAND_COUNT];
 
     /* sweep select */
@@ -161,7 +166,51 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
     }
     vrwRigidInverse(lookR, lookT, vrw.lookatInv);
 
+    /* forward transforms for placing panels at world positions */
+    memcpy(vrw.lookatFwd, look, sizeof(vrw.lookatFwd));
+    for (c = 0; c < 3; c++)
+    {
+        for (r = 0; r < 3; r++)
+        {
+            vrw.anchorFwd[c * 4 + r] = R[r * 3 + c];
+        }
+        vrw.anchorFwd[c * 4 + 3] = 0.0f;
+    }
+    vrw.anchorFwd[12] = t[0];
+    vrw.anchorFwd[13] = t[1];
+    vrw.anchorFwd[14] = t[2];
+    vrw.anchorFwd[15] = 1.0f;
+
     vrw.worldValid = TRUE;
+    return TRUE;
+}
+
+bool32 vrWorldManagerActive(void)
+{
+    return cmActive || lmActive || rmGUIActive;
+}
+
+bool32 vrWorldManagerPanelAnchor(real32 outPosMetres[3])
+{
+    vector world, cam, local;
+
+    if (!vrw.worldValid || !(cmActive || lmActive || rmGUIActive))
+    {
+        return FALSE;
+    }
+    if (selSelected.numShips > 0)
+    {
+        world = selSelected.ShipPtr[0]->collInfo.collPosition;
+    }
+    else
+    {
+        world = selCentrePoint;
+    }
+    vrwTransformPoint(vrw.lookatFwd, &world, &cam);
+    vrwTransformPoint(vrw.anchorFwd, &cam, &local);
+    outPosMetres[0] = local.x / vrw.scale + 0.55f;          //beside the ship
+    outPosMetres[1] = local.y / vrw.scale + 0.10f;
+    outPosMetres[2] = local.z / vrw.scale;
     return TRUE;
 }
 
