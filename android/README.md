@@ -171,6 +171,11 @@ Touch controls in the 3D world:
 - Wheel entries call the game's own right-click-menu callbacks rather than
   synthesizing keystrokes, because `mrKeyPress` routes mappable keys through
   `kbCheckBindings`, which discards keys the player has unbound.
+- The command wheel stays available while a manager is open, which is how you
+  move between them. Homeworld's own taskbar cannot do that job: opening a
+  manager detaches the taskbar regions from the region tree and modal
+  front-end screens stop events propagating to it, so those buttons are inert
+  by the original game's design, not by omission here.
 - Right-grip+B/Y opens the Build Manager, and an unmodified B/Y closes any
   open manager - Construction, Launch, Research, Trade or Sensors. Sensors is
   full-screen and suppresses the main view like the rest, so it is treated as

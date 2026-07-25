@@ -667,9 +667,23 @@ bool32 vrWorldCommand(vrworldcommand cmd, sdword arg)
         case VRW_CMD_DOCK:       mrDockingOrders(NULL, NULL);    break;
         case VRW_CMD_RETIRE:     mrRetire(NULL, NULL);           break;
         case VRW_CMD_SCUTTLE:    mrScuttle(NULL, NULL);          break;
-        case VRW_CMD_BUILD:      mrBuildShips(NULL, NULL);       break;
-        case VRW_CMD_LAUNCH:     mrLaunch(NULL, NULL);           break;
-        case VRW_CMD_RESEARCH:   mrResearch(NULL, NULL);         break;
+
+        /* Managers are mutually exclusive, and the mr* entry points do not
+           close each other, so switching straight from one to another has to
+           close the incumbent first - otherwise the request is swallowed and
+           the player is stuck in whichever manager they already had open. */
+        case VRW_CMD_BUILD:
+            vrWorldCloseManagers();
+            mrBuildShips(NULL, NULL);
+            break;
+        case VRW_CMD_LAUNCH:
+            vrWorldCloseManagers();
+            mrLaunch(NULL, NULL);
+            break;
+        case VRW_CMD_RESEARCH:
+            vrWorldCloseManagers();
+            mrResearch(NULL, NULL);
+            break;
         case VRW_CMD_HYPERSPACE: mrHyperspace(NULL, NULL);       break;
 
         case VRW_CMD_SELECT_ALL: return vrwSelectAllVisible();
@@ -682,7 +696,10 @@ bool32 vrWorldCommand(vrworldcommand cmd, sdword arg)
         case VRW_CMD_FOCUS_PREV:
             ccCancelFocus(&universe.mainCameraCommand);
             break;
-        case VRW_CMD_SENSORS:    smSensorsBegin(NULL, NULL);     break;
+        case VRW_CMD_SENSORS:
+            vrWorldCloseManagers();
+            smSensorsBegin(NULL, NULL);
+            break;
         case VRW_CMD_UNDO:       udLatestThingUndo();            break;
 
         case VRW_CMD_GROUP_RECALL: return vrwGroupRecall(arg);

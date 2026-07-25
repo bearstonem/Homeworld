@@ -2523,8 +2523,15 @@ static void vrUpdateInput(XrTime time)
     managerActive = managerOpen && vr.managerState == VR_MGR_VISIBLE;
 
     /* The command wheel owns the left hand while it is up. In menus the left
-       trigger keeps its ordinary click, so this is in-game only. */
-    if (vr.worldInteractive && !managerOpen)
+       trigger keeps its ordinary click, so this is in-game only.
+
+       Deliberately available with a manager open: the wheel is the only
+       VR-native route to the managers, and Homeworld's own taskbar cannot
+       serve that purpose because opening a manager detaches the taskbar
+       regions from the region tree (tbDisable) and modal front-end screens
+       set RPE_ModalBreak, which stops events propagating to it. Without this
+       there is no way to go from one manager to another. */
+    if (vr.worldInteractive)
     {
         vrUpdateWheelInput(time, select[VR_HAND_LEFT]);
     }
@@ -2782,7 +2789,7 @@ static void vrUpdateInput(XrTime time)
     for (orderIndex = 0; orderIndex < VR_HAND_COUNT; orderIndex++)
     {
         hand = handOrder[orderIndex];
-        if (hand == VR_HAND_LEFT && vr.worldInteractive && !managerOpen)
+        if (hand == VR_HAND_LEFT && vr.worldInteractive)
         {
             vr.prevSelect[hand] = select[hand];             //wheel owns it
             continue;
