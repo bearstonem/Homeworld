@@ -1576,10 +1576,16 @@ static void vrCardDrawControls(vrcard const* card)
         {"B/Y",                 "back / close"},
         {"",                    NULL},
         {"SELECT",              NULL},
-        {"R-trigger",           "select"},
+        {"R-trig own ship",     "select"},
         {"L-grip + trigger",    "add / toggle"},
         {"trigger x2",          "all of type"},
         {"empty + sweep",       "group brush"},
+        {"",                    NULL},
+        {"R-TRIGGER A TARGET",  NULL},
+        {"enemy",               "attack"},
+        {"resource",            "harvest"},
+        {"derelict + salvcorv", "salvage"},
+        {"damaged + repcorv",   "repair"},
         {"",                    NULL},
         {"ORDERS  hold A/X",    NULL},
         {"on enemy",            "attack"},
@@ -2771,7 +2777,29 @@ static void vrUpdateInput(XrTime time)
 
                     vr.selectAdditive = grip[VR_HAND_LEFT];
                     vr.selectGestureHand = hand;
-                    if (vrWorldHandHasTarget((sdword)hand))
+                    /* Homeworld's left button both selects and issues the
+                       default order, told apart by what is under it: one of
+                       your own ships selects, a hostile or a resource orders
+                       the current selection to act on it (mrObjectClick).
+                       Mirror that - point at a rock with harvesters up and
+                       pull, point at a derelict with a Salvage Corvette and
+                       pull. The trigger is the fast path; A/X stays for orders
+                       that need a previewed position in 3D. */
+                    if (vrWorldHandHasTarget((sdword)hand)
+                        && !vrWorldHandHasSelectable((sdword)hand)
+                        && selSelected.numShips > 0)
+                    {
+                        vrworldintent intent = vrWorldContextIntent((sdword)hand);
+                        bool32 issued = vrWorldContextOrder((sdword)hand);
+
+                        vr.selectGestureMode = VR_SELECT_CLICK;
+                        vr.lastSelectTime[hand] = 0;
+                        vrHapticPulse(hand, issued ? 0.46f : 0.12f,
+                                      issued ? 38000000 : 16000000);
+                        SDL_Log("VR: hand %u trigger order intent=%d issued=%d",
+                                (unsigned)hand, (int)intent, (int)issued);
+                    }
+                    else if (vrWorldHandHasTarget((sdword)hand))
                     {
                         bool32 doubleTrigger =
                             vrWorldHandHasSelectable((sdword)hand)

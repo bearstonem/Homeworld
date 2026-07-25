@@ -27,6 +27,7 @@ typedef enum
     VRW_INTENT_ATTACK,
     VRW_INTENT_HARVEST,
     VRW_INTENT_DOCK,
+    VRW_INTENT_SPECIAL,             /* salvage, repair, support: clWrapSpecial */
     VRW_INTENT_MOVE,
     VRW_INTENT_PANEL,
     VRW_INTENT_INVALID

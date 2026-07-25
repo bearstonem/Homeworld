@@ -95,22 +95,35 @@ the Touch controllers.
 
 Touch controls in the 3D world:
 
-- Aim at one of your ships and pull either trigger to select it. Hold the
-  left grip for additive/toggle selection. A quick second trigger pull
-  selects visible ships of the same type.
-- Pull a trigger on empty space, sweep the ray across ships, then release
-  to commit the group selection. The sweep is a brush, not a hairline: its
+- Aim at one of your ships and pull the right trigger to select it. Hold the
+  left grip for additive/toggle selection. A quick second pull selects visible
+  ships of the same type. (The left trigger opens the command wheel instead,
+  see below.)
+- Pull the right trigger on empty space, sweep the ray across ships, then
+  release to commit the group selection. The sweep is a brush, not a hairline: its
   capture radius widens with distance the way a screen-space band box does
   with depth, and it takes every ship the beam passes over.
-- Hold A/X to preview a context order and release to issue it: attack an
-  enemy, harvest a resource, dock at one of your ships, or move when aimed
-  at empty space. The destination is placed freely in 3D: it rides your aim
-  ray at a cursor depth that starts level with your ships, and right-stick Y
-  moves it toward or away from you. There is no projection plane, so unlike
-  the mouse pie plate there is no viewing angle at which placement breaks
-  down. A shadow ring on the fleet's plane, a vertical line and a line back
-  to the fleet make the depth readable, and the right wrist card shows it as
-  a number. B/Y cancels.
+- The trigger both selects and issues the default order, told apart by what is
+  under it, exactly as Homeworld's left mouse button does in `mrObjectClick`:
+  one of your own ships selects it, while a hostile ship, a resource or a
+  derelict orders the current selection to act on it. So point at an asteroid
+  with harvesters selected and pull to harvest, point at a derelict with a
+  Salvage Corvette selected and pull to salvage, point at an enemy with
+  warships selected and pull to attack. Ray colour shows which it will be, and
+  a dim pulse means the order is not legal for that selection. Empty space
+  still starts a sweep selection, and only empty space clears the selection.
+- Hold A/X to preview a context order and release to issue it: the same attack,
+  harvest, dock and salvage verbs, plus move when aimed at empty space. A/X is
+  the path for orders needing a position previewed in 3D; the trigger is the
+  fast path for orders that only need a target.
+- A move destination is placed freely in 3D. It rides your aim ray at a cursor
+  depth that starts level with your ships, snaps to whatever you point at, and
+  right-stick Y moves it toward or away from you, accelerating the longer you
+  hold. There is no projection plane, so unlike the mouse pie plate there is no
+  viewing angle at which placement breaks down. A shadow ring on the fleet's
+  plane, a vertical line and a line back to the fleet make the depth readable,
+  the beam ends exactly at the destination, and the right wrist card shows the
+  depth as a number. B/Y cancels.
 - To fly a route rather than a straight line, hold the trigger during a move
   preview and sweep: the swept points are smoothed into a Catmull-Rom spline
   and resampled by arc length into evenly spaced waypoints, drawn as a curve

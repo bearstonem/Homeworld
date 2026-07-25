@@ -1034,7 +1034,11 @@ bool32 vrWorldSelectClick(sdword hand, bool32 additive)
 
     if (!vrwPlayerShipSelectable(obj))
     {
-        if (!additive && selSelected.numShips > 0)
+        /* Only genuinely empty space clears the selection. Pointing at an
+           enemy or a resource and pulling the trigger used to deselect the
+           whole fleet, which is the opposite of what the mouse path does -
+           there, clicking a hostile target orders the selection to act on it. */
+        if (obj == NULL && !additive && selSelected.numShips > 0)
         {
             selSelectNone();
             ioUpdateShipTotals();
@@ -1174,6 +1178,36 @@ vrworldintent vrWorldContextIntent(sdword hand)
     {
         return VRW_INTENT_INVALID;
     }
+    /* Single-click-special ships take precedence, as in mrObjectClick: a
+       Salvage Corvette pointed at a derelict salvages it, a Repair Corvette
+       at a damaged ship repairs it. Checked before the plain harvest and
+       attack cases because the same target means something different when
+       these ships are in the selection. */
+    if (obj->objtype == OBJ_ShipType || obj->objtype == OBJ_DerelictType)
+    {
+        if (MakeShipsSingleClickSpecialCapable((SelectCommand*)&capable,
+                                               (SelectCommand*)&selSelected))
+        {
+            MaxAnySelection targets;
+
+            targets.numTargets = 1;
+            targets.TargetPtr[0] = obj;
+            if (ShiptypeInSelection((SelectCommand*)&capable, SalCapCorvette))
+            {
+                MakeTargetsSalvageable((SelectAnyCommand*)&targets,
+                                       universe.curPlayerPtr);
+            }
+            else
+            {
+                MakeTargetsOnlyNonForceAttackTargets((SelectAnyCommand*)&targets,
+                                                     universe.curPlayerPtr);
+            }
+            if (targets.numTargets > 0)
+            {
+                return VRW_INTENT_SPECIAL;
+            }
+        }
+    }
     if (obj->objtype == OBJ_AsteroidType || obj->objtype == OBJ_DustType
         || obj->objtype == OBJ_GasType)
     {
@@ -1227,6 +1261,36 @@ bool32 vrWorldContextOrder(sdword hand)
             return TRUE;
         }
         return FALSE;
+    }
+
+    if (intent == VRW_INTENT_SPECIAL)
+    {                                                       //salvage / repair / support
+        MaxAnySelection targets;
+
+        if (!MakeShipsSingleClickSpecialCapable((SelectCommand*)&tempSelection,
+                                                (SelectCommand*)&selSelected))
+        {
+            return FALSE;
+        }
+        targets.numTargets = 1;
+        targets.TargetPtr[0] = obj;
+        if (ShiptypeInSelection((SelectCommand*)&tempSelection, SalCapCorvette))
+        {
+            MakeTargetsSalvageable((SelectAnyCommand*)&targets,
+                                   universe.curPlayerPtr);
+        }
+        else
+        {
+            MakeTargetsOnlyNonForceAttackTargets((SelectAnyCommand*)&targets,
+                                                 universe.curPlayerPtr);
+        }
+        if (targets.numTargets == 0)
+        {
+            return FALSE;
+        }
+        clWrapSpecial(&universe.mainCommandLayer, (SelectCommand*)&tempSelection,
+                      (SpecialCommand*)&targets);
+        return TRUE;
     }
 
     if (intent == VRW_INTENT_DOCK)
@@ -1883,6 +1947,7 @@ void vrWorldDrawOverlays(void)
             case VRW_INTENT_ATTACK:     rayColor = colRGB(255, 70, 70); break;
             case VRW_INTENT_HARVEST:    rayColor = colRGB(255, 190, 55); break;
             case VRW_INTENT_DOCK:       rayColor = colRGB(80, 220, 255); break;
+            case VRW_INTENT_SPECIAL:    rayColor = colRGB(190, 130, 255); break;
             case VRW_INTENT_MOVE:       rayColor = colRGB(255, 255, 255); break;
             case VRW_INTENT_PANEL:      rayColor = colRGB(70, 220, 255); break;
             case VRW_INTENT_INVALID:    rayColor = colRGB(150, 150, 160); break;
