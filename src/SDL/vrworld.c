@@ -57,7 +57,9 @@ extern bool32 gameIsRunning;                                //Globals.c
 
 #define VRW_HAND_COUNT     2
 #define VRW_PICK_MARGIN    1.25f    /* collision sphere inflation for picking */
-#define VRW_PICK_STICKY    1.15f    /* extra radius for the previous target */
+#define VRW_PICK_STICKY    0.92f    /* score discount for the previous target */
+#define VRW_PICK_MARGIN_MAX 150.0f  /* cap the margin so capitals stay fair */
+#define VRW_PICK_MISS_BIAS  2.5f    /* how much an off-centre aim is punished */
 #define VRW_PICK_CONE_TAN  0.012f   /* ~0.7 degree controller selection cone */
 #define VRW_PICK_CONE_MAX  180.0f   /* cap distant-target assistance */
 #define VRW_SWEEP_CONE_TAN 0.070f   /* ~4 degree brush: sweeping paints over
@@ -712,20 +714,29 @@ static bool32 vrwPlayerShipSelectable(SpaceObjRotImpTarg const* obj)
         && !(obj->flags & blocked);
 }
 
-/* nearest ray/sphere hit along the render list. selectableOnly restricts to
-   the current player's selectable ships. */
+/* Best ray/sphere hit along the render list. selectableOnly restricts to the
+   current player's selectable ships.
+
+   Candidates are ranked by the depth of their CENTRE, penalised for how far
+   off-centre the aim is - not by the depth at which the ray enters the
+   sphere. Entry depth sounds right and is badly wrong when sizes differ by
+   two orders of magnitude: the Mothership's hull begins some 2600 units
+   ahead of its centre, so ranking by entry made it beat every fighter parked
+   in front of it, no matter how precisely the beam was on the fighter. */
 static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
                                    SpaceObjRotImpTarg const* preferred, real32* hitT)
 {
     Node* node;
     SpaceObjRotImpTarg* best = NULL;
-    real32 bestT = REALlyBig;
+    real32 bestScore = REALlyBig;
+    real32 bestSurface = 0.0f;
 
     for (node = universe.RenderList.head; node != NULL; node = node->next)
     {
         SpaceObjRotImpTarg* obj = (SpaceObjRotImpTarg*)listGetStructOfNode(node);
         vector toObj;
-        real32 radius, tCentre, distSqr, discr, root, candidateT;
+        real32 radius, tCentre, distSqr, discr, root;
+        real32 hull, margin, assist, missFrac, score;
 
         if (obj->objtype != OBJ_ShipType && obj->objtype != OBJ_AsteroidType
             && obj->objtype != OBJ_DustType && obj->objtype != OBJ_GasType
@@ -751,17 +762,24 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
         {
             continue;                                       //behind the controller
         }
-        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize
-               * VRW_PICK_MARGIN;
-        {
-            real32 coneRadius = tCentre * VRW_PICK_CONE_TAN;
 
-            radius += coneRadius < VRW_PICK_CONE_MAX ? coneRadius : VRW_PICK_CONE_MAX;
-        }
-        if (obj == preferred)
+        /* Aim assists are added, not multiplied, and capped in absolute
+           units. A 25% margin is a handful of units on a fighter and a
+           650-unit dead zone around the Mothership, which is precisely how
+           a capital ship ends up swallowing its own escorts. */
+        hull = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
+        margin = hull * (VRW_PICK_MARGIN - 1.0f);
+        if (margin > VRW_PICK_MARGIN_MAX)
         {
-            radius *= VRW_PICK_STICKY;
+            margin = VRW_PICK_MARGIN_MAX;
         }
+        assist = tCentre * VRW_PICK_CONE_TAN;
+        if (assist > VRW_PICK_CONE_MAX)
+        {
+            assist = VRW_PICK_CONE_MAX;
+        }
+        radius = hull + margin + assist;
+
         distSqr = vecMagnitudeSquared(toObj) - tCentre * tCentre;
         discr = radius * radius - distSqr;
         if (discr < 0.0f)
@@ -769,24 +787,37 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
             continue;
         }
         root = fsqrt(discr);
-        candidateT = tCentre - root;
-        if (candidateT < 0.0f)
+
+        /* 0 when the beam is dead on the centre, 1 when it just grazes. A
+           grazing hit has to be much nearer to win than a centred one. */
+        missFrac = radius > 0.0f ? distSqr / (radius * radius) : 1.0f;
+        score = tCentre * (1.0f + missFrac * VRW_PICK_MISS_BIAS);
+        if (obj == preferred)
         {
-            /* The controller can begin inside a large ship's inflated pick
-               sphere. Use the forward exit point rather than returning a
-               negative distance that draws the ray back through the hand. */
-            candidateT = tCentre + root;
+            /* hysteresis belongs in the ranking, not the geometry: inflating
+               the previous target's sphere made big ships stickier than small
+               ones, which is backwards */
+            score *= VRW_PICK_STICKY;
         }
-        if (candidateT >= 0.0f && candidateT < bestT)
+        if (score < bestScore)
         {
-            bestT = candidateT;
+            bestScore = score;
             best = obj;
+            /* the drawn beam still wants the surface, not the centre. The
+               controller can sit inside a capital ship's sphere, so fall
+               through to the forward exit rather than a negative distance
+               that would draw the ray back through the hand. */
+            bestSurface = tCentre - root;
+            if (bestSurface < 0.0f)
+            {
+                bestSurface = tCentre + root;
+            }
         }
     }
 
     if (best != NULL && hitT != NULL)
     {
-        *hitT = bestT;
+        *hitT = bestSurface;
     }
     return best;
 }
@@ -818,9 +849,15 @@ static void vrwSweepAccumulate(vrwray const* ray)
         {
             continue;                                       //behind the controller
         }
-        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize
-               * VRW_SWEEP_MARGIN
-               + tCentre * VRW_SWEEP_CONE_TAN;
+        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
+        {
+            real32 margin = radius * (VRW_SWEEP_MARGIN - 1.0f);
+
+            /* same absolute cap as aiming: otherwise brushing anywhere near a
+               capital ship always drags it into the group */
+            radius += margin > VRW_PICK_MARGIN_MAX ? VRW_PICK_MARGIN_MAX : margin;
+        }
+        radius += tCentre * VRW_SWEEP_CONE_TAN;
         distSqr = vecMagnitudeSquared(toObj) - tCentre * tCentre;
         if (distSqr > radius * radius)
         {
