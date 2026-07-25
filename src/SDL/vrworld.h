@@ -61,6 +61,9 @@ real32 vrWorldCameraOrbit(real32 deltaYaw, real32 deltaPitch);
 real32 vrWorldCameraZoom(real32 ratio);
 void vrWorldCameraFocusSelection(void);
 
+/* Cycle the camera focus through the player's fleet (+1 next / -1 prev) */
+void vrWorldFocusCycle(sdword step);
+
 /* Draw the VR overlays (aim rays, hover ring, selection rings, move disc)
    in game-world space. Called inside each per-eye render pass, after
    rndMainViewRenderFunction (matrices still current). */

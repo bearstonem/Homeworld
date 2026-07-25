@@ -658,6 +658,41 @@ void vrWorldCameraFocusSelection(void)
     }
 }
 
+/* Cycle the camera focus through the player's fleet (step = +1 / -1).
+   Selection is untouched; this is pure traversal. */
+void vrWorldFocusCycle(sdword step)
+{
+    static sdword cycleIndex = 0;
+    Ship* ships[256];
+    sdword count = 0;
+    Node* node;
+    MaxSelection one;
+
+    if (!vrw.worldValid)
+    {
+        return;
+    }
+    for (node = universe.ShipList.head; node != NULL && count < 256; node = node->next)
+    {
+        Ship* ship = (Ship*)listGetStructOfNode(node);
+
+        if (ship->playerowner == universe.curPlayerPtr && !(ship->flags & SOF_Dead)
+            && ship->shiptype != Drone)
+        {
+            ships[count++] = ship;
+        }
+    }
+    if (count == 0)
+    {
+        return;
+    }
+    cycleIndex = (cycleIndex + step % count + count) % count;
+    one.numShips = 1;
+    one.ShipPtr[0] = ships[cycleIndex];
+    ccFocus(&universe.mainCameraCommand, (FocusCommand*)&one);
+    tutGameMessage("KB_Focus");
+}
+
 /*-----------------------------------------------------------------------------
     Overlays (drawn per eye in game-world space)
 ----------------------------------------------------------------------------*/
@@ -674,9 +709,18 @@ void vrWorldDrawOverlays(void)
         return;
     }
 
-    /* the world render leaves lighting/texturing on, which blacks out
-       unlit primitives - same preamble as the pie plate drawing */
-    primModeClear2();
+    /* Trust nothing about the state the world render ended in: load the
+       per-eye matrices captured during this eye's render explicitly, and
+       force the fixed-function state the primitives need. */
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadMatrixf((GLfloat const*)&rndProjectionMatrix);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadMatrixf((GLfloat const*)&rndCameraMatrix);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_FOG);
     rndLightingEnable(FALSE);
     rndTextureEnable(FALSE);
 

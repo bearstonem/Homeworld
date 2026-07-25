@@ -148,6 +148,7 @@ typedef struct {
     real32       pinchPrevAzimuth;
     real32       pinchPrevElev;
     XrVector3f   crawlVel;          /* throw-glide velocity, metres/frame */
+    sdword       prevCycleDir;      /* right-stick flick edge state */
     XrVector3f   worldOffset;       /* free hologram translation, metres (the
                                        game camera cannot pan: it is focus-
                                        locked, so drags translate the world
@@ -1027,70 +1028,11 @@ static void vrUpdateInput(XrTime time)
         }
         else
         {
-            bool32 anyGrab = FALSE;
-
+            /* Traversal follows Homeworld's own mechanic: select a ship and
+               focus on it (left stick click). Single-grip drags do nothing;
+               two-grip pinch handles orbit/zoom above. */
             vr.pinchValid = FALSE;
-            for (hand = 0; hand < VR_HAND_COUNT; hand++)
-            {
-                if (grip[hand] && tracked[hand])
-                {
-                    anyGrab = TRUE;
-                    if (vr.grabValid[hand])
-                    {
-                        real32 delta[3] = {pos[hand][0] - vr.grabPrev[hand].x,
-                                           pos[hand][1] - vr.grabPrev[hand].y,
-                                           pos[hand][2] - vr.grabPrev[hand].z};
-                        real32 magSqr = delta[0] * delta[0] + delta[1] * delta[1]
-                                      + delta[2] * delta[2];
-
-                        if (magSqr > 4e-6f)                 //2mm dead-zone
-                        {
-                            vr.worldOffset.x += delta[0];
-                            vr.worldOffset.y += delta[1];
-                            vr.worldOffset.z += delta[2];
-                        }
-                        /* remember the pull velocity for the throw-glide */
-                        vr.crawlVel.x = vr.crawlVel.x * 0.6f + delta[0] * 0.4f;
-                        vr.crawlVel.y = vr.crawlVel.y * 0.6f + delta[1] * 0.4f;
-                        vr.crawlVel.z = vr.crawlVel.z * 0.6f + delta[2] * 0.4f;
-                    }
-                    else
-                    {
-                        vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
-                    }
-                    vr.grabPrev[hand].x = pos[hand][0];
-                    vr.grabPrev[hand].y = pos[hand][1];
-                    vr.grabPrev[hand].z = pos[hand][2];
-                    vr.grabValid[hand] = TRUE;
-                }
-                else
-                {
-                    vr.grabValid[hand] = FALSE;
-                }
-            }
-
-            /* hand-over-hand traversal: released throws keep the world
-               gliding, decaying over ~2s; any new grab retakes control */
-            if (!anyGrab)
-            {
-                real32 magSqr = vr.crawlVel.x * vr.crawlVel.x
-                              + vr.crawlVel.y * vr.crawlVel.y
-                              + vr.crawlVel.z * vr.crawlVel.z;
-
-                if (magSqr > 1e-8f)
-                {
-                    vr.worldOffset.x += vr.crawlVel.x;
-                    vr.worldOffset.y += vr.crawlVel.y;
-                    vr.worldOffset.z += vr.crawlVel.z;
-                    vr.crawlVel.x *= 0.965f;
-                    vr.crawlVel.y *= 0.965f;
-                    vr.crawlVel.z *= 0.965f;
-                }
-                else
-                {
-                    vr.crawlVel.x = vr.crawlVel.y = vr.crawlVel.z = 0.0f;
-                }
-            }
+            vr.grabValid[VR_HAND_LEFT] = vr.grabValid[VR_HAND_RIGHT] = FALSE;
         }
     }
 
@@ -1123,9 +1065,10 @@ static void vrUpdateInput(XrTime time)
     }
     else
     {
-        /* in-game: sticks drive the real camera natively (interim until the
-           grab gestures land): left stick orbits, right stick Y zooms */
+        /* in-game: left stick orbits, right stick Y zooms, right stick X
+           flicks cycle the camera focus through the fleet */
         real32 lx, ly, rx, ry;
+        sdword cycleDir;
 
         vrActionStick(VR_HAND_LEFT, &lx, &ly);
         if (lx * lx + ly * ly > 0.04f)
@@ -1133,10 +1076,16 @@ static void vrUpdateInput(XrTime time)
             vrWorldCameraOrbit(-lx * 0.035f, ly * 0.025f);
         }
         vrActionStick(VR_HAND_RIGHT, &rx, &ry);
-        if (ry > 0.25f || ry < -0.25f)
+        if ((ry > 0.25f || ry < -0.25f) && !vrWorldMoveActive())
         {
             vrWorldCameraZoom(1.0f - ry * 0.02f);
         }
+        cycleDir = (rx > 0.7f) ? 1 : (rx < -0.7f) ? -1 : 0;
+        if (cycleDir != 0 && vr.prevCycleDir == 0)
+        {
+            vrWorldFocusCycle(cycleDir);
+        }
+        vr.prevCycleDir = cycleDir;
         if (vr.stickRotating)
         {
             vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
