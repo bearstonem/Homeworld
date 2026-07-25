@@ -7038,6 +7038,7 @@ void univUpdateRenderList()
     real32 distsqr;
     static bool32 limited = FALSE;
     static real32 limits[NUM_CLASSES];
+    real32 limitScaleSqr;
     LinkedList sortFrontList;
 
     listVerify(&universe.RenderList);
@@ -7061,6 +7062,9 @@ void univUpdateRenderList()
         limits[CLASS_NonCombat] = RENDER_LIMIT_NONCOMBAT;
         limited = TRUE;
     }
+
+    /* squared, because every limit compared below is a squared distance */
+    limitScaleSqr = RENDER_VIEW_DISTANCE_SCALE * RENDER_VIEW_DISTANCE_SCALE;
 
     lookatposition = mrCamera->lookatpoint;
     eyeposition = mrCamera->eyeposition;
@@ -7100,7 +7104,7 @@ void univUpdateRenderList()
                     limit = limits[(sdword)shipclass];
                 }
 
-                if ((distsqr < limit) && !(obj->flags & SOF_Hide))
+                if ((distsqr < limit * limitScaleSqr) && !(obj->flags & SOF_Hide))
                 {
                     vecSub(obj->cameraDistanceVector, eyeposition, obj->posinfo.position);
                     obj->cameraDistanceSquared = vecMagnitudeSquared(obj->cameraDistanceVector);
@@ -7121,7 +7125,7 @@ void univUpdateRenderList()
                     limit = (obj->flags & SOF_BigObject) ? RENDER_MAXVIEWABLE_DISTANCE_SQR : RENDER_VIEWABLE_DISTANCE_SQR;
                 }
 
-                if (distsqr < limit)
+                if (distsqr < limit * limitScaleSqr)
                 {
                     if ((obj->flags & SOF_Hide) == 0)
                     {

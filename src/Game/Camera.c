@@ -50,7 +50,15 @@ real32 CAMERA_KEY_ZOOM_OUT     = 1.10f;
 real32 CAMERA_AUTO_ZOOM_IN     = 0.95f;
 real32 CAMERA_AUTO_ZOOM_OUT    = 1.05f;
 real32 CAMERA_CLIP_NEAR        = 1.0f;
+/* 35000 on a monitor; scaled with RENDER_VIEW_DISTANCE_SCALE for VR, or
+   objects would enter the render list and fade in only to be clipped by the
+   far plane. Costs almost nothing in depth precision, which is dominated by
+   the near plane - resolution goes as z^2 / (near * 2^24). */
+#ifdef HW_ENABLE_VR
+real32 CAMERA_CLIP_FAR         = 105000.0f;
+#else
 real32 CAMERA_CLIP_FAR         = 35000.0f;
+#endif
 real32 CAMERA_CLIP_FAR_PLANET  = 455000.0f;
 real32 CAMERA_FIELD_OF_VIEW    = 90.0f;
 real32 CAMERA_WHEEL_ZOOM_IN    = 0.85f;

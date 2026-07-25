@@ -1572,7 +1572,10 @@ bool32 rndFade(SpaceObj* spaceobj, Camera* camera)
     // Not sure when and why the 1.3 multiplier was introduced
     // but culling of render objects, based on renderlistLimitSqr, doesn't include this multiplier
     // and hence some objects won't ever fade and just disappear suddenly.
-    real32 mult = 1.0f; //1.3f;
+    // RENDER_VIEW_DISTANCE_SCALE deliberately applies to BOTH this fade and the
+    // render-list cull in univUpdateRenderList, so the two cannot drift apart
+    // in exactly the way that comment describes.
+    real32 mult = RENDER_VIEW_DISTANCE_SCALE;
 
     vecSub(distvec, camera->lookatpoint, spaceobj->posinfo.position);
     distsqr0 = vecMagnitudeSquared(distvec);

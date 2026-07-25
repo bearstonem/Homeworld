@@ -69,6 +69,19 @@ real32 PITCHCRAZYHI = 10.0f;
 real32 ROLLCRAZYLO = -10.0f;
 real32 ROLLCRAZYHI = 10.0f;
 
+/* Scales every render draw-distance at once. Homeworld drops ordinary ships
+   from the render list beyond 10000 units and capitals beyond 20000, which on
+   a monitor sits comfortably past the useful zoom range. In VR at
+   VR_WORLD_SCALE those are 10 and 20 metres of hologram, and a fleet already
+   spreads about 14 metres, so ships were vanishing inside the player's own
+   formation. Applied at BOTH the render-list cull and the render fade, which
+   have to agree - render.c even carries a comment about a multiplier that was
+   removed precisely because the two had drifted apart. */
+#ifdef HW_ENABLE_VR
+real32 RENDER_VIEW_DISTANCE_SCALE = 3.0f;
+#else
+real32 RENDER_VIEW_DISTANCE_SCALE = 1.0f;
+#endif
 real32 RENDER_VIEWABLE_DISTANCE_SQR = (10000.0f*10000.0f);
 real32 RENDER_MAXVIEWABLE_DISTANCE_SQR = (20000.0f*20000.0f);
 real32 RENDER_VIEWABLE_FADE = 3500.0f;
@@ -511,6 +524,7 @@ scriptEntry Tweaks[] =
     makeEntry(PITCHCRAZYHI,scriptSetReal32CB),
     makeEntry(ROLLCRAZYLO,scriptSetReal32CB),
     makeEntry(ROLLCRAZYHI,scriptSetReal32CB),
+    makeEntry(RENDER_VIEW_DISTANCE_SCALE,scriptSetReal32CB),
     makeEntry(RENDER_VIEWABLE_DISTANCE_SQR,scriptSetReal32SqrCB),
     makeEntry(RENDER_MAXVIEWABLE_DISTANCE_SQR,scriptSetReal32SqrCB),
     makeEntry(RENDER_VIEWABLE_FADE, scriptSetReal32CB),
