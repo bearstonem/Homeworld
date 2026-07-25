@@ -1299,6 +1299,27 @@ static void vrUpdateScreenPose(XrTime displayTime)
     }
 }
 
+/* Height of the main UI quad for a given width.
+
+   This is the LOGICAL aspect, not the framebuffer's. The game lays its UI and
+   its mono world out for rndAspectRatio, which is
+   MAIN_WindowWidth/MAIN_WindowHeight - 4:3 - and then rasterises that into a
+   4128x2208 framebuffer, roughly 1.87:1. Sizing the quad by the framebuffer
+   aspect therefore displayed 4:3 content in a 1.87:1 rectangle and stretched
+   everything about 1.4x horizontally. Sizing it by the logical aspect undoes
+   the rasterisation stretch exactly, with nothing cropped or letterboxed.
+
+   The pointer intersection has to use the same figure or clicks land at the
+   wrong height, which is why both go through here. */
+static real32 vrQuadHeightFor(real32 width)
+{
+    if (MAIN_WindowWidth <= 0)
+    {
+        return width * (real32)vr.height / (real32)vr.width;
+    }
+    return width * (real32)MAIN_WindowHeight / (real32)MAIN_WindowWidth;
+}
+
 /* Intersect a hand's aim ray with the virtual screen; returns TRUE and the
    game-window pixel coordinates on hit. */
 static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py,
@@ -1335,7 +1356,7 @@ static bool32 vrPointerFromHand(uword hand, XrTime time, sdword* px, sdword* py,
         return FALSE;
     }
 
-    quadHeight = vr.quadWidth * (real32)vr.height / (real32)vr.width;
+    quadHeight = vrQuadHeightFor(vr.quadWidth);
     u = (local.x + t * localDir.x) / vr.quadWidth + 0.5f;
     v = 0.5f - (local.y + t * localDir.y) / quadHeight;
     if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
@@ -4194,7 +4215,7 @@ static void vrFrameInner(void)
                     quad.subImage.imageRect.extent.height = vr.height;
                     quad.pose = vr.quadPose;
                     quad.size.width = vr.quadWidth;
-                    quad.size.height = vr.quadWidth * (real32)vr.height / (real32)vr.width;
+                    quad.size.height = vrQuadHeightFor(vr.quadWidth);
                     layers[layerCount++] = (XrCompositionLayerBaseHeader const*)&quad;
                     managerQuadSubmitted = managerOpen;
                 }
