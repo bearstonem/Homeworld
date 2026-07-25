@@ -117,6 +117,19 @@ These are non-obvious and cost real time to find:
 - `vecDivideByScalar(vec, k, tmp)` assigns `1.0f / k` into its **third**
   argument. Passing an integer truncates the reciprocal to zero. This silently
   broke the flight-path follower for any group of two or more.
+- **A target-less `clWrapSpecial` must not include Salvage Corvettes.** The
+  function NULL-checks `targets` for the ship-flash and then dereferences it
+  unguarded in the salvage branch (`targets->TargetPtr[0]->objtype`), as do
+  `isThereAnotherTargetForMe` (`targets->numTargets`) and `clSpecial` (hands
+  `targets` to `ShipInSelection`). A salcap's special *is* salvage, so it needs
+  a target. This is an original 1999 bug, not a port regression: the desktop Z
+  key (`mainrgn.c:1375`), `mouse.c:669` and `KASFunc.c:2933` all pass NULL, so
+  pressing Z with salcaps selected crashes the original game too. It survived
+  because on desktop you salvage by ctrl-clicking a target; the VR command
+  wheel put a target-less special one flick away. Fixed in `clWrapSpecial`
+  itself so every caller is covered — and note `MakeShipsSpecialActivateCapable`
+  does **not** filter salcaps out, since they genuinely have a
+  `CustShipSpecialActivate`, so filtering the selection is not a defence.
 
 ## Current VR feature set
 

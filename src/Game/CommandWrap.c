@@ -433,6 +433,29 @@ void clWrapSpecial(CommandLayer *comlayer,SelectCommand *selectcom,SpecialComman
     copycom = memAlloc(sizeofcopycom,"clspecialfix", Pyrophoric);
     memcpy(copycom,selectcom,sizeofcopycom);
 
+    /* A target-less special - the Z key (mainrgn.c), the VR command wheel's
+       special-ability wedge, mouse.c's activate and KASFunc's AI teams all
+       pass targets == NULL - can never be a salvage order, but every salvage
+       path below assumes a target exists and dereferences it unguarded:
+       the sals block reads targets->TargetPtr[0], isThereAnotherTargetForMe
+       reads targets->numTargets, and clSpecial hands targets straight to
+       ShipInSelection. A SalCap Corvette in a NULL-target selection is
+       therefore a null dereference, not a no-op. Drop them here instead:
+       there is nothing to salvage without something to salvage. */
+    if (targets == NULL)
+    {
+        for (i = 0; i < copycom->numShips;)
+        {
+            if (copycom->ShipPtr[i]->shiptype == SalCapCorvette)
+            {
+                copycom->numShips--;
+                copycom->ShipPtr[i] = copycom->ShipPtr[copycom->numShips];
+                continue;
+            }
+            i++;
+        }
+    }
+
     if (!universe.aiplayerProcessing)
     {
         //if the special operation has a target, flash the targets,
@@ -463,7 +486,7 @@ void clWrapSpecial(CommandLayer *comlayer,SelectCommand *selectcom,SpecialComman
 				sals++;
             }
         }
-        if(sals > 0)
+        if(sals > 0 && targets != NULL)
         {
             //some salcaps in list
             //make sure sals > numNeededToSalvage of first target...

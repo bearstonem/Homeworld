@@ -87,6 +87,15 @@ Homeworld data files instead.)
 
 Settings, saves and screenshots are written to the same directory.
 
+> **Do not restore a backup of that directory with `adb push` alone.** Push
+> writes files as the *shell* user (uid 2000, mode 644); the game runs as its
+> own uid and is only in the group, so it can read them but not write them.
+> The four asset files above are read-only and so are fine, but `Homeworld.cfg`
+> and `SavedGames` are files the game creates and rewrites — restoring those
+> from a backup makes the game crash at startup, before it logs anything.
+> Push only the assets and let the game create the rest; to restore saves,
+> `chmod 666` them afterwards.
+
 ## Meta Quest
 
 The Quest runs standard Android APKs as flat 2D panel apps: enable

@@ -458,6 +458,28 @@ sdword vrWorldGroupSize(sdword group)
     return selHotKeyGroup[group].numShips;
 }
 
+/* The wheel's special-ability wedge fires a target-less special, which a
+   Salvage Corvette cannot perform - salvaging needs something to salvage.
+   clWrapSpecial now drops them rather than dereferencing the NULL target
+   list, so this is no longer a crash, but a selection of nothing but
+   salcaps would still be a wedge that lights up and does nothing. Ask the
+   same question the order does, so it dims instead. */
+static void vrwDropSalvageCorvettes(SelectCommand* selection)
+{
+    sdword i;
+
+    for (i = 0; i < selection->numShips;)
+    {
+        if (selection->ShipPtr[i]->shiptype == SalCapCorvette)
+        {
+            selection->numShips--;
+            selection->ShipPtr[i] = selection->ShipPtr[selection->numShips];
+            continue;
+        }
+        i++;
+    }
+}
+
 bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
 {
     udword mask;
@@ -541,6 +563,7 @@ bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
             }
             capable = selSelected;
             MakeShipsSpecialActivateCapable((SelectCommand*)&capable);
+            vrwDropSalvageCorvettes((SelectCommand*)&capable);
             return capable.numShips > 0;
         case VRW_CMD_HALT:              return !vrwOrdersBlocked();
         default:                        return FALSE;
@@ -660,9 +683,13 @@ bool32 vrWorldCommand(vrworldcommand cmd, sdword arg)
                clWrapSpecial: ships with no special ability reached
                ability-specific code. The keyboard path copies and then filters
                with MakeShipsSpecialActivateCapable for precisely that reason,
-               and checks again afterwards because the filter can empty it. */
+               and checks again afterwards because the filter can empty it.
+               Salvage Corvettes survive that filter - they do have a special
+               activate - but theirs is salvage, which needs a target, so they
+               come out too. See vrwDropSalvageCorvettes. */
             capable = selSelected;
             MakeShipsSpecialActivateCapable((SelectCommand*)&capable);
+            vrwDropSalvageCorvettes((SelectCommand*)&capable);
             if (capable.numShips == 0)
             {
                 return FALSE;
