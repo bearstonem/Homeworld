@@ -121,6 +121,31 @@ Nothing from the Remastered Collection is redistributed here; this reads the
 copy you already own. `tools/sga_extract.py` unpacks the Remastered
 `_ARCHIVE` (Relic SGA v2) `.big` files for the same reason.
 
+### The remastered soundtrack
+
+`tools/rm_music.py` converts the Remastered Collection's music to what the
+mixer runs at (22050 Hz stereo S16 — the remastered WAVs are 44100) and names
+each file by HW1's own track number:
+
+```sh
+python3 tools/rm_music.py ".../HomeworldRM/Data" /tmp/rm_music --all
+DST=/sdcard/Android/data/org.gardensofkadesh.homeworld/files/music
+adb shell mkdir -p $DST
+adb push /tmp/rm_music/. $DST/
+adb shell chmod 775 $DST          # <-- REQUIRED, see below
+```
+
+**That `chmod` is not optional.** `adb shell mkdir` creates the directory
+owned by `shell` with mode 2770, which grants *other* nothing — and the game
+is neither the owner nor in `ext_data_rw`, so it cannot even traverse in. The
+`.big` files in `files/` work only because `adb push` gives files mode 644,
+which happens to be world-readable; a shell-created *directory* shuts the app
+out completely. The symptom is silent: the game logs
+`probe=music/trackNN.wav -> MISSING` and plays the original music.
+
+Without the files, or with `--all` omitted, the original `.wxd` music plays -
+`rmMusicHasTrack` gates every override, so a partial set is fine.
+
 > **Do not restore a backup of that directory with `adb push` alone.** Push
 > writes files as the *shell* user (uid 2000, mode 644); the game runs as its
 > own uid and is only in the group, so it can read them but not write them.

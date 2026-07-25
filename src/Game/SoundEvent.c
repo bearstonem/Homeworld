@@ -7,6 +7,7 @@
 =============================================================================*/
 
 #include "SoundEvent.h"
+#include "rmmusic.h"
 
 #include <math.h>
 
@@ -728,6 +729,12 @@ void soundEventInit(void)
     {
         return;
     }
+
+    /* Remastered soundtrack, if the player has converted it into music/.
+       Started before the mixer so the audio callback never sees a
+       half-initialised player. Absent files just mean the original music
+       plays - see rmmusic.c. */
+    rmMusicStartup("music");
 
     if (soundinit(useWaveout) == SOUND_ERR)
     {
