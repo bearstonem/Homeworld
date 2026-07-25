@@ -47,11 +47,18 @@ rendering. The tell is a log with `pass=mono` frames and no
   `XR_SESSION_STATE_FOCUSED` and a launch appears to hang.
 - `adb screencap` cannot capture OpenXR quad or projection layers. The user's
   eyes are the only ground truth for anything in a layer.
-- **Two coordinate spaces that do not match.** The framebuffer is
-  4128x2208, but `prim2d` and the font system draw in the game's
-  integer-downscaled UI resolution, **1032x552** (the resize handler picks
-  divisor 4). Anything mixing `vr.width`-space pixels with prim2d will be 4x
-  out — this is what made the panel reticle land off-screen.
+- **Two coordinate spaces that do not match, and not by a uniform factor.**
+  The framebuffer is 4128x2208 but `prim2d` and the font system draw in the
+  game's logical UI resolution, **1024x768** — measured from the card
+  swapchain sizes the code derives, not assumed. Anything mixing
+  `vr.width`-space pixels with prim2d will be ~4x out horizontally; that is
+  what made the panel reticle land off-screen.
+  Worse, the two spaces have different aspect ratios: 1024x768 is 4:3 while
+  the framebuffer is ~1.87:1, so the scale factors differ — **4.03
+  horizontally against 2.87 vertically**. Everything prim2d and the font
+  system draw is therefore stretched about 1.4x horizontally, which makes
+  circles into ellipses and text too wide. The stereo world escapes this
+  because `vrEyeProjection` substitutes the true per-eye headset FOV.
 - The build sets `-Wno-implicit-function-declaration`, so a missing header
   compiles silently. Worth re-checking touched files:
   ```sh
