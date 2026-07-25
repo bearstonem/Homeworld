@@ -117,6 +117,28 @@ These are non-obvious and cost real time to find:
 - `vecDivideByScalar(vec, k, tmp)` assigns `1.0f / k` into its **third**
   argument. Passing an integer truncates the reciprocal to zero. This silently
   broke the flight-path follower for any group of two or more.
+- **The Remastered background cubemaps are worse than HW1's own backgrounds
+  in VR. Tried, measured, reverted.** The remaster ships each background as
+  six 1024x1024 DXT1 cube faces (`tools/rm_backgrounds.py` extracts them, and
+  the mapping is exact - the remaster's campaign data maps missionNN to ezNN,
+  and HW1 uses the same names for its .btg files). Rendering them as a skybox
+  works and looks noticeably worse. Two reasons, only one of them fixable:
+  - **1024 per face is not enough for a headset.** A face spans 90 degrees
+    and each eye renders ~2064px across roughly that, so every texel is
+    magnified about 2x. There is no higher-res source: the `_hq_` variants
+    are also 1024. These were authored for a 2015 monitor at ~60 degrees.
+  - **A cubemap is flat, and it reads as flat.** HW1's `.btg` is a
+    vertex-coloured mesh - smooth interpolated gradients with no texels at
+    all - plus separate star points. In stereo that reads as depth and
+    atmosphere; a textured cube reads as a picture pasted on a box. This is
+    the part that cannot be fixed with a bigger texture.
+
+  If backgrounds are revisited, the direction is to improve what `.btg`
+  already does (denser mesh, better star rendering) rather than replace it.
+  Two traps worth keeping if the skybox is ever rebuilt: a unit cube is
+  entirely inside the near clip plane and silently draws nothing (btgRender
+  uses `CAMERA_CLIP_FAR - 500`), and `screenshot.c` already defines
+  `STB_IMAGE_IMPLEMENTATION`.
 - **The game runs in one fixed heap, and running out of it is a silent
   segfault.** `memAllocFunctionANV` returns NULL when no block is big enough;
   its diagnostic is behind `MEM_VERBOSE_LEVEL`, compiled out in a distribution
