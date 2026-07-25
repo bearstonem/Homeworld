@@ -1940,6 +1940,24 @@ bool32 vrWorldSensorsActive(void)
     return smSensorsActive && !smZoomingIn && !smZoomingOut;
 }
 
+bool32 vrWorldToggleSensors(void)
+{
+    if (smZoomingIn || smZoomingOut)
+    {
+        return smSensorsActive;                             //mid-transition
+    }
+    if (smSensorsActive)
+    {
+        /* the graceful path, as the screen's own Close button uses - it plays
+           the zoom-in back to the fleet rather than cutting straight out */
+        smSensorsClose(NULL, NULL);
+        return FALSE;
+    }
+    vrWorldCloseManagers();                                 //mutually exclusive
+    smSensorsBegin(NULL, NULL);
+    return smSensorsActive;
+}
+
 void vrWorldSensorsOrbit(real32 deltaYaw, real32 deltaPitch)
 {
     if (!vrWorldSensorsActive())

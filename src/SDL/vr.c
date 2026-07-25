@@ -3360,6 +3360,24 @@ static void vrUpdateInput(XrTime time)
         {
             bool32 pressed = vrActionPressedHand(vr.stickClickAction, hand);
 
+            /* Right stick click toggles Sensors, so the same control both
+               enters and leaves it. This has to run before the manager
+               suppression below, or the only way out of Sensors would be a
+               different control from the way in. */
+            if (hand == VR_HAND_RIGHT && vr.worldInteractive
+                && pressed != vr.prevStickClick[hand])
+            {
+                vr.prevStickClick[hand] = pressed;
+                if (pressed)
+                {
+                    bool32 open = vrWorldToggleSensors();
+
+                    vrHapticPulse(hand, 0.34f, 30000000);
+                    SDL_Log("VR: sensors toggled -> %s", open ? "open" : "closed");
+                }
+                continue;
+            }
+
             if (managerActive)
             {
                 if (vr.stickClickKey[hand] != 0)
@@ -3956,7 +3974,15 @@ static bool32 vrRenderEyes(XrTime displayTime)
         }
 
         glViewport(0, 0, vr.eyeWidth, vr.eyeHeight);
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        /* The game's own background colour, not black. The backdrop dome does
+           not reach the poles, and on a flat screen the camera's declination
+           clamp means nobody ever looks there - in VR the head can, and a
+           black clear made the gap read as a hole punched in the sky. Filling
+           it with the colour the game itself clears to leaves the tint of the
+           nebula instead. */
+        glClearColor((real32)colRed(universe.backgroundColor) / 255.0f,
+                     (real32)colGreen(universe.backgroundColor) / 255.0f,
+                     (real32)colBlue(universe.backgroundColor) / 255.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         vr.eyeActive = TRUE;

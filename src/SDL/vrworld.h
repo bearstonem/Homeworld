@@ -148,6 +148,10 @@ void vrWorldCameraFocusSelection(void);
     globals, which the main camera's own cameraControl would otherwise consume
     first. Deltas are radians / a zoom ratio, as for the main camera. */
 bool32 vrWorldSensorsActive(void);
+
+/* Open the Sensors Manager, or close it when already open, so one control
+   both enters and leaves. Returns TRUE when it is open afterwards. */
+bool32 vrWorldToggleSensors(void);
 void vrWorldSensorsOrbit(real32 deltaYaw, real32 deltaPitch);
 void vrWorldSensorsZoom(real32 ratio);
 
