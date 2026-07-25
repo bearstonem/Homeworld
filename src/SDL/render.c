@@ -928,22 +928,20 @@ bool32 setupPixelFormat()
     flags |= SDL_WINDOW_RESIZABLE;
 #endif
 
-#ifdef HW_ENABLE_VR
-    /* Aliasing costs far more in a headset than on a monitor: thin hulls,
-       engine trails and the VR overlay lines all shimmer as the head moves.
-       The eye passes render into this framebuffer and vrBlitEye copies out
-       1:1 with NEAREST, so a multisampled window resolves for free on that
-       blit. 4x rather than the 8x below - at 4128x2208 the extra samples buy
-       little and cost bandwidth we would rather spend on mesh detail. */
-    if (!enableMSAA)
-    {
-        enableMSAA = TRUE;
-        MSAA = 4;
-        SDL_GL_SetAttribute( SDL_GL_MULTISAMPLEBUFFERS, 1 );
-        SDL_GL_SetAttribute( SDL_GL_MULTISAMPLESAMPLES, MSAA );
-    }
-    else
-#endif
+    /* Deliberately no MSAA default for VR, despite aliasing costing more in a
+       headset than on a monitor. Multisampling the window multiplies fragment
+       and bandwidth cost across ALL THREE world passes - the mono one plus
+       both eyes - at the full 4128x2208, and measured on a Quest 3 that took
+       the frame from 5.2ms to 25.9ms with the GPU pegged at 100%: 40fps and
+       heavy stale-frame counts against a 13.9ms budget. Roughly the 4x the
+       sample count implies, which is more than the ~2x headroom available.
+
+       Antialiasing here has to come from multisampled EYE buffers rather than
+       a multisampled window, so it is paid once per eye at eye resolution and
+       not at all for the mono pass. That needs the eye passes rendering into
+       their own framebuffers instead of the window, which is a real change -
+       see the vrRenderEyes restructure. Pass /msaa to try the window route.
+    */
 	if (enableMSAA) {
         MSAA = 8;
 	    SDL_GL_SetAttribute( SDL_GL_MULTISAMPLEBUFFERS, 1 );

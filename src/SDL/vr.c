@@ -2134,8 +2134,21 @@ static void vrCardRender(sdword index, uint32_t imageIndex)
     /* prim2d's origin is top-left in logical UI pixels; GL row 0 is the
        bottom of the framebuffer, so the laid-out block is the top-left
        corner scaled up by the framebuffer/UI ratio. */
-    /* 1:1 and NEAREST - see vrCardSwapchain. A scaled or filtered blit is
-       illegal from a multisampled read buffer. */
+    /* 1:1 and NEAREST - see vrCardSwapchain.
+
+       Note this is still NOT legal from a multisampled read buffer, even at
+       1:1: a resolve requires the source and destination rectangles to be
+       identical, not merely the same size, and this reads from srcY0 while
+       writing to 0 because the layout is drawn at the top of the framebuffer
+       whereas GL row 0 is the bottom. Enabling window MSAA therefore turns
+       every card black - the blit fails with INVALID_OPERATION and nothing is
+       written - which is exactly what happened. vrCopyFrame and vrBlitEye
+       survive it because their rectangles genuinely are identical.
+
+       This is moot if antialiasing arrives via multisampled eye framebuffers
+       rather than a multisampled window, which is the direction worth taking
+       anyway for cost reasons: the window stays single-sampled and these
+       blits stay legal. */
     srcX1 = card->texWidth;
     srcY0 = vr.height - card->texHeight;
     vr.rawBindFramebuffer(VR_GL_DRAW_FRAMEBUFFER, vr.blitFbo);
