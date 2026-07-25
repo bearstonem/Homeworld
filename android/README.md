@@ -161,6 +161,13 @@ Touch controls in the 3D world:
   command wheel: hold the left trigger and a radial appears at that hand, the
   left stick picks a wedge, and releasing the trigger runs it. Dwelling on a
   category wedge descends into it; B/Y steps back up a level, then closes.
+  The View wedge also scales the hologram: hold Closer or Further and the whole
+  battle draws toward a tabletop model you can lean over, or out to something
+  you stand inside. Scale does not change anything's apparent size - angular
+  size is hull over distance, both in game units - it changes how far away the
+  fleet physically feels and therefore how strong the stereo depth cue is. It
+  scales about whatever the camera is looking at, so the fleet does not slide
+  past you as it changes.
   Formations, tactics, hotkey groups, halt, harvest, dock, special ability,
   kamikaze, retire, scuttle, the Build/Launch/Research managers, hyperspace,
   focus and undo are all reachable there. Entries the current selection cannot

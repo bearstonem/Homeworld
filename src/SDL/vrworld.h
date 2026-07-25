@@ -213,6 +213,11 @@ typedef enum
     VRW_CMD_SENSORS,
     VRW_CMD_UNDO,
 
+    /* Hologram scale. Handled by the OpenXR layer rather than here, since it
+       changes how the world is presented and not what the fleet is doing. */
+    VRW_CMD_SCALE_UP,
+    VRW_CMD_SCALE_DOWN,
+
     /* hotkey groups; the group index comes in as arg */
     VRW_CMD_GROUP_RECALL,
     VRW_CMD_GROUP_STORE,

@@ -473,6 +473,8 @@ bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
         case VRW_CMD_FOCUS_PREV:
         case VRW_CMD_SENSORS:
         case VRW_CMD_UNDO:
+        case VRW_CMD_SCALE_UP:
+        case VRW_CMD_SCALE_DOWN:
             return TRUE;
         case VRW_CMD_BUILD:
         case VRW_CMD_LAUNCH:

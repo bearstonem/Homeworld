@@ -85,6 +85,8 @@
 #define VR_WHEEL_WIDTH       0.26f  /* physical width, metres */
 #define VR_WHEEL_DEADZONE    0.45f  /* stick past this picks a wedge */
 #define VR_WHEEL_HOLD_NS     260000000LL  /* dwell before a submenu opens */
+#define VR_WHEEL_REPEAT_FIRST_NS 200000000LL /* pause before a held wedge repeats */
+#define VR_WHEEL_REPEAT_NS   110000000LL  /* interval once it is repeating */
 
 #define VR_CARD_CONTROLS_WIN_W   330    /* layout size, logical UI pixels */
 #define VR_CARD_CONTROLS_WIN_H   540
@@ -120,8 +122,13 @@
 
 /* How many game-world units one real-world metre of head movement is
    worth. Homeworld ships are hundreds of units long; at 1000 the fleet
-   reads as a room-sized hologram. */
+   reads as a room-sized hologram. Adjustable at runtime - see
+   vrWorldScaleStep - which is what turns the battle between a tabletop model
+   and something you stand inside. */
 #define VR_WORLD_SCALE 1000.0f
+#define VR_WORLD_SCALE_MIN 250.0f
+#define VR_WORLD_SCALE_MAX 8000.0f
+#define VR_WORLD_SCALE_STEP 1.25f
 
 extern SDL_Window *sdlwindow;
 
@@ -260,6 +267,8 @@ typedef struct {
     sdword       wheelSlot;         /* highlighted wedge, -1 = none */
     XrTime       wheelSlotSince;    /* when the highlight last changed */
     bool32       wheelSubOpened;    /* dwell already opened a submenu */
+    XrTime       wheelRepeatAt;     /* next fire time for a repeating wedge */
+    real32       worldScale;        /* game units per metre, runtime */
     vrmanagerstate managerState;
     udword       managerFrames;     /* frames since the manager opened */
     udword       managerPendingFrames; /* consecutive frames not presentable */
@@ -1705,6 +1714,7 @@ typedef struct {
     vrworldcommand cmd;         /* VRW_CMD_NONE when this only opens a page */
     sdword         arg;
     sdword         page;        /* submenu to open, -1 for none */
+    bool32         repeat;      /* fires while held, not on release */
 } vrwheelslot;
 
 typedef struct {
@@ -1755,12 +1765,14 @@ static vrwheelpage const vrWheelPage[VR_WHEEL_PAGE_COUNT] = {
         { "Research",   VRW_CMD_RESEARCH,   0, -1 },
         { "Hyperspace", VRW_CMD_HYPERSPACE, 0, -1 },
     }},
-    { "VIEW", 5, {
-        { "Mothership", VRW_CMD_MOTHERSHIP, 0, -1 },
-        { "Next focus", VRW_CMD_FOCUS_NEXT, 0, -1 },
-        { "Prev focus", VRW_CMD_FOCUS_PREV, 0, -1 },
-        { "Select all", VRW_CMD_SELECT_ALL, 0, -1 },
-        { "Sensors",    VRW_CMD_SENSORS,    0, -1 },
+    { "VIEW", 7, {
+        { "Mothership", VRW_CMD_MOTHERSHIP, 0, -1, FALSE },
+        { "Next focus", VRW_CMD_FOCUS_NEXT, 0, -1, FALSE },
+        { "Closer",     VRW_CMD_SCALE_UP,   0, -1, TRUE },
+        { "Select all", VRW_CMD_SELECT_ALL, 0, -1, FALSE },
+        { "Sensors",    VRW_CMD_SENSORS,    0, -1, FALSE },
+        { "Further",    VRW_CMD_SCALE_DOWN, 0, -1, TRUE },
+        { "Prev focus", VRW_CMD_FOCUS_PREV, 0, -1, FALSE },
     }},
     /* group labels are rewritten per frame with their ship counts */
     { "GROUPS", 10, {
@@ -2367,7 +2379,87 @@ static bool32 vrHandAimLocal(uword hand, XrTime time, real32 pos[3], real32 dir[
     return TRUE;
 }
 
+/* Change how many game units a metre is worth, keeping the point the camera
+   is looking at where it already is.
+
+   Scale alone does not change anything's apparent SIZE - angular size is
+   hull/distance, and both are in game units - so what it changes is how far
+   away the fleet physically feels, and with it the stereo depth cue. Raising
+   it pulls the battle onto a tabletop you can lean over; lowering it pushes it
+   out to something you stand inside.
+
+   Naively changing it slides the whole hologram, because the lookat point sits
+   at anchorPos + R_anchor . (0,0,-cameraDistance) / scale. Shifting the anchor
+   by cameraDistance * (1/old - 1/new) along the anchor's forward axis cancels
+   that exactly, so the fleet grows and shrinks about the thing being looked at
+   rather than lurching past the player. */
+static bool32 vrWorldScaleStep(real32 factor)
+{
+    real32 wanted = vr.worldScale * factor;
+    XrVector3f forward = {0.0f, 0.0f, -1.0f}, along;
+    real32 shift;
+
+    if (wanted < VR_WORLD_SCALE_MIN)
+    {
+        wanted = VR_WORLD_SCALE_MIN;
+    }
+    else if (wanted > VR_WORLD_SCALE_MAX)
+    {
+        wanted = VR_WORLD_SCALE_MAX;
+    }
+    if (!vrFinite(wanted) || wanted <= 0.0f
+        || wanted == vr.worldScale)                         //already clamped
+    {
+        return FALSE;
+    }
+    if (mrCamera != NULL)
+    {
+        shift = mrCamera->distance * (1.0f / vr.worldScale - 1.0f / wanted);
+        vrQuatRotate(vr.anchorPose.orientation, forward, &along);
+        vr.worldOffset.x += along.x * shift;
+        vr.worldOffset.y += along.y * shift;
+        vr.worldOffset.z += along.z * shift;
+    }
+    SDL_Log("VR: world scale %.0f -> %.0f units/metre (fleet at %.2fm)",
+            vr.worldScale, wanted,
+            mrCamera != NULL ? mrCamera->distance / wanted : 0.0f);
+    vr.worldScale = wanted;
+    return TRUE;
+}
+
 /* Close the wheel, optionally running whatever wedge is highlighted. */
+/* Run one wedge. Shared by release-to-commit and by repeating wedges, so a
+   held wedge and a released one can never mean different things. */
+static void vrWheelFire(vrwheelslot const* slot, real32 haptic)
+{
+    vrworldcommand cmd = slot->cmd;
+
+    if (cmd == VRW_CMD_NONE)
+    {
+        return;
+    }
+    /* the group page is the one place a modifier changes the verb */
+    if (cmd == VRW_CMD_GROUP_RECALL
+        && vrActionPressedHand(vr.gripAction, VR_HAND_LEFT))
+    {
+        cmd = VRW_CMD_GROUP_STORE;
+    }
+    /* scale is presentation, so the OpenXR layer owns it rather than vrworld */
+    if (cmd == VRW_CMD_SCALE_UP || cmd == VRW_CMD_SCALE_DOWN)
+    {
+        if (vrWorldScaleStep(cmd == VRW_CMD_SCALE_UP
+                             ? VR_WORLD_SCALE_STEP : 1.0f / VR_WORLD_SCALE_STEP))
+        {
+            vrHapticPulse(VR_HAND_LEFT, haptic * 0.5f, 18000000);
+        }
+        return;
+    }
+    if (vrWorldCommand(cmd, slot->arg))
+    {
+        vrHapticPulse(VR_HAND_LEFT, haptic, 40000000);
+    }
+}
+
 static void vrWheelClose(bool32 commit)
 {
     if (!vr.wheelOpen)
@@ -2378,21 +2470,10 @@ static void vrWheelClose(bool32 commit)
     {
         vrwheelpage const* page = vrWheelCurrentPage();
 
-        if (vr.wheelSlot < page->slotCount)
+        if (vr.wheelSlot < page->slotCount
+            && !page->slot[vr.wheelSlot].repeat)
         {
-            vrwheelslot const* slot = &page->slot[vr.wheelSlot];
-            vrworldcommand cmd = slot->cmd;
-
-            /* the group page is the one place a modifier changes the verb */
-            if (cmd == VRW_CMD_GROUP_RECALL
-                && vrActionPressedHand(vr.gripAction, VR_HAND_LEFT))
-            {
-                cmd = VRW_CMD_GROUP_STORE;
-            }
-            if (cmd != VRW_CMD_NONE && vrWorldCommand(cmd, slot->arg))
-            {
-                vrHapticPulse(VR_HAND_LEFT, 0.50f, 40000000);
-            }
+            vrWheelFire(&page->slot[vr.wheelSlot], 0.50f);
         }
     }
     SDL_Log("VR: wheel closed (commit=%d page=%d slot=%d)", (int)commit,
@@ -2439,10 +2520,23 @@ static void vrUpdateWheelInput(XrTime time, bool32 held)
     {
         vr.wheelSlot = slot;
         vr.wheelSlotSince = time;
+        vr.wheelRepeatAt = time + VR_WHEEL_REPEAT_FIRST_NS;
         vr.wheelSubOpened = FALSE;
         if (slot >= 0)
         {
             vrHapticPulse(VR_HAND_LEFT, 0.16f, 10000000);
+        }
+        return;
+    }
+    /* A wedge that adjusts a continuous quantity - hologram scale - would be
+       useless at one step per open-and-release, so those fire on an interval
+       while held instead, and consume the release so it does not fire twice. */
+    if (slot >= 0 && slot < page->slotCount && page->slot[slot].repeat)
+    {
+        if (time >= vr.wheelRepeatAt)
+        {
+            vrWheelFire(&page->slot[slot], 0.30f);
+            vr.wheelRepeatAt = time + VR_WHEEL_REPEAT_NS;
         }
         return;
     }
@@ -3757,7 +3851,7 @@ static bool32 vrRenderEyes(XrTime displayTime)
         adjusted.position.x += vr.worldOffset.x;
         adjusted.position.y += vr.worldOffset.y;
         adjusted.position.z += vr.worldOffset.z;
-        vrPoseToModelMatrix(adjusted, VR_WORLD_SCALE, anchorModel);
+        vrPoseToModelMatrix(adjusted, vr.worldScale, anchorModel);
     }
 
     /* the eye renders overwrite the rndCamera/ProjectionMatrix globals with
@@ -3824,7 +3918,7 @@ static bool32 vrRenderEyes(XrTime displayTime)
 
         /* eye view = inverse(eye pose) * anchor pose: identity when the
            head sits exactly where the world was anchored */
-        vrPoseToViewMatrix(views[eye].pose, VR_WORLD_SCALE, eyeView);
+        vrPoseToViewMatrix(views[eye].pose, vr.worldScale, eyeView);
         vrMatMul(eyeView, anchorModel, vr.eyeViewMatrix);
         vr.eyeFov = views[eye].fov;
         vr.debugEye = (sdword)eye;
@@ -3915,6 +4009,7 @@ bool32 vrInit(sdword width, sdword height)
     vr.width = width;
     vr.height = height;
     vr.quadWidth = VR_SCREEN_WIDTH;
+    vr.worldScale = VR_WORLD_SCALE;
     vr.debugEye = -1;
     vr.selectGestureHand = -1;
     vr.contextGestureHand = -1;
@@ -4121,7 +4216,7 @@ static void vrFrameInner(void)
 
             bool32 was = vr.worldInteractive;
 
-            vr.worldInteractive = vrWorldFrameBegin(anchorPos, anchorQuat, VR_WORLD_SCALE);
+            vr.worldInteractive = vrWorldFrameBegin(anchorPos, anchorQuat, vr.worldScale);
             if (vr.worldInteractive != was)
             {
                 SDL_Log("VR: world interactive -> %d", (int)vr.worldInteractive);
