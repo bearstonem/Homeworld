@@ -1,0 +1,6 @@
+<resources>
+    <!-- VR flavour only: the flat Android build keeps the plain name. The
+         Bentusi are "the Unbound", the traders who gave up planets for the
+         void - and the port is likewise unbound from the monitor. -->
+    <string name="app_name">Homeworld: Unbound</string>
+</resources>

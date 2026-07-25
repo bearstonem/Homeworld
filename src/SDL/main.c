@@ -105,7 +105,7 @@ bool32 mainNoPerspective = FALSE;
 bool32 systemActive = FALSE;              //active flag for the program
 
 #ifndef __APPLE__
-static char windowTitle[] = "HomeworldSDL";//name of window
+static char windowTitle[] = HW_WINDOW_TITLE;//name of window
 #endif
 
 //error strings
@@ -246,6 +246,9 @@ bool32 noMinimizeAltTab = FALSE;
 //options altered by a password function:
 bool32 mainCDCheckEnabled = TRUE;
 
+/* Deliberately NOT renamed: this is the multiplayer protocol version string,
+   matched against other clients. Changing it would silently make this build
+   unable to play with anything else. */
 char networkVersion[MAX_NETWORKVERSION_STRING_LEN] = "HomeworldSDL";
 
 char minorBuildVersion[] = "1.2.0";

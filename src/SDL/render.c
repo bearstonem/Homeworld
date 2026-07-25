@@ -948,7 +948,7 @@ bool32 setupPixelFormat()
 	    SDL_GL_SetAttribute( SDL_GL_MULTISAMPLESAMPLES, MSAA );
 	}
 
-	while (!(sdlwindow=SDL_CreateWindow("HomeworldSDL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+	while (!(sdlwindow=SDL_CreateWindow(HW_WINDOW_TITLE, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
 		MAIN_WindowWidth, MAIN_WindowHeight, flags)))
 	{
         if (MSAA < 2)
@@ -956,7 +956,7 @@ bool32 setupPixelFormat()
             SDL_GL_SetAttribute( SDL_GL_MULTISAMPLEBUFFERS, 0 );
             SDL_GL_SetAttribute( SDL_GL_MULTISAMPLESAMPLES, 0 );
 
-            if (!(sdlwindow=SDL_CreateWindow("HomeworldSDL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+            if (!(sdlwindow=SDL_CreateWindow(HW_WINDOW_TITLE, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                 MAIN_WindowWidth, MAIN_WindowHeight, flags)))
             {
             fprintf (stderr, "Couldn't set video mode: %s\n", SDL_GetError ());

@@ -1,4 +1,12 @@
-# Building GoK for Android (and Meta Quest)
+# Building GoK for Android and Meta Quest ("Homeworld: Unbound")
+
+The VR flavour ships under the name **Homeworld: Unbound** — that is the label
+you will see in the Quest library. The name lives in
+`app/src/vr/res/values/strings.xml`, so the flat Android build keeps the plain
+"Homeworld" label. The package id stays `org.gardensofkadesh.homeworld`
+deliberately: it is also the asset path under
+`/sdcard/Android/data/`, and changing it would orphan an existing install, its
+settings and its assets.
 
 The Android port reuses the OpenGL ES 1.1 renderer (`-Dgles=true`).
 SDL's Java activity (`org.libsdl.app.SDLActivity`) loads the game as

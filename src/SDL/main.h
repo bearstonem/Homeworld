@@ -29,6 +29,15 @@
     Switches:
 =============================================================================*/
 
+/* Window/application title. The VR build ships as "Homeworld: Unbound"; the
+   Quest library label is set separately in the vr flavour's strings.xml.
+   Note this is NOT the multiplayer protocol string - see networkVersion. */
+#ifdef HW_ENABLE_VR
+#define HW_WINDOW_TITLE             "Homeworld: Unbound"
+#else
+#define HW_WINDOW_TITLE             "HomeworldSDL"
+#endif
+
 #ifdef HW_BUILD_FOR_DEBUGGING
 
 #define MAIN_MOUSE_FREE             1           //allow the mouse to be freed from the window
