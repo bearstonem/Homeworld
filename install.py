@@ -6,8 +6,12 @@ Walks through connecting a headset, choosing demo or full game, locating your
 game data, and pushing everything to the right place. Works on Windows and
 Linux.
 
-    python3 install.py          (Linux/macOS)
+    python3 install.py          (Linux, macOS)
     py install.py               (Windows)
+
+Installing works on all three. Building from source needs the Android NDK
+cross toolchain, which is set up for Linux; elsewhere the script installs a
+prebuilt APK instead.
 
 Nothing from any commercial release is bundled here. The demo assets that ship
 with this repository are freely redistributable; the full game needs your own
@@ -28,6 +32,7 @@ APK = REPO / "android/project/app/build/outputs/apk/vr/debug/app-vr-debug.apk"
 DEMO_ASSETS = REPO / "subprojects/demo-assets-1.05/assets"
 
 WINDOWS = platform.system() == "Windows"
+MACOS = platform.system() == "Darwin"
 
 # The filenames the binary opens, which are NOT always the case the files ship
 # with: the full game's voice file is opened as "HW_comp.vce" while the
@@ -105,6 +110,12 @@ def find_adb():
         candidates += [Path(local) / "Android/Sdk/platform-tools" / exe,
                        Path("C:/Program Files/SideQuest/resources/build/platform-tools") / exe,
                        Path(local) / "Programs/SideQuest/resources/build/platform-tools" / exe]
+    elif MACOS:
+        candidates += [Path("/opt/homebrew/bin") / exe,          # Apple Silicon
+                       Path("/usr/local/bin") / exe,             # Intel homebrew
+                       Path.home() / "Library/Android/sdk/platform-tools" / exe,
+                       Path("/Applications/SideQuest.app/Contents/Resources/build/platform-tools") / exe,
+                       Path.home() / "Library/Android/platform-tools" / exe]
     else:
         candidates += [Path.home() / "Android/Sdk/platform-tools" / exe,
                        Path("/usr/lib/android-sdk/platform-tools") / exe,
@@ -128,6 +139,16 @@ def adb_help():
         info("    https://developer.android.com/tools/releases/platform-tools")
         info("    unzip it, and add that folder to your PATH")
         info("  * or install SideQuest, which bundles adb")
+    elif MACOS:
+        info("macOS - pick either:")
+        info("  * brew install --cask android-platform-tools")
+        info("  * or download 'SDK Platform-Tools for Mac' from")
+        info("    https://developer.android.com/tools/releases/platform-tools")
+        info("    unzip it, and add that folder to your PATH")
+        info("  * or install SideQuest, which bundles adb")
+        print()
+        info("If macOS blocks it as unidentified, allow it once under")
+        info("System Settings > Privacy & Security.")
     else:
         info("Linux - pick either:")
         info("  * Debian/Ubuntu:  sudo apt install android-tools-adb")
@@ -271,6 +292,11 @@ def steam_candidates():
             out += [Path("%s:/Program Files (x86)/Steam/steamapps/common/Homeworld" % drive),
                     Path("%s:/SteamLibrary/steamapps/common/Homeworld" % drive),
                     Path("%s:/Games/Steam/steamapps/common/Homeworld" % drive)]
+    elif MACOS:
+        home = Path.home()
+        out += [home / "Library/Application Support/Steam/steamapps/common/Homeworld",
+                Path("/Applications/Homeworld"),
+                home / "Games/Steam/steamapps/common/Homeworld"]
     else:
         home = Path.home()
         out += [home / ".local/share/Steam/steamapps/common/Homeworld",
@@ -370,8 +396,14 @@ def build_apk(edition):
                 return APK
         err("Cannot build here.")
         info("Building the Quest APK needs the Android NDK, meson, ninja and")
-        info("gradle. See android/README.md. On Windows the practical route")
-        info("is to build on Linux (or WSL) and copy the APK over.")
+        info("gradle, plus the cross file in android/. See android/README.md.")
+        if WINDOWS:
+            info("On Windows the practical route is to build under WSL, or")
+            info("get a prebuilt APK, then re-run this to install it.")
+        elif MACOS:
+            info("On macOS the cross build is not set up; the practical route")
+            info("is to build on Linux, or get a prebuilt APK, then re-run")
+            info("this to install it.")
         return None
 
     # Match the meson 'demo' option to what was chosen; a mismatch produces a
