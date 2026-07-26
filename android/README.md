@@ -1,5 +1,16 @@
 # Building GoK for Android and Meta Quest ("Homeworld: Unbound")
 
+> **Just want it on your headset?** Run `python3 install.py` from the
+> repository root (`py install.py` on Windows). It walks through connecting
+> the headset over USB or wirelessly, choosing the demo or the full game,
+> finding your Homeworld data, building if it can, and copying everything
+> across. The rest of this file is the manual route and the details behind it.
+>
+> Note the demo/full choice is a **compile-time** switch (`-Ddemo`), not a
+> runtime one: a full-game build looks for `Homeworld.big` and stops with
+> "Unable to open required .big file" if it is absent. The installer keeps the
+> two in step; if you build by hand, pick the right one.
+
 The VR flavour ships under the name **Homeworld: Unbound** — that is the label
 you will see in the Quest library. The name lives in
 `app/src/vr/res/values/strings.xml`, so the flat Android build keeps the plain
