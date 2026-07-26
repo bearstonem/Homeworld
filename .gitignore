@@ -59,3 +59,7 @@ windows/bin/*
 windows/build/*
 *.c.d
 *.c.o
+# Prebuilt APKs: kept locally and attached to releases rather than committed.
+# 34 MB each, and they change with every build - they would bloat the history
+# permanently. dist/README.md records their hashes.
+dist/*.apk

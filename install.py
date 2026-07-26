@@ -29,6 +29,12 @@ REPO = Path(__file__).resolve().parent
 PKG = "org.gardensofkadesh.homeworld"
 DST = "/sdcard/Android/data/%s/files" % PKG
 APK = REPO / "android/project/app/build/outputs/apk/vr/debug/app-vr-debug.apk"
+# Prebuilt APKs, one per edition. Which edition an APK is cannot be detected
+# from the outside - it is compiled in - so they are kept as separate files
+# rather than guessed at.
+DIST = REPO / "dist"
+PREBUILT = {"d": DIST / "homeworld-unbound-vr-demo.apk",
+            "f": DIST / "homeworld-unbound-vr-full.apk"}
 DEMO_ASSETS = REPO / "subprojects/demo-assets-1.05/assets"
 
 WINDOWS = platform.system() == "Windows"
@@ -386,13 +392,22 @@ def build_apk(edition):
     want_demo = (edition == "d")
     builddir = REPO / "build.android-vr"
 
+    prebuilt = PREBUILT[edition]
+    if prebuilt.is_file():
+        ok("Using the prebuilt %s APK" % ("demo" if want_demo else "full game"))
+        info(str(prebuilt))
+        if not have_build_tools() or not yes("Build from source instead?", False):
+            return prebuilt
+
     if not have_build_tools():
         if APK.is_file():
-            warn("No build toolchain found, but a prebuilt APK exists.")
+            warn("No build toolchain and no prebuilt APK for this edition,")
+            warn("but there is an APK from a previous build:")
             info(str(APK))
-            info("NOTE: it was built for one edition, and this script cannot")
-            info("tell which. If the game fails to start, rebuild from source.")
-            if yes("Use the existing APK?", True):
+            info("Its edition cannot be detected from the outside. If the")
+            info("game fails to start, it is the wrong one - rebuild, or get")
+            info("the matching APK from dist/.")
+            if yes("Use it anyway?", False):
                 return APK
         err("Cannot build here.")
         info("Building the Quest APK needs the Android NDK, meson, ninja and")
