@@ -909,6 +909,14 @@ static void vrLookOrientation(XrVector3f f, XrQuaternionf* out)
 
 #define VR_WRIST_PANEL_WIDTH 0.32f
 
+/* Managers ride the wrist too, but wider than the menu panel. 32cm carries
+   the main menu because that is a handful of big buttons; Construction and
+   Research are dense 1024x768 screens of ship lists, costs and small type.
+   The head-relative panel they used to get was 2.2m seen from about 2m, so
+   ~58 degrees across; 46cm at the wrist's ~45cm subtends about the same, so
+   the type stays the size it was and only the anchor changes. */
+#define VR_WRIST_MANAGER_WIDTH 0.46f
+
 /* Watch-face pose for a hand: a panel riding just above the controller,
    tilted so it faces the user when the arm is raised naturally. Both the
    left wrist panel and the wrist cards are placed from this. */
@@ -951,7 +959,7 @@ static bool32 vrWristPose(uword hand, XrTime displayTime, XrPosef* out)
 }
 
 /* In-game the screen becomes a small panel riding the left wrist */
-static bool32 vrUpdateWristPanel(XrTime displayTime)
+static bool32 vrUpdateWristPanel(XrTime displayTime, real32 width)
 {
     XrPosef pose;
 
@@ -960,7 +968,7 @@ static bool32 vrUpdateWristPanel(XrTime displayTime)
         return FALSE;
     }
     vr.quadPose = pose;
-    vr.quadWidth = VR_WRIST_PANEL_WIDTH;
+    vr.quadWidth = width;
     vr.quadPlaced = TRUE;
     return TRUE;
 }
@@ -1286,7 +1294,13 @@ static void vrUpdateScreenPose(XrTime displayTime)
                     vrWorldManagerName(), (unsigned)vrWorldGameCameraAge());
         }
         vr.managerFrames++;
-        vr.managerPoseValid = vrUpdateManagerPanel(displayTime);
+        /* Managers ride the wrist alongside the main menu rather than taking
+           over the view. The state machine below is unchanged: input is still
+           modal while one is visible, and the escape hatch still fires if the
+           panel never becomes presentable, which now also covers the left
+           controller losing tracking. */
+        vr.managerPoseValid = vrUpdateWristPanel(displayTime,
+                                                 VR_WRIST_MANAGER_WIDTH);
         if (vr.managerPoseValid)
         {
             vr.quadPlaced = TRUE;
@@ -1327,7 +1341,7 @@ static void vrUpdateScreenPose(XrTime displayTime)
     {
         /* if the controller loses tracking, the panel holds its last wrist
            pose instead of reverting to the big floating screen */
-        vrUpdateWristPanel(displayTime);
+        vrUpdateWristPanel(displayTime, VR_WRIST_PANEL_WIDTH);
         return;
     }
     else
@@ -1692,49 +1706,49 @@ static void vrCardRow(sdword x, sdword y, sdword width, char const* label,
 
 static void vrCardDrawControls(vrcard const* card)
 {
+    /* Grouped by hand rather than by verb. Which hand does what is the one
+       thing the scheme rests on, so the card teaches that first and the rest
+       follows from it. Everything is spelled out: someone reading this has a
+       controller in each hand and no patience for abbreviations. */
     static char const* rows[][2] = {
-        {"COMMAND WHEEL",       NULL},
-        {"hold L-trigger",      "open wheel"},
-        {"L-stick",             "pick wedge"},
-        {"dwell on wedge",      "submenu"},
-        {"release L-trigger",   "do it"},
-        {"B/Y",                 "back / close"},
-        {"",                    NULL},
-        {"SELECT",              NULL},
-        {"R-trig own ship",     "select"},
-        {"L-grip + trigger",    "add / toggle"},
-        {"trigger x2",          "all of type"},
-        {"empty + sweep",       "group brush"},
-        {"",                    NULL},
-        {"R-TRIGGER A TARGET",  NULL},
-        {"enemy",               "attack"},
-        {"resource",            "harvest"},
-        {"derelict + salvcorv", "salvage"},
-        {"damaged + repcorv",   "repair"},
-        {"",                    NULL},
-        {"ORDERS  hold A",      NULL},
-        {"on enemy",            "attack"},
-        {"on resource",         "harvest"},
-        {"on own ship",         "dock"},
-        {"on empty",            "move"},
-        {"+ trigger on foes",   "multi-attack"},
-        {"R-stick Y",           "order depth"},
-        {"+ trigger, sweep",    "draw path"},
-        {"release A",           "fly path"},
-        {"B",                   "cancel"},
-        {"",                    NULL},
-        {"CAMERA",              NULL},
-        {"L-stick",             "orbit"},
-        {"R-stick Y",           "zoom"},
-        {"both grips",          "pinch zoom"},
-        {"R-grip + R-stick X",  "cycle fleet"},
-        {"L-stick click",       "focus + recentre"},
-        {"R-stick click",       "sensors"},
-        {"",                    NULL},
-        {"LEFT = COMMANDER",    NULL},
-        {"X",                   "undo"},
-        {"Y",                   "hide panel"},
-        {"B (right)",           "close mgr"},
+        {"LEFT HAND  commands",  NULL},
+        {"Hold trigger",         "command wheel"},
+        {"  tilt stick",         "pick an entry"},
+        {"  rest on an entry",   "open submenu"},
+        {"  let go",             "run it"},
+        {"Tilt stick",           "orbit the view"},
+        {"Click stick",          "focus + recentre"},
+        {"Hold grip",            "add to selection"},
+        {"X",                    "undo"},
+        {"Y",                    "show/hide panel"},
+        {"",                     NULL},
+        {"RIGHT HAND  points",   NULL},
+        {"Trigger on a ship",    "select it"},
+        {"Trigger twice",        "all of that type"},
+        {"Sweep empty space",    "select a group"},
+        {"Push stick up/down",   "zoom in and out"},
+        {"Click stick",          "open Sensors"},
+        {"Grip + stick sideways","step through fleet"},
+        {"Both grips",           "pinch to zoom"},
+        {"B",                    "cancel or go back"},
+        {"",                     NULL},
+        {"POINT AND PULL TRIGGER", NULL},
+        {"at an enemy",          "attack it"},
+        {"at an asteroid",       "harvest it"},
+        {"at a derelict",        "salvage it"},
+        {"at a damaged ship",    "repair it"},
+        {"dim ray means",        "not allowed"},
+        {"",                     NULL},
+        {"HOLD A TO AIM FIRST",  NULL},
+        {"over empty space",     "fly there"},
+        {"over an enemy",        "attack"},
+        {"over an asteroid",     "harvest"},
+        {"over your own ship",   "dock with it"},
+        {"Push stick up/down",   "near or far"},
+        {"Trigger, then sweep",  "draw a route"},
+        {"Trigger on more foes", "attack them all"},
+        {"Let go of A",          "confirm"},
+        {"B",                    "throw it away"},
     };
     sdword const count = (sdword)(sizeof(rows) / sizeof(rows[0]));
     color const heading = colRGB(120, 230, 255);
@@ -1823,7 +1837,7 @@ static vrwheelpage const vrWheelPage[VR_WHEEL_PAGE_COUNT] = {
         { "Build",      VRW_CMD_BUILD,       0, -1 },
         { "Undo",       VRW_CMD_UNDO,        0, -1 },
         { "Research",   VRW_CMD_RESEARCH,    0, -1 },
-        { "View",       VRW_CMD_NONE,        0, VR_WHEEL_PAGE_VIEW },
+        { "Sensors",    VRW_CMD_SENSORS,     0, VR_WHEEL_PAGE_VIEW },
         { "Orders",     VRW_CMD_NONE,        0, VR_WHEEL_PAGE_ORDERS },
     }},
     { "FORMATION", 7, {
