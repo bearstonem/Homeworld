@@ -5,15 +5,16 @@ Built from `8807ae2` on 2026-07-27.
 ## What changed since the last build
 
 - **Ships are lit from one direction again.** The eye and quad swapchains were
-  being created as linear `GL_RGBA8`, which tells the compositor the pixels are
-  linear light and earns them a second gamma encode on the way to the panel.
-  Every midtone lifted: a shadowed hull the shader put at 0.19 arrived at 0.45,
-  and deep space came out milky navy rather than black, so the sunlit/shadowed
-  split the art direction rests on flattened into a uniform glow. The
-  swapchains are now sRGB with the GLES write conversion switched off, which
-  measured the shadow side back to 0.174 and roughly doubled hull contrast. The
-  build is *considerably darker* than the previous APKs, and that is correct —
-  it is what the game looks like. Details in `VR_PORT_HANDOFF.md`.
+  being created as linear `GL_RGBA8`, which tells the compositor that the pixels
+  are raw light and still need a gamma encode on the way to the panel. They had
+  already been encoded, so they got encoded twice and every midtone lifted. A
+  shadowed hull the shader set to 0.19 arrived at 0.45, deep space came out a
+  milky navy instead of black, and most of the contrast between a ship's sunward
+  and shadowed sides went with it. The swapchains are sRGB now, with the GLES
+  write conversion switched off, which measured the shadow side back down to
+  0.174 and roughly doubled hull contrast. These APKs look considerably darker
+  than the previous ones. That is how the game is supposed to look. Details in
+  `VR_PORT_HANDOFF.md`.
 
 Pick ONE - the demo/full choice is compiled in, not detected at runtime.
 Installing the wrong one fails at startup with

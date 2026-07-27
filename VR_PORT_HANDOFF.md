@@ -54,15 +54,16 @@ rendering. The tell is a log with `pass=mono` frames and no
 ## Device facts worth not rediscovering
 
 - Wireless adb endpoint `192.168.1.105:34721` (the IP was `.92` for a long
-  time; the port has been 40561, 44159, 45027, 38229). **Both halves move** —
-  the port each time wireless debugging is re-enabled, and the IP whenever the
-  DHCP lease turns over — and `adb mdns services` can keep advertising a dead
-  one, which makes a stale endpoint look authoritative. Read them off the
-  headset's own Wireless Debugging screen, not from mDNS and not from this
-  file. Two symptoms worth telling apart: "Connection refused" means the right
-  host with no adbd (wireless debugging is off, or the port moved), while "No
-  route to host" means nothing is at that IP at all — the lease moved. A
-  `nmap -sn` sweep of the /24 finds it again.
+  time; the port has been 40561, 44159, 45027, 38229). **Both halves move.** The
+  port changes each time wireless debugging is re-enabled, and the IP changes
+  whenever the DHCP lease turns over. `adb mdns services` will happily keep
+  advertising a dead endpoint, which makes a stale one look authoritative, so
+  read both off the headset's own Wireless Debugging screen rather than trusting
+  mDNS or this file. The two failure messages mean different things.
+  "Connection refused" is the right host with no adbd on it, so wireless
+  debugging is off or the port moved. "No route to host" means nothing answers
+  at that IP at all, so the lease moved and an `nmap -sn` sweep of the /24 will
+  find it again.
 - **The log tag is `SDL/APP`, not `SDL`.** Capture with
   `adb logcat -v time "SDL/APP:V" VrApi:I "*:S"`. `VrApi:I` gives the
   per-second frame report (`FPS`, `Stale`, `App` ms, `LCnt` layer count),
@@ -70,12 +71,12 @@ rendering. The tell is a log with `pass=mono` frames and no
   performance regression.
 - The headset must be **awake** or the session never reaches
   `XR_SESSION_STATE_FOCUSED` and a launch appears to hang.
-- **`adb screencap` does capture OpenXR layers** — this note used to say the
+- **`adb screencap` does capture OpenXR layers.** This note used to say the
   opposite. `adb exec-out screencap -p` returns the composited stereo frame at
-  4128x2208: both eyes, lens distortion, passthrough, quad layers and the
-  world projection layer. That makes it ground truth for what the player sees,
-  and it is measurable — it is how the washed-out lighting below was pinned
-  down to a number rather than argued about.
+  4128x2208: both eyes, lens distortion, passthrough, quad layers and the world
+  projection layer. That makes it ground truth for what the player sees, and it
+  gives you pixels you can measure. It is how the washed-out lighting below got
+  pinned down to a number instead of being argued about.
 - **Two coordinate spaces that do not match, and not by a uniform factor.**
   The framebuffer is 4128x2208 but `prim2d` and the font system draw in the
   game's logical UI resolution, **1024x768** — measured from the card
@@ -177,25 +178,26 @@ These are non-obvious and cost real time to find:
 ## Colour space: why the fleet looked flatly lit
 
 Reported by a player as "it seems to have a sort of lighting from all sides,
-where the original only had parallel lighting from one distant source". It was
-real, it was VR-only, and it was **not** a lighting bug — the lighting is
-untouched by the port.
+where the original only had parallel lighting from one distant source". The
+complaint was real and VR-only, but the **lighting itself is untouched by the
+port** and was never the problem. Worth knowing before anyone goes hunting in
+`Light.c` again.
 
 The engine's hull shading is `shColourSet0` (`src/Game/Shader.c:698`), a
 per-vertex `N·L` against the light direction rotated into the ship's own object
 space by `shPushLightMatrix`. Nothing in that path reads the camera, the head
 pose or the world scale, so it is bit-identical between the flat and VR builds
-and cannot be skewed by stereo. The mission data is intact too: every `.hsf` in
-`Homeworld.big` carries one ambient plus two distant lights — a warm key at
-intensity 1.5-3.0 and a dim blue fill from roughly the opposite side — and the
+and stereo cannot skew it. The mission data is intact too. Every `.hsf` in
+`Homeworld.big` carries one ambient plus two distant lights, a warm key at
+intensity 1.5-3.0 and a dim blue fill from roughly the opposite side, and the
 `HSF/` lookup resolves (`fileExists` searches the .big first, and
 `bigTOCFileExists` lowercases and back-slashes the name to match how entries
 are stored).
 
 The defect was in presentation. `vrCreateSwapchain` used to prefer linear
 `GL_RGBA8`, reasoning that the game's output "is not sRGB-encoded" so an sRGB
-chain would double-correct. That is backwards: a 1999 engine's colours are
-already display-referred, and declaring the buffer linear makes the compositor
+chain would double-correct. That has it backwards. A 1999 engine's colours are
+already display-referred, so declaring the buffer linear makes the compositor
 gamma-encode them a second time.
 
 Measured from a `screencap` of the Mothership, hull pixels only:
@@ -207,25 +209,27 @@ Measured from a `screencap` of the Mothership, hull pixels only:
 | bright:dark | **1.76 : 1** | ~5 : 1 |
 
 0.19 is the ambient floor for a standard hull material (ambient 0.196, diffuse
-0.784 — the constants hardcoded at `Shader.c:262`) under `default.hsf`. And
+0.784, the constants hardcoded at `Shader.c:262`) under `default.hsf`. And
 sRGB-encoding 0.19 gives 0.473, against a measured 0.45. Two controls rule out
 a brightness or contrast offset: the region outside the lens barrel stays
-exactly `(0,0,0)`, and white still reaches 255 — only the midtones moved, which
-is a gamma curve. SurfaceFlinger confirms the panel is `dataspace=V0_SRGB` with
-an identity `colorTransform`.
+exactly `(0,0,0)`, and white still reaches 255, so only the midtones moved,
+which is what a gamma curve does. SurfaceFlinger confirms the panel is
+`dataspace=V0_SRGB` with an identity `colorTransform`.
 
 The fix is `vrConfigureColorSpace` (`src/SDL/vr.c`). Declaring
-`GL_SRGB8_ALPHA8` alone is not enough and would over-darken instead: GLES 3.0
-also converts on *write* into an sRGB target, including through
+`GL_SRGB8_ALPHA8` on its own would over-darken instead, because GLES 3.0 also
+converts on *write* into an sRGB target, including through
 `glBlitFramebuffer`, which is how all three passes reach their swapchains.
 `GL_EXT_sRGB_write_control` is what turns that off, so the sequence is
-extension check → `glDisable(GL_FRAMEBUFFER_SRGB)` → sRGB format. Without the
-extension it stays on the linear format, because washed out beats double-dark.
+extension check, then `glDisable(GL_FRAMEBUFFER_SRGB)`, then the sRGB format.
+Without the extension it stays on the linear format, since washed out beats
+double-dark.
 All three swapchains (world, eyes, cards) take the format from
 `vr.colorFormat`; the cards especially must match, or the wrist panels drift
 away from the scene behind them.
 
-Expect the corrected build to look **considerably darker**. That is the point.
+Expect the corrected build to look **considerably darker**. That is how the
+game is supposed to look.
 
 ## Current VR feature set
 
