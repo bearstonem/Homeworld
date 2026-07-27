@@ -43,6 +43,8 @@
 #define VR_GL_COLOR_BUFFER_BIT   0x00004000
 #define VR_GL_NEAREST            0x2600
 #define VR_GL_LINEAR             0x2601
+#define VR_GL_EXTENSIONS         0x1F03
+#define VR_GL_FRAMEBUFFER_SRGB   0x8DB9     /* EXT_sRGB_write_control */
 
 #define VR_MAX_SWAPCHAIN_IMAGES 8
 
@@ -159,6 +161,8 @@ typedef void (*rawGlBlitFramebuffer_t)(int srcX0, int srcY0, int srcX1, int srcY
                                        int dstX0, int dstY0, int dstX1, int dstY1,
                                        unsigned int mask, unsigned int filter);
 typedef void (*rawGlDeleteFramebuffers_t)(int n, unsigned int const* ids);
+typedef void (*rawGlDisable_t)(unsigned int cap);
+typedef unsigned char const* (*rawGlGetString_t)(unsigned int name);
 
 /* Manager presentation is tracked separately from the game's own manager
    state. Modal input suppression is gated on VISIBLE - reached only once the
@@ -293,6 +297,10 @@ typedef struct {
     rawGlFramebufferTexture2D_t rawFramebufferTexture2D;
     rawGlBlitFramebuffer_t      rawBlitFramebuffer;
     rawGlDeleteFramebuffers_t   rawDeleteFramebuffers;
+    rawGlDisable_t              rawDisable;
+    rawGlGetString_t            rawGetString;
+    int64_t      colorFormat;       /* swapchain format, all three chains */
+    bool32       srgbWrite;         /* sRGB chain + write conversion off */
 } vrstate;
 
 static vrstate vr;
@@ -494,7 +502,7 @@ static bool32 vrCreateSwapchain(void)
 {
     int64_t formats[256];
     uint32_t formatCount = 0, i;
-    int64_t chosen = 0;
+    int64_t chosen = 0, wanted;
     XrSwapchainCreateInfo createInfo;
 
     /* Two-call idiom: get the count first, then fetch (capped) */
@@ -507,21 +515,43 @@ static bool32 vrCreateSwapchain(void)
     VR_CHECK("xrEnumerateSwapchainFormats",
              xrEnumerateSwapchainFormats(vr.session, formatCount, &formatCount, formats));
 
-    /* Prefer a linear format: the game's output is not sRGB-encoded, and
-       copying linear pixels into an sRGB swapchain would double-correct. */
+    /* The game's pixels are already display-referred, so the swapchain has to
+       say so - see vrConfigureColorSpace. Without the write-control extension
+       an sRGB chain would double-darken instead, so fall back to linear. */
+    wanted = vr.srgbWrite ? GL_SRGB8_ALPHA8 : GL_RGBA8;
     for (i = 0; i < formatCount; i++)
     {
-        if (formats[i] == GL_RGBA8)
+        if (formats[i] == wanted)
         {
             chosen = formats[i];
             break;
         }
     }
+    if (chosen == 0 && vr.srgbWrite)
+    {
+        /* The runtime does not offer sRGB after all. The disabled write
+           conversion is a no-op against a linear target, so nothing needs
+           undoing beyond the bookkeeping. */
+        for (i = 0; i < formatCount; i++)
+        {
+            if (formats[i] == GL_RGBA8)
+            {
+                chosen = formats[i];
+                break;
+            }
+        }
+        if (chosen != 0)
+        {
+            vr.srgbWrite = FALSE;
+            SDL_Log("VR: no sRGB swapchain format offered, falling back to linear");
+        }
+    }
     if (chosen == 0 && formatCount > 0)
     {
         chosen = formats[0];
-        SDL_Log("VR: GL_RGBA8 unavailable, using swapchain format 0x%x", (unsigned)chosen);
+        SDL_Log("VR: preferred swapchain format unavailable, using 0x%x", (unsigned)chosen);
     }
+    vr.colorFormat = chosen;
 
     memset(&createInfo, 0, sizeof(createInfo));
     createInfo.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
@@ -568,7 +598,63 @@ static bool32 vrLoadRawGles(void)
         SDL_Log("VR: missing GLES symbols");
         return FALSE;
     }
+    /* Only needed to turn the sRGB write conversion off; absence costs
+       colour accuracy, not the session, so it must not fail the init. */
+    vr.rawDisable = (rawGlDisable_t)dlsym(handle, "glDisable");
+    vr.rawGetString = (rawGlGetString_t)dlsym(handle, "glGetString");
     return TRUE;
+}
+
+/*-----------------------------------------------------------------------------
+    Name        : vrConfigureColorSpace
+    Description : Decide what colour space the swapchains live in, and stop
+                  the driver from re-encoding what the game writes.
+
+        The compositor reads a swapchain according to the format it was
+        created with. A linear format (GL_RGBA8) declares "these are linear
+        light values", so the runtime gamma-encodes them on the way to the
+        display. But this engine is from 1999: its colours are already
+        display-referred, so that encode is a second one, and it lifts every
+        midtone. Measured on a Quest 3, a hull side that the shader put at
+        0.19 reached the panel at 0.45 - which flattens the sunlit/shadowed
+        split the whole art direction rests on.
+
+        The fix is to declare the truth, GL_SRGB8_ALPHA8, so the compositor
+        decodes before re-encoding and the two cancel. GLES 3.0 then wants to
+        convert on *write* into such a target - also wrong for us, for the
+        same reason - and EXT_sRGB_write_control is what turns that off. The
+        conversion also applies to glBlitFramebuffer, which is how every one
+        of our passes reaches its swapchain, so this is not optional.
+
+        No extension means no way to suppress the write conversion, so we
+        stay on the linear format: washed out beats double-dark.
+    Inputs      : none (requires a current GL context)
+    Outputs     : sets vr.srgbWrite, disables GL_FRAMEBUFFER_SRGB
+    Return      : void
+----------------------------------------------------------------------------*/
+static void vrConfigureColorSpace(void)
+{
+    unsigned char const* extensions;
+
+    vr.srgbWrite = FALSE;
+    if (vr.rawDisable == NULL || vr.rawGetString == NULL)
+    {
+        SDL_Log("VR: no glDisable/glGetString, keeping the linear swapchain");
+        return;
+    }
+    extensions = vr.rawGetString(VR_GL_EXTENSIONS);
+    if (extensions == NULL || strstr((char const*)extensions, "GL_EXT_sRGB_write_control") == NULL)
+    {
+        SDL_Log("VR: no EXT_sRGB_write_control, keeping the linear swapchain "
+                "(midtones will read bright)");
+        return;
+    }
+
+    /* Enabled by default on an ES 3.0 context - the extension exists purely
+       to let us switch it off. */
+    vr.rawDisable(VR_GL_FRAMEBUFFER_SRGB);
+    vr.srgbWrite = TRUE;
+    SDL_Log("VR: sRGB swapchains, write conversion off");
 }
 
 /*-----------------------------------------------------------------------------
@@ -1545,7 +1631,9 @@ static bool32 vrCardSwapchain(sdword index)
     createInfo.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
     createInfo.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT
                           | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
-    createInfo.format = GL_RGBA8;
+    /* Cards must share the world's colour space or the wrist panels drift
+       away from the scene they sit in front of. */
+    createInfo.format = vr.colorFormat;
     createInfo.sampleCount = 1;
     createInfo.width = card->texWidth;
     createInfo.height = card->texHeight;
@@ -3832,7 +3920,7 @@ static bool32 vrCreateStereoSwapchains(void)
     memset(&createInfo, 0, sizeof(createInfo));
     createInfo.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
     createInfo.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
-    createInfo.format = GL_RGBA8;
+    createInfo.format = vr.colorFormat;
     createInfo.sampleCount = 1;
     createInfo.width = vr.eyeWidth;
     createInfo.height = vr.eyeHeight;
@@ -4115,8 +4203,17 @@ bool32 vrInit(sdword width, sdword height)
     }
     vr.state = XR_SESSION_STATE_UNKNOWN;
 
-    if (!vrLoadRawGles() || !vrInitLoader() || !vrCreateInstance() || !vrCreateSession()
-        || !vrCreateSwapchain() || !vrCreateActions())
+    if (!vrLoadRawGles() || !vrInitLoader() || !vrCreateInstance() || !vrCreateSession())
+    {
+        vrShutdown();
+        return FALSE;
+    }
+
+    /* Between the session and the first swapchain: it decides the format
+       every swapchain is then created with. */
+    vrConfigureColorSpace();
+
+    if (!vrCreateSwapchain() || !vrCreateActions())
     {
         vrShutdown();
         return FALSE;
