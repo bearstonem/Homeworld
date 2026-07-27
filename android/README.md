@@ -91,7 +91,7 @@ data (.big files etc.) there. For the demo assets:
 DST=/sdcard/Android/data/org.gardensofkadesh.homeworld/files
 adb shell mkdir -p $DST
 adb push subprojects/demo-assets-1.05/assets/. $DST/
-adb shell chmod 775 $DST                    # only if you created it, see below
+adb shell chmod 2775 $DST                   # only if you created it, see below
 adb shell am force-stop org.gardensofkadesh.homeworld
 ```
 
@@ -102,13 +102,20 @@ Two steps there are easy to leave out, and both fail in ways that look like
 a bad install:
 
 - **`chmod` matters when that directory did not already exist.** The app
-  creates `files/` itself on first run and owns it. Before that first run it
-  is absent, and one made with `adb shell mkdir` lands mode 2770 owned by
+  creates `files/` itself on first run and owns it. Before that first run
+  neither it nor its parent exists at all (verified on a Quest 3 by
+  uninstalling and reinstalling: nothing under `Android/data/` is created at
+  install time), and one made with `adb shell mkdir` lands mode 2770 owned by
   `shell`, which the game cannot even traverse into. It starts, finds nothing
-  and quits. `chmod 775` fixes it, the same way the soundtrack directory below
-  needs it. Running the game once before copying anything is the other way
-  round the problem: the folder then exists, correctly owned, and no `chmod`
-  is needed.
+  and quits. Opening it up fixes that, and the game then reads a directory it
+  does not own quite happily. Running the game once before copying anything is
+  the other way round the problem: the folder then exists, correctly owned,
+  and no `chmod` is needed.
+- **Use `2775` rather than `775` on directories you create here.** The setgid
+  bit is what makes anything created inside afterwards inherit the
+  `ext_data_rw` group, and the game creates `SavedGames` in there itself.
+  Clearing it also breaks later `adb push` into those subdirectories, which
+  fails with `remote fchown failed: Operation not permitted`.
 - **Force-stop before relaunching.** A run that happened before the data
   landed leaves a process behind that has already given up looking for it.
   Starting from the library resumes that process and it dies immediately.

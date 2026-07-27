@@ -511,8 +511,12 @@ def install(adb, apk, edition, assets, music_dir):
         pairs = [(DEMO_ASSETS / src, dst) for src, dst in DEMO_FILES]
     if not push_tree(adb, pairs, DST):
         return False
+    # 2775, not 775: the setgid bit is what makes anything created inside
+    # later inherit the ext_data_rw group, and the app makes SavedGames in
+    # here itself. Dropping it also breaks `adb push` into those subdirectories
+    # afterwards, which fails with "remote fchown failed".
     for d in fresh:
-        adb.shell("chmod 775 %s" % d)
+        adb.shell("chmod 2775 %s" % d)
     ok("Game data copied")
 
     if music_dir:

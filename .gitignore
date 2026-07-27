@@ -63,3 +63,7 @@ windows/build/*
 # 34 MB each, and they change with every build - they would bloat the history
 # permanently. dist/README.md records their hashes.
 dist/*.apk
+
+# Python bytecode from running the installer
+__pycache__/
+*.pyc

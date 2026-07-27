@@ -77,6 +77,18 @@ rendering. The tell is a log with `pass=mono` frames and no
   projection layer. That makes it ground truth for what the player sees, and it
   gives you pixels you can measure. It is how the washed-out lighting below got
   pinned down to a number instead of being argued about.
+- **Nothing under `/sdcard/Android/data/<pkg>/` exists until the game has run
+  once.** Verified by uninstalling and reinstalling on the Quest 3: straight
+  after `adb install`, neither `files/` nor the package folder above it is
+  there. The app creates them on first run through `getExternalFilesDir`. A
+  directory made from adb instead comes out mode 2770 owned by `shell`, which
+  the app cannot traverse into, so it starts, finds no `.big` and quits with
+  nothing in the log. `chmod 2775` opens it up and the game reads it fine
+  despite not owning it (confirmed on device, saves and soundtrack included).
+  Use 2775 and not 775: the setgid bit is what carries `ext_data_rw` down to
+  the `SavedGames` folder the app makes in there later, and without it a
+  subsequent `adb push` into those subdirectories fails with `remote fchown
+  failed`. `install.py` does all of this.
 - **Two coordinate spaces that do not match, and not by a uniform factor.**
   The framebuffer is 4128x2208 but `prim2d` and the font system draw in the
   game's logical UI resolution, **1024x768** — measured from the card
