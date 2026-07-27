@@ -266,6 +266,28 @@ float dist;
 static const double TAN_FOVConstant = 1.303225;
 static const double INV_TAN_FOVConstant = 0.767327207;
 
+#ifdef HW_ENABLE_VR
+/* Distance the close-up focus settles at, as a multiple of the framing
+   NewSetFocusPoint works out. That framing solves for TAN_FOVConstant, the
+   flat game's field of view, and puts the hull just inside the edges of a
+   monitor. Through a headset the same distance is a face full of hull: the
+   real FOV is wider (vrEyeProjection substitutes the headset's own), the ship
+   is at true physical scale rather than N-LIPS-inflated, and it is a solid
+   object an arm's length away rather than a picture. Four times the distance
+   reads as leaning in to look at something rather than being inside it;
+   tuned on a Quest 3, where twice was still too close. */
+#define VR_FOCUS_CLOSEUP_SCALE 4.0f
+
+static real32 ccCloseupDistance(real32 targetDistance)
+{
+    extern bool32 vrActive(void);
+
+    return vrActive() ? targetDistance * VR_FOCUS_CLOSEUP_SCALE : targetDistance;
+}
+#else
+#define ccCloseupDistance(d) (d)
+#endif
+
 udword NewSetFocusPoint(CameraStackEntry *curentry, real32 *targetDistance)
 {
 udword numShipsFocusOn = curentry->focus.numShips;
@@ -1636,7 +1658,7 @@ void ccControl(CameraCommand *cameracommand)
          cameracommand->zoomInCloseAsPossible = FALSE;
       }
       else
-         curentry->remembercam.distance = targetDistance;
+         curentry->remembercam.distance = ccCloseupDistance(targetDistance);
     }
 
    if(!smGhostMode && (!(tutorial==TUTORIAL_ONLY) || tutEnable.bGameRunning))
@@ -1666,7 +1688,7 @@ void ccLockOnTargetNow(CameraCommand *cameracommand)
          cameracommand->zoomInCloseAsPossible = FALSE;
       }
       else
-         curentry->remembercam.distance = targetDistance;
+         curentry->remembercam.distance = ccCloseupDistance(targetDistance);
     }
 
     cameracommand->actualcamera.lookatpoint = desired->lookatpoint;
