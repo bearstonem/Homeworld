@@ -59,6 +59,14 @@ extern bool32 gameIsRunning;                                //Globals.c
 #define VRW_HAND_COUNT     2
 #define VRW_PICK_MARGIN    1.25f    /* collision sphere inflation for picking */
 #define VRW_PICK_MARGIN_MAX 150.0f  /* cap the margin so capitals stay fair */
+/* The Mothership is the one hull where the collision sphere is a bad stand-in
+   for the ship: it is long and thin, so the sphere containing it reaches far
+   out into empty space on every side. That empty space is exactly where you
+   work - docking, building, moving escorts around it - and aiming at a
+   fighter parked alongside picks the Mothership instead. Both the ring that
+   says "selected" and the sphere that decides what the ray hit are scaled by
+   this, together, so the two never disagree about how big the ship is. */
+#define VRW_MOTHERSHIP_SCALE 0.5f
 #define VRW_PICK_TIE_ANGLE  0.004f  /* aims this close in angle count as equal */
 #define VRW_PICK_STICKY_ANGLE 0.002f /* angular credit for the previous target */
 #define VRW_PICK_CONE_TAN  0.012f   /* ~0.7 degree controller selection cone */
@@ -80,7 +88,9 @@ extern bool32 gameIsRunning;                                //Globals.c
 /* Freehand path drawing */
 #define VRW_PATH_MAX_SAMPLES 64     /* raw swept points before decimation */
 #define VRW_PATH_MAX_POINTS  12     /* waypoints handed to the follower */
-#define VRW_PATH_SPLINE_STEPS 12    /* spline evaluations per raw segment */
+#define VRW_PATH_SPLINE_STEPS 16    /* spline evaluations per raw segment */
+#define VRW_PATH_SMOOTH_PASSES 2    /* [1 2 1] passes over the raw samples */
+#define VRW_PATH_KNOT_MIN   0.001f  /* floor on knot spacing, guards a div0 */
 #define VRW_PATH_LEG_TIMEOUT 45.0f  /* seconds before a stuck leg is skipped */
 
 typedef struct {
@@ -887,6 +897,13 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
            650-unit dead zone around the Mothership, which is precisely how
            a capital ship ends up swallowing its own escorts. */
         hull = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
+
+        if (obj->objtype == OBJ_ShipType
+            && ((Ship*)obj)->shiptype == Mothership)
+        {
+            hull *= VRW_MOTHERSHIP_SCALE;               //see the constant
+        }
+
         margin = hull * (VRW_PICK_MARGIN - 1.0f);
         if (margin > VRW_PICK_MARGIN_MAX)
         {
@@ -1748,20 +1765,85 @@ static real32 vrwDistance(vector const* a, vector const* b)
     return fsqrt(vecMagnitudeSquared(d));
 }
 
-/* Catmull-Rom through p1..p2, with p0/p3 setting the tangents */
+static void vrwLerp(vector* out, vector const* a, vector const* b, real32 s)
+{
+    out->x = a->x + (b->x - a->x) * s;
+    out->y = a->y + (b->y - a->y) * s;
+    out->z = a->z + (b->z - a->z) * s;
+}
+
+/* Centripetal Catmull-Rom through p1..p2, with p0/p3 setting the tangents.
+
+   The uniform form this replaced spaces its knots evenly no matter how far
+   apart the points actually are. A hand that slows through a turn and speeds
+   up out of it lays down a short segment next to a long one, and uniform
+   knots answer that with an overshoot: the curve bulges past the point it is
+   meant to pass through, and where the stroke doubles back it ties a small
+   loop. Both read as the path "wobbling" rather than curving.
+
+   Spacing the knots by the square root of chord length (alpha = 0.5, the
+   centripetal case) is the standard cure and is provably free of cusps and
+   self-intersections, whatever the sampling does. Evaluated with the
+   Barry-Goldman pyramid, which stays well behaved as intervals get small. */
 static void vrwSpline(vector const* p0, vector const* p1, vector const* p2,
                       vector const* p3, real32 t, vector* out)
 {
-    real32 t2 = t * t;
-    real32 t3 = t2 * t;
-    real32 a = -0.5f * t3 +  1.0f * t2 - 0.5f * t;
-    real32 b =  1.5f * t3 -  2.5f * t2            + 1.0f;
-    real32 c = -1.5f * t3 +  2.0f * t2 + 0.5f * t;
-    real32 d =  0.5f * t3 -  0.5f * t2;
+    real32 t0, t1, t2, t3, tt;
+    vector a1, a2, a3, b1, b2;
 
-    out->x = a * p0->x + b * p1->x + c * p2->x + d * p3->x;
-    out->y = a * p0->y + b * p1->y + c * p2->y + d * p3->y;
-    out->z = a * p0->z + b * p1->z + c * p2->z + d * p3->z;
+    /* knot spacing: sqrt of chord length, floored so coincident samples
+       cannot divide by zero */
+    t0 = 0.0f;
+    t1 = t0 + fsqrt(vrwDistance(p0, p1));
+    t2 = t1 + fsqrt(vrwDistance(p1, p2));
+    t3 = t2 + fsqrt(vrwDistance(p2, p3));
+    if (t1 - t0 < VRW_PATH_KNOT_MIN) t1 = t0 + VRW_PATH_KNOT_MIN;
+    if (t2 - t1 < VRW_PATH_KNOT_MIN) t2 = t1 + VRW_PATH_KNOT_MIN;
+    if (t3 - t2 < VRW_PATH_KNOT_MIN) t3 = t2 + VRW_PATH_KNOT_MIN;
+
+    tt = t1 + t * (t2 - t1);
+
+    vrwLerp(&a1, p0, p1, (tt - t0) / (t1 - t0));
+    vrwLerp(&a2, p1, p2, (tt - t1) / (t2 - t1));
+    vrwLerp(&a3, p2, p3, (tt - t2) / (t3 - t2));
+    vrwLerp(&b1, &a1, &a2, (tt - t0) / (t2 - t0));
+    vrwLerp(&b2, &a2, &a3, (tt - t1) / (t3 - t1));
+    vrwLerp(out, &b1, &b2, (tt - t1) / (t2 - t1));
+}
+
+/* Hand tremor rides on the samples at a far higher frequency than the shape
+   being drawn, and an interpolating spline is obliged to reproduce every
+   wobble of it faithfully. A couple of [1 2 1] passes first, with the ends
+   pinned so the stroke still starts and finishes exactly where the hand did,
+   means the spline draws the stroke that was intended. */
+static void vrwPathSmoothSamples(void)
+{
+    vector smoothed[VRW_PATH_MAX_SAMPLES];
+    sdword i, pass;
+
+    if (vrw.pathSampleCount < 3)
+    {
+        return;
+    }
+    for (pass = 0; pass < VRW_PATH_SMOOTH_PASSES; pass++)
+    {
+        smoothed[0] = vrw.pathSample[0];
+        smoothed[vrw.pathSampleCount - 1] = vrw.pathSample[vrw.pathSampleCount - 1];
+        for (i = 1; i + 1 < vrw.pathSampleCount; i++)
+        {
+            smoothed[i].x = (vrw.pathSample[i - 1].x
+                             + 2.0f * vrw.pathSample[i].x
+                             + vrw.pathSample[i + 1].x) * 0.25f;
+            smoothed[i].y = (vrw.pathSample[i - 1].y
+                             + 2.0f * vrw.pathSample[i].y
+                             + vrw.pathSample[i + 1].y) * 0.25f;
+            smoothed[i].z = (vrw.pathSample[i - 1].z
+                             + 2.0f * vrw.pathSample[i].z
+                             + vrw.pathSample[i + 1].z) * 0.25f;
+        }
+        memcpy(vrw.pathSample, smoothed,
+               sizeof(vector) * (size_t)vrw.pathSampleCount);
+    }
 }
 
 /* Point at parameter t within raw segment index, ends clamped */
@@ -1850,6 +1932,8 @@ bool32 vrWorldPathFinishStroke(void)
                 (int)vrw.pathSampleCount);
         return FALSE;
     }
+
+    vrwPathSmoothSamples();
 
     previous = vrw.pathSample[0];
     for (segment = 0; segment + 1 < vrw.pathSampleCount; segment++)
@@ -2337,8 +2421,16 @@ void vrWorldDrawOverlays(void)
     {
         Ship* ship = selSelected.ShipPtr[i];
 
+        real32 ringScale = 1.1f;
+
+        if (ship->shiptype == Mothership)
+        {
+            ringScale *= VRW_MOTHERSHIP_SCALE;          //see the constant
+        }
+
         primCircleOutline3(&ship->collInfo.collPosition,
-                           ship->staticinfo->staticheader.staticCollInfo.collspheresize * 1.1f,
+                           ship->staticinfo->staticheader.staticCollInfo.collspheresize
+                               * ringScale,
                            24, 0, selColor, Z_AXIS);
     }
 
