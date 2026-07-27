@@ -525,15 +525,29 @@ def install(adb, apk, edition, assets, music_dir):
         info("%d tracks, %.0f MB - this takes a moment"
              % (len(tracks), sum(t.stat().st_size for t in tracks) / 1e6))
         adb.shell("mkdir -p %s/music" % DST)
+        # Every push is checked. These can fail as a group while looking fine
+        # (a destination directory that lost its ext_data_rw group refuses the
+        # ownership change adb does as it copies, so all of them come back
+        # "remote fchown failed"), and the game says nothing about it either:
+        # rmMusicHasTrack gates each override, so a missing set just plays the
+        # original .wxd score. Reporting success here would bury both.
+        failed = []
         for t in tracks:
-            adb.push(t, "%s/music/%s" % (DST, t.name))
+            cp = adb.push(t, "%s/music/%s" % (DST, t.name))
+            if cp.returncode != 0:
+                failed.append((cp.stderr or cp.stdout).strip())
         # chmod AFTER pushing: adb sets ownership as it copies, and doing this
         # first makes the push fail with "remote fchown failed". A directory
         # made by adb is mode 2770 owned by shell, which grants the game
         # nothing - it cannot even traverse in, and simply plays the original
         # music with no error.
         adb.shell("chmod -R 775 %s/music" % DST)
-        ok("Soundtrack copied")
+        if failed:
+            err("%d of %d tracks did not copy: %s"
+                % (len(failed), len(tracks), failed[0]))
+            warn("The game will run, playing its original music instead.")
+        else:
+            ok("Soundtrack copied")
 
     # If the game was ever started before its data landed, that process is
     # still around having already given up looking for it. Launching from the
