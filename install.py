@@ -27,7 +27,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
 PKG = "org.gardensofkadesh.homeworld"
-DST = "/sdcard/Android/data/%s/files" % PKG
+DATA = "/sdcard/Android/data/%s" % PKG
+DST = "%s/files" % DATA
 APK = REPO / "android/project/app/build/outputs/apk/vr/debug/app-vr-debug.apk"
 # Prebuilt APKs, one per edition. Which edition an APK is cannot be detected
 # from the outside - it is compiled in - so they are kept as separate files
@@ -462,9 +463,12 @@ def build_apk(edition):
 
 
 # ---------------------------------------------------------------- install ---
+def dir_exists(adb, path):
+    return "yes" in (adb.shell("[ -d %s ] && echo yes" % path).stdout or "")
+
+
 def push_tree(adb, pairs, dest_dir):
     """pairs: list of (local Path, remote filename)."""
-    adb.shell("mkdir -p %s" % dest_dir)
     for src, name in pairs:
         size = src.stat().st_size / 1e6
         info("  %-18s %6.1f MB" % (name, size))
@@ -484,6 +488,18 @@ def install(adb, apk, edition, assets, music_dir):
         return False
     ok("App installed")
 
+    # The app makes its own data folder on first run and owns it. Install and
+    # copy without ever starting the game and the folder is simply not there
+    # yet. One made from here lands mode 2770 owned by shell, which grants the
+    # game nothing: it starts, cannot even traverse in to look for the .big
+    # files, and quits. So note which levels we had to create and open those
+    # up once the copying is done, exactly as the soundtrack folder is handled
+    # below. Nothing is chmodded that the app already owns, since shell cannot
+    # chmod those anyway.
+    fresh = [d for d in (DATA, DST) if not dir_exists(adb, d)]
+    if fresh:
+        adb.shell("mkdir -p %s" % DST)
+
     # Clear whichever edition's files would shadow this one.
     stale = STALE_FOR_FULL if edition == "f" else STALE_FOR_DEMO
     adb.shell("cd %s && rm -f %s" % (DST, " ".join(stale)))
@@ -495,6 +511,8 @@ def install(adb, apk, edition, assets, music_dir):
         pairs = [(DEMO_ASSETS / src, dst) for src, dst in DEMO_FILES]
     if not push_tree(adb, pairs, DST):
         return False
+    for d in fresh:
+        adb.shell("chmod 775 %s" % d)
     ok("Game data copied")
 
     if music_dir:
@@ -512,6 +530,12 @@ def install(adb, apk, edition, assets, music_dir):
         # music with no error.
         adb.shell("chmod -R 775 %s/music" % DST)
         ok("Soundtrack copied")
+
+    # If the game was ever started before its data landed, that process is
+    # still around having already given up looking for it. Launching from the
+    # library resumes that one and it dies immediately, which reads as "the
+    # install did not work". The next start has to be a fresh process.
+    adb.shell("am force-stop %s" % PKG)
 
     return True
 

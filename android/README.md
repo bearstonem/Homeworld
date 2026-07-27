@@ -88,13 +88,33 @@ The game runs out of its external-storage directory and expects the game
 data (.big files etc.) there. For the demo assets:
 
 ```sh
-adb shell mkdir -p /sdcard/Android/data/org.gardensofkadesh.homeworld/files
-adb push subprojects/demo-assets-1.05/assets/. \
-    /sdcard/Android/data/org.gardensofkadesh.homeworld/files/
+DST=/sdcard/Android/data/org.gardensofkadesh.homeworld/files
+adb shell mkdir -p $DST
+adb push subprojects/demo-assets-1.05/assets/. $DST/
+adb shell chmod 775 $DST                    # only if you created it, see below
+adb shell am force-stop org.gardensofkadesh.homeworld
 ```
 
 (For the full game, build with `-Ddemo=false` and push the original
 Homeworld data files instead.)
+
+Two steps there are easy to leave out, and both fail in ways that look like
+a bad install:
+
+- **`chmod` matters when that directory did not already exist.** The app
+  creates `files/` itself on first run and owns it. Before that first run it
+  is absent, and one made with `adb shell mkdir` lands mode 2770 owned by
+  `shell`, which the game cannot even traverse into. It starts, finds nothing
+  and quits. `chmod 775` fixes it, the same way the soundtrack directory below
+  needs it. Running the game once before copying anything is the other way
+  round the problem: the folder then exists, correctly owned, and no `chmod`
+  is needed.
+- **Force-stop before relaunching.** A run that happened before the data
+  landed leaves a process behind that has already given up looking for it.
+  Starting from the library resumes that process and it dies immediately.
+
+`install.py` at the repository root does all of this, including both steps
+above.
 
 Settings, saves and screenshots are written to the same directory.
 

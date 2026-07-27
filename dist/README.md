@@ -15,6 +15,14 @@ Built from `8807ae2` on 2026-07-27.
   0.174 and roughly doubled hull contrast. These APKs look considerably darker
   than the previous ones. That is how the game is supposed to look. Details in
   `VR_PORT_HANDOFF.md`.
+- **Copying the game data across is less fiddly.** The app creates its own
+  `files/` folder the first time the game runs, so it isn't there yet if you
+  install and copy without ever starting it, and a folder made from `adb shell
+  mkdir` comes out mode 2770 owned by `shell` where the game cannot read it.
+  `install.py` now creates it when missing, opens up the permissions on
+  anything it had to create, and force-stops the app afterwards so the next
+  launch picks up the new data instead of resuming a process that already gave
+  up looking for it.
 
 Pick ONE - the demo/full choice is compiled in, not detected at runtime.
 Installing the wrong one fails at startup with
