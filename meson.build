@@ -136,6 +136,12 @@ elif host_machine.system() == 'emscripten'
 	c_base_args += ['-D_LINUX_FIX_ME', '-D_GNU_SOURCE']
 elif host_machine.system() == 'android'
 	c_base_args += ['-D_LINUX_FIX_ME', '-D_GNU_SOURCE']
+	# The crash handler in main.c logs through liblog directly, and it is
+	# guarded by __ANDROID__ rather than HW_ENABLE_VR, so every Android build
+	# needs this and not just the VR one. The vr block below used to be the
+	# only place that asked for it, which left the flat Android builds
+	# failing to link on __android_log_print.
+	base_deps += [meson.get_compiler('c').find_library('log')]
 endif
 
 if get_option('gles')
@@ -160,7 +166,6 @@ if get_option('vr')
 		cc.find_library('EGL'),
 		cc.find_library('GLESv2'),
 		cc.find_library('dl'),
-		cc.find_library('log'),
 		cc.find_library('android'),
 	]
 	c_base_args += [
