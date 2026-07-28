@@ -7,7 +7,6 @@
 =============================================================================*/
 
 #include "SpeechEvent.h"
-#include "rmmusic.h"
 
 //#include "bink.h"
 #include "Blobs.h"
@@ -2673,23 +2672,6 @@ sdword musicEventPlay(sdword tracknum)
             levelTrack = tracknum;
         }
 
-        /* A converted remastered track takes precedence over the .wxd
-           stream. Ambient and battle cues loop; NIS and animatic cues play
-           once and stop themselves. musicinfo is still updated so
-           musicEventCurrentTrack and the next/previous controls keep
-           answering correctly. */
-        if (rmMusicHasTrack(tracknum))
-        {
-            bool32 loops = (tracknum >= MUS_FIRST_AMBIENT)
-                        && (tracknum <= MUS_LAST_BATTLE);
-            sdword which = loops ? AMBIENTSTREAM : NISSTREAM;
-
-            rmMusicPlay(tracknum, loops, MUSIC_FADE_FAST);
-            musicinfo[which].tracknum = tracknum;
-            musicinfo[which].status   = SOUND_PLAYING;
-            return (SOUND_OK);
-        }
-
         if ((tracknum >= MUS_FIRST_AMBIENT) && (tracknum <= MUS_LAST_BATTLE))
         {
             pinfo = &musicinfo[AMBIENTSTREAM];
@@ -2768,21 +2750,6 @@ sdword musicEventStop(sdword tracknum, real32 fadetime)
 {
     if (enableSpeech)
     {
-        if (rmMusicPlaying())
-        {
-            sdword playing = rmMusicCurrentTrack();
-
-            rmMusicStop(fadetime);
-            if (musicinfo[AMBIENTSTREAM].tracknum == playing)
-            {
-                musicinfo[AMBIENTSTREAM].status = SOUND_STOPPED;
-            }
-            if (musicinfo[NISSTREAM].tracknum == playing)
-            {
-                musicinfo[NISSTREAM].status = SOUND_STOPPED;
-            }
-            return (SOUND_OK);
-        }
         if (tracknum == SOUND_DEFAULT)
         {
             if ((musicinfo[AMBIENTSTREAM].status == SOUND_PLAYING) || (musicinfo[AMBIENTSTREAM].status == SOUND_STARTING))

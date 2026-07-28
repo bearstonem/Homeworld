@@ -13,7 +13,6 @@
 #include "fquant.h"
 #include "soundcmn.h"
 #include "soundlow.h"
-#include "rmmusic.h"
 #include "Debug.h"
 #include "SoundStructs.h"
 #include "Randy.h"
@@ -884,10 +883,6 @@ void soundfeedercb(void *userdata, Uint8 *stream, int len)
 	memset(stream, 0, len);
 	if (mixer.status >= SOUND_PLAYING) {
 		isoundmixerqueueSDL(stream, len);
-		/* Remastered music rides on top of the game's own mix. It is a
-		   separate PCM source rather than an FQ stream, so it cannot go
-		   through isoundmixerqueueSDL - see rmmusic.c. */
-		rmMusicMix(stream, (sdword)len);
 	}
 	else {
 		memset(stream, 0, len);
