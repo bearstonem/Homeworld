@@ -829,17 +829,24 @@ void versionNumDraw(featom *atom, regionhandle region)
     rectangle pos=region->rect;
     sdword fontheight;
     fonthandle oldfont;
-    char versionstr[70];
+    char versionstr[100];
 
     primRectSolid2(&region->rect, colBlack);
 
     strcpy(versionstr, strGetString(strVersion));
     strcat(versionstr, " ");
+#ifdef HW_ENABLE_VR
+    /* The VR port's version first, since that is the one a player of this
+       build is actually running; the engine version it sits on follows. */
+    strcat(versionstr, "Unbound ");
+    strcat(versionstr, HW_UNBOUND_VERSION);
+    strcat(versionstr, " / ");
+#endif
     strcat(versionstr, networkVersion);
     strcat(versionstr, ".");
     strcat(versionstr, minorBuildVersion);
 
-    dbgAssertOrIgnore(strlen(versionstr) < 70);
+    dbgAssertOrIgnore(strlen(versionstr) < 100);
 
     oldfont = fontMakeCurrent(selGroupFont2);
     fontheight = fontHeight(" ");

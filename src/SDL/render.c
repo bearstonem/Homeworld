@@ -4037,6 +4037,19 @@ DEFINE_TASK(rndRenderTask)
             fontMakeCurrent(selGroupFont2);
         	fontPrint(MAIN_WindowWidth - fontWidth(minorBuildVersion) - 2, MAIN_WindowHeight - fontHeight(" ") - 2, colWhite, minorBuildVersion);
             fontPrint(MAIN_WindowWidth - fontWidth(networkVersion) - fontWidth(minorBuildVersion) - 8, MAIN_WindowHeight - fontHeight(" ") - 2, colWhite, networkVersion);
+#ifdef HW_ENABLE_VR
+            {
+                /* Left of the engine's own pair, so the reading order is the
+                   port's version then the engine it is built on. */
+                char unbound[32] = "Unbound " HW_UNBOUND_VERSION;
+
+                fontPrint(MAIN_WindowWidth - fontWidth(unbound)
+                          - fontWidth(networkVersion)
+                          - fontWidth(minorBuildVersion) - 16,
+                          MAIN_WindowHeight - fontHeight(" ") - 2,
+                          colWhite, unbound);
+            }
+#endif
         }
 
         //take a screenshot or sequence thereof
