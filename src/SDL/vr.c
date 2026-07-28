@@ -145,6 +145,7 @@ extern SDL_Window *sdlwindow;
 #include "render.h"
 #include "Select.h"
 #include "ShipSelect.h"
+#include "HorseRace.h"
 #include "Universe.h"
 extern void rndMainViewRenderFunction(Camera *camera);
 extern Camera *mrCamera;
@@ -4240,7 +4241,21 @@ static bool32 vrRenderEyes(XrTime displayTime)
 
     static bool32 stereoFailed = FALSE;
 
-    if (!gameIsRunning || mrCamera == NULL || !vr.quadPlaced || stereoFailed)
+    /* hrRunning: the loading bar is up, which means a level is being loaded.
+       That matters here because vrFrame is driven from rndFlush, and the bar
+       calls rndFlush every time it advances - so without this the stereo
+       world is rendered from inside singlePlayerLoadNewLevel, while
+       trRegistryRefresh is midway through tearing down and reloading every
+       texture. meshObjectRender then asks for one that no longer exists and
+       trNoPalMakeCurrent dereferences it. That is a hard crash on the
+       hyperspace jump out of any mission, and it took a symbolised backtrace
+       to see, because the faulting frame is fifteen deep and in the renderer
+       rather than anywhere near the VR code that caused it.
+
+       Nothing is lost by skipping it: there is no coherent world to draw
+       during a load, and the UI quad still carries the loading bar. */
+    if (!gameIsRunning || mrCamera == NULL || !vr.quadPlaced || stereoFailed
+        || hrRunning)
     {
         return FALSE;
     }
