@@ -2276,6 +2276,11 @@ sdword vrWorldPathPointCount(void)
     return vrw.pathCount;
 }
 
+bool32 vrWorldPathPending(void)
+{
+    return vrw.pathCount > 0 && !vrw.pathActive;
+}
+
 /* How far along the curve the fleet has actually got. Searched forward only,
    and only within a window a couple of leads wide: nearest-point over the
    whole remaining curve would let a stroke that doubles back teleport the
@@ -2311,6 +2316,35 @@ static void vrwPathAdvance(vector const* centre)
     {
         vrw.pathProgress = (real32)best * vrw.pathSpacing;
     }
+}
+
+/* Has something else given these ships orders? A fresh order of any kind
+   supersedes the route: the player pointing somewhere new means it, and going
+   on steering would drag the fleet back a tick later. This catches the orders
+   that never pass through here at all - the Sensors map's own move, the
+   wheel's Halt and Dock, a mission script - as well as the ones that do.
+
+   A missing command is not a takeover. It is what arriving looks like, and the
+   follower's job at that point is to push the group on to the next stretch. */
+static bool32 vrwPathTakenOver(void)
+{
+    CommandToDo* command =
+        IsSelectionAlreadyDoingSomething(&universe.mainCommandLayer,
+                                         (SelectCommand*)&vrw.pathSelection);
+
+    if (command == NULL)
+    {
+        return FALSE;
+    }
+    if (command->ordertype.order != COMMAND_MOVE)
+    {
+        return TRUE;                    //attack, halt, dock, harvest...
+    }
+    /* A move destination that is not the one we last wrote. Compared with a
+       tolerance rather than exactly: in a network game it has been through a
+       packet, and the carrot never moves this far in a single tick anyway. */
+    return vrwDistance(&command->move.destination, &vrw.pathIssued)
+         > vrw.pathArrive;
 }
 
 /* Point the fleet's existing move command at a new destination without
@@ -2401,6 +2435,16 @@ static void vrwPathFollow(void)
         return;
     }
     vecDivideByScalar(centre, (real32)alive, invAlive);
+
+    if (vrwPathTakenOver())
+    {
+        SDL_Log("VR: path released at %.0f/%.0f, the fleet has new orders",
+                vrw.pathProgress, vrw.pathLength);
+        vrw.pathActive = FALSE;
+        vrw.pathCount = 0;
+        vrw.pathSelection.numShips = 0;
+        return;
+    }
 
     vrwPathAdvance(&centre);
 
@@ -2674,6 +2718,28 @@ void vrWorldDrawOverlays(void)
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadMatrixf((GLfloat const*)&rndCameraMatrix);
+
+    /* The one pair of numbers that settles where a misplaced ray comes from.
+       Overlays are drawn with whatever rndCameraMatrix holds at this instant,
+       while ray->origin was placed with lookatInv - and the two only cancel
+       if this matrix really is (eye view * the captured game lookat).
+
+       Read the translation. Composed with the game lookat it is game-scale,
+       tens of thousands of units. A bare eye view is head-scale, a metre or
+       two: that would mean the world was never drawn this pass and the rays
+       are being drawn in head space, which is exactly what "stuck to my head"
+       looks like. */
+    if (vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
+    {
+        real32 const* m = (real32 const*)&rndCameraMatrix;
+
+        SDL_Log("VRDBG OVERLAY frame=%u drawMatrix row0=(%.3f %.3f %.3f) "
+                "t=(%.1f %.1f %.1f) |t|=%.1f manager=%s",
+                (unsigned)vrw.debugFrame, m[0], m[4], m[8],
+                m[12], m[13], m[14],
+                fsqrt(m[12] * m[12] + m[13] * m[13] + m[14] * m[14]),
+                vrWorldManagerName());
+    }
     glDisable(GL_LIGHTING);
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_FOG);

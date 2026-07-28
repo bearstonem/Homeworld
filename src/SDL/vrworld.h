@@ -144,6 +144,12 @@ bool32 vrWorldPathDrawing(void);
 bool32 vrWorldPathActive(void);         /* a committed path is being flown */
 sdword vrWorldPathPointCount(void);
 
+/* A stroke has been drawn and is waiting to be committed. NOT the same as
+   "there are points": a path keeps its points for as long as it is being
+   flown, so asking that instead makes releasing the order button re-commit
+   the curve already in the air rather than issuing the move just aimed. */
+bool32 vrWorldPathPending(void);
+
 /* Camera manipulation (grab gestures). Deltas in LOCAL metres / radians;
    conversion to game units happens inside. Returns the residual fraction
    the camera clamps refused (0 = fully applied), for folding into the

@@ -2491,11 +2491,43 @@ void rndMainViewRenderFunction(Camera *camera)
 
         //hand the VR layer the pure main-view camera while it still is one:
         //ShipView and the sensors manager overwrite rndCameraMatrix with
-        //their own cameras later in the frame, and the eye passes compose
-        //the head pose into it
+        //their own cameras later in the frame
         if (!vrEyePassActive())
         {
             vrWorldCaptureGameCamera((real32 const*)&rndCameraMatrix);
+        }
+        else
+        {
+            //An eye pass has to keep the capture current too, because a
+            //full-screen manager suppresses the mono pass entirely - and
+            //without a capture the hands stay pinned to whatever camera was
+            //current when the manager opened while the world goes on moving,
+            //so the rays visibly drift off the controllers.
+            //
+            //rndCameraMatrix is no use here: it carries the head pose, which
+            //every rgluLookAt folds in through vrEyeApplyView during an eye
+            //pass. So the rebuild has to suspend that as well as reload the
+            //identity - capture the head by accident and it cancels against
+            //the render, leaving the hands welded to the face rather than
+            //tracking the controllers. The camera argument is always the main
+            //one: ShipView and Sensors do not come through this function,
+            //they overwrite the global afterwards.
+            real32 pureLookAt[16];
+            bool32 wasSuspended = vrEyeViewSuspend();
+
+            glPushMatrix();
+            glLoadIdentity();
+            rgluLookAt(camera->eyeposition.x + scaledOffset[2],
+                       camera->eyeposition.y + scaledOffset[0],
+                       camera->eyeposition.z + scaledOffset[1],
+                       camera->lookatpoint.x, camera->lookatpoint.y,
+                       camera->lookatpoint.z,
+                       camera->upvector.x, camera->upvector.y,
+                       camera->upvector.z);
+            glGetFloatv(GL_MODELVIEW_MATRIX, (GLfloat *)pureLookAt);
+            glPopMatrix();
+            vrEyeViewResume(wasSuspended);
+            vrWorldCaptureGameCamera((real32 const*)pureLookAt);
         }
         vrDebugRenderPass((real32 const*)&rndCameraMatrix,
                           (real32 const*)&rndProjectionMatrix, eye, lookat);

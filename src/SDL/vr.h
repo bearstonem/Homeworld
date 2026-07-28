@@ -46,6 +46,11 @@ void vrEyeApplyView(void);
    (AutoLOD polygon counts etc.) must only accumulate in the mono pass. */
 bool32 vrEyePassActive(void);
 
+/* Keep the head out of the next rgluLookAt, for code that needs the game
+   camera on its own. Restore with the value Suspend returned. */
+bool32 vrEyeViewSuspend(void);
+void   vrEyeViewResume(bool32 previous);
+
 /* Diagnostic hooks used by render.c.  They are deliberately cheap outside
    the periodic VRDBG sample frame. */
 void vrDebugRenderPass(real32 const view[16], real32 const projection[16],

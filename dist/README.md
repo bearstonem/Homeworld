@@ -33,7 +33,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-4ddfe8762eb78a849c7699767d2d23f7  homeworld-unbound-vr.apk  98M
+6b19a23059d002d11c4a763c548af34c  homeworld-unbound-vr.apk  98M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine

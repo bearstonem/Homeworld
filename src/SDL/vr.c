@@ -93,8 +93,8 @@
 #define VR_CARD_CONTROLS_WIN_W   330    /* layout size, logical UI pixels */
 #define VR_CARD_CONTROLS_WIN_H   580    /* the attack section costs four rows */
 #define VR_CARD_CONTROLS_WIDTH   0.24f  /* physical width, metres */
-#define VR_CARD_STATUS_WIN_W     300
-#define VR_CARD_STATUS_WIN_H     200
+#define VR_CARD_STATUS_WIN_W     340    /* wider: objectives are sentences */
+#define VR_CARD_STATUS_WIN_H     320
 #define VR_CARD_STATUS_WIDTH     0.22f
 #define VR_CARD_GAP              0.02f  /* metres between panel and card */
 #define VR_CARD_CONTROLS_SIDE   -1.0f   /* which side of the wrist panel */
@@ -138,7 +138,9 @@ extern SDL_Window *sdlwindow;
 #include "Camera.h"
 #include "font.h"
 #include "FontReg.h"
+#include "Globals.h"
 #include "main.h"
+#include "Objectives.h"
 #include "prim2d.h"
 #include "render.h"
 #include "Select.h"
@@ -204,6 +206,7 @@ typedef struct {
     XrSwapchainImageOpenGLESKHR eyeImages[VR_EYE_COUNT][VR_MAX_SWAPCHAIN_IMAGES];
     sdword       eyeWidth, eyeHeight;
     bool32       eyeActive;         /* inside a per-eye world render pass */
+    bool32       eyeViewSuspended;  /* rebuilding a lookat without the head */
     XrFovf       eyeFov;
     real32       eyeViewMatrix[16];
     XrCompositionLayerProjectionView projViews[VR_EYE_COUNT];
@@ -1702,6 +1705,49 @@ static void vrCardRow(sdword x, sdword y, sdword width, char const* label,
     }
 }
 
+/* Print text broken at spaces to fit a pixel width, stopping at maxY, and
+   return the y below the last line drawn. Measured with fontWidthN over the
+   very run fontPrintN then prints, so the break cannot disagree with the
+   glyphs. A word longer than the width degrades to one character per line
+   rather than looping. */
+static sdword vrCardWrapped(sdword x, sdword y, sdword width,
+                            sdword lineHeight, color c, char const* text,
+                            sdword maxY)
+{
+    sdword len = text != NULL ? (sdword)strlen(text) : 0;
+    sdword start = 0;
+
+    while (start < len && y + lineHeight <= maxY)
+    {
+        sdword fit = len - start;
+        sdword brk;
+
+        while (fit > 1 && fontWidthN((char*)text + start, fit) > width)
+        {
+            fit--;
+        }
+        if (start + fit < len)
+        {
+            for (brk = fit; brk > 1; brk--)
+            {
+                if (text[start + brk] == ' ')
+                {
+                    fit = brk;
+                    break;
+                }
+            }
+        }
+        fontPrintN(x, y, c, (char*)text + start, fit);
+        y += lineHeight;
+        start += fit;
+        while (start < len && text[start] == ' ')
+        {
+            start++;
+        }
+    }
+    return y;
+}
+
 static void vrCardDrawControls(vrcard const* card)
 {
     /* Grouped by hand rather than by verb. Which hand does what is the one
@@ -2229,6 +2275,42 @@ static void vrCardDrawStatus(vrcard const* card)
         y += lineHeight / 3;
         sprintf(text, "%d", (int)vrWorldCursorDist());
         vrCardRow(inner, y, width, "order depth", text, active, active);
+        y += lineHeight;
+    }
+
+    /* Mission objectives. Homeworld shows these in a task bar list that
+       shares one slot with the Hyperspace button - see tbSetupHyperspace -
+       so on any mission where the player can hyperspace they are scrolled
+       off entirely and there is no way to read them at all. The right wrist
+       is always up and owns nothing else, so they live here instead. */
+    if (singlePlayerGame && objectivesUsed > 0 && objectives != NULL)
+    {
+        color const done = colRGB(120, 255, 170);
+        color const secondary = colRGB(150, 165, 180);
+        sdword const maxY = card->winHeight - inner;
+        sdword const mark = fontWidth("[x] ");
+        sdword i;
+
+        y += lineHeight / 2;
+        fontPrint(inner, y, heading, "OBJECTIVES");
+        y += lineHeight + lineHeight / 3;
+
+        for (i = 0; i < objectivesUsed && y + lineHeight <= maxY; i++)
+        {
+            Objective const* objective = objectives[i];
+            color c;
+
+            if (objective == NULL || objective->description == NULL)
+            {
+                continue;
+            }
+            c = objective->status ? done
+              : (objective->primary ? label : secondary);
+            fontPrint(inner, y, c, objective->status ? "[x]" : "[ ]");
+            y = vrCardWrapped(inner + mark, y, width - mark, lineHeight, c,
+                              objective->description, maxY);
+            y += lineHeight / 4;
+        }
     }
 }
 
@@ -3320,7 +3402,11 @@ static void vrUpdateInput(XrTime time)
                 {
                     vrWorldPathFinishStroke();
                 }
-                if (vrWorldPathPointCount() > 0)
+                /* Pending, not merely present: a path that is already being
+                   flown still has all its points, and asking for those would
+                   re-commit the curve in the air instead of issuing the move
+                   the player just aimed. */
+                if (vrWorldPathPending())
                 {
                     vrWorldMoveCancel();
                     issued = vrWorldPathCommit();
@@ -3923,10 +4009,29 @@ bool32 vrEyeProjection(real32 zNear, real32 zFar)
 
 void vrEyeApplyView(void)
 {
-    if (vr.eyeActive)
+    if (vr.eyeActive && !vr.eyeViewSuspended)
     {
         glMultMatrixf(vr.eyeViewMatrix);
     }
+}
+
+/* Take the head back out of the next rgluLookAt. Every rgluLookAt in an eye
+   pass multiplies the eye view in through vrEyeApplyView, which is how the
+   head reaches the world at all - but it means anything wanting the game
+   camera ON ITS OWN, such as the capture that places the hands, gets the head
+   folded in and then cancels it against the render. That leaves the hands
+   welded to the face. Wrap such a rebuild in these. */
+bool32 vrEyeViewSuspend(void)
+{
+    bool32 was = vr.eyeViewSuspended;
+
+    vr.eyeViewSuspended = TRUE;
+    return was;
+}
+
+void vrEyeViewResume(bool32 previous)
+{
+    vr.eyeViewSuspended = previous;
 }
 
 bool32 vrEyePassActive(void)

@@ -32,6 +32,13 @@ Objective;
 
 extern LinkedList poFleetIntelligence;
 
+// The objective list itself. Homeworld only ever reads it through the task
+// bar, which is why it was never declared here; the VR build shows it on the
+// right wrist instead, because the task bar's list shares a slot with the
+// Hyperspace button and is scrolled away on any mission that has one.
+extern Objective **objectives;
+extern sdword objectivesUsed;
+
 void poPlayerObjectivesBegin(regionhandle region);
 void poClose(char *string, featom *atom);
 
