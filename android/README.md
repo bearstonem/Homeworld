@@ -2,14 +2,16 @@
 
 > **Just want it on your headset?** Run `python3 install.py` from the
 > repository root (`py install.py` on Windows). It walks through connecting
-> the headset over USB or wirelessly, choosing the demo or the full game,
-> finding your Homeworld data, building if it can, and copying everything
-> across. The rest of this file is the manual route and the details behind it.
+> the headset over USB or wirelessly, building if it can, and finding and
+> copying your Homeworld data if you own the game. The rest of this file is
+> the manual route and the details behind it.
 >
-> Note the demo/full choice is a **compile-time** switch (`-Ddemo`), not a
-> runtime one: a full-game build looks for `Homeworld.big` and stops with
-> "Unable to open required .big file" if it is absent. The installer keeps the
-> two in step; if you build by hand, pick the right one.
+> The demo/full choice is a **compile-time** switch (`-Ddemo`), not a runtime
+> one: a full-game build looks for `Homeworld.big` and stops with "Unable to
+> open required .big file" if it is absent. The VR APK gets around that by
+> carrying both builds and choosing at launch — see
+> [One APK, both campaigns](#one-apk-both-campaigns) below. The flat Android
+> build is still one edition at a time.
 
 The VR flavour ships under the name **Homeworld: Unbound** — that is the label
 you will see in the Quest library. The name lives in
@@ -85,7 +87,14 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
 The game runs out of its external-storage directory and expects the game
-data (.big files etc.) there. For the demo assets:
+data (.big files etc.) there.
+
+**This step is for the flat build.** The VR APK carries the demo assets and
+unpacks them itself on first run, so it needs nothing pushed unless you are
+supplying the full game (see [Running the full game instead of the
+demo](#running-the-full-game-instead-of-the-demo)).
+
+For the demo assets:
 
 ```sh
 DST=/sdcard/Android/data/org.gardensofkadesh.homeworld/files
@@ -159,32 +168,10 @@ Nothing from the Remastered Collection is redistributed here; this reads the
 copy you already own. `tools/sga_extract.py` unpacks the Remastered
 `_ARCHIVE` (Relic SGA v2) `.big` files for the same reason.
 
-### The remastered soundtrack
+Music comes from whichever `.wxd` is in place — `DL_Music.wxd` for the demo,
+`HW_Music.wxd` for the full game. There is no separate soundtrack to install.
 
-`tools/rm_music.py` converts the Remastered Collection's music to what the
-mixer runs at (22050 Hz stereo S16 — the remastered WAVs are 44100) and names
-each file by HW1's own track number:
-
-```sh
-python3 tools/rm_music.py ".../HomeworldRM/Data" /tmp/rm_music --all
-DST=/sdcard/Android/data/org.gardensofkadesh.homeworld/files/music
-adb shell mkdir -p $DST
-adb push /tmp/rm_music/. $DST/
-adb shell chmod 775 $DST          # <-- REQUIRED, see below
-```
-
-**That `chmod` is not optional.** `adb shell mkdir` creates the directory
-owned by `shell` with mode 2770, which grants *other* nothing — and the game
-is neither the owner nor in `ext_data_rw`, so it cannot even traverse in. The
-`.big` files in `files/` work only because `adb push` gives files mode 644,
-which happens to be world-readable; a shell-created *directory* shuts the app
-out completely. The symptom is silent: the game logs
-`probe=music/trackNN.wav -> MISSING` and plays the original music.
-
-Without the files, or with `--all` omitted, the original `.wxd` music plays -
-`rmMusicHasTrack` gates every override, so a partial set is fine.
-
-> **Do not restore a backup of that directory with `adb push` alone.** Push
+> **Do not restore a backup of the data directory with `adb push` alone.** Push
 > writes files as the *shell* user (uid 2000, mode 644); the game runs as its
 > own uid and is only in the group, so it can read them but not write them.
 > The four asset files above are read-only and so are fine, but `Homeworld.cfg`
@@ -256,8 +243,10 @@ Touch controls in the 3D world:
   own, so each leg is issued as a plain move once the previous one is reached.
 - Ray colors show the pending action; short controller pulses confirm
   target acquisition, selection, and issued orders.
-- The left stick orbits and right-stick Y zooms; squeezing both grips at once
-  pinches the hologram to zoom and rotate it. Hold the right grip to turn the
+- The left stick orbits and right-stick Y zooms; the wheel's View page scales
+  the hologram. There is no two-grip pinch: it reached camera verbs both the
+  stick and the wheel already carry, and cost a two-handed chord to do it.
+  Hold the right grip to turn the
   right stick into a fleet traversal control: flick it left or right to step
   the camera through your ships. The grip is required so that cycling cannot
   fire by accident while zooming, and it suppresses zoom for as long as it is
@@ -318,11 +307,11 @@ Touch controls in the 3D world:
   panel and its cards, the stick orbits and its click focuses the selection
   and recentres the hologram. The **right** is the pointer: the trigger
   selects and issues default orders, A previews and commits a smart order, B
-  cancels or closes, the stick zooms and sets order depth, and the grip means
-  navigate and nothing else - flick the right stick under it to cycle the
-  fleet, or squeeze both grips to pinch the hologram. The right grip used to
-  carry four unrelated meanings; Build and the dock chord moved to the wheel
-  and the smart order respectively.
+  cancels or - with nothing to cancel - attacks, the stick zooms and sets
+  order depth, and the grip means navigate and nothing else: flick the right
+  stick under it to cycle the fleet. The right grip used to carry four
+  unrelated meanings; Build and the dock chord moved to the wheel and the
+  smart order respectively.
 - An unmodified B closes any - Construction, Launch, Research, Trade or Sensors. Sensors is
   full-screen and suppresses the main view like the rest, so it is treated as
   a manager too rather than being squeezed onto the wrist panel. Manager
@@ -356,21 +345,57 @@ cmake --build build-openxr-arm64 -j$(nproc)  # produces libopenxr_loader.so
 Then from the repository root:
 
 ```sh
-meson setup --cross-file android/aarch64-android.meson-cross-build-definition.txt \
-    --buildtype=release -Db_sanitize=none -Dvr=true -Dmovies=false -Ddemo=true \
-    build.android-vr
+XC=android/aarch64-android.meson-cross-build-definition.txt
+OPTS="--buildtype=release -Db_sanitize=none -Dvr=true -Dmovies=false"
+meson setup --cross-file $XC $OPTS -Ddemo=false build.android-vr
+meson setup --cross-file $XC $OPTS -Ddemo=true  build.android-vr-demo
 meson compile -C build.android-vr
+meson compile -C build.android-vr-demo
 ```
 
-The gradle project has `flat` and `vr` product flavors (same application
-id, so they share the sideloaded game data but cannot be installed at
-the same time):
+Two trees because the VR APK carries both engines; see the next section. The
+gradle project has `flat` and `vr` product flavors (same application id, so
+they share the sideloaded game data but cannot be installed at the same time):
 
 ```sh
-cp build.android-vr/libmain.so android/sdl-prefix-arm64/lib/libSDL2.so \
-    android/build-openxr-arm64/src/loader/libopenxr_loader.so \
-    android/project/app/src/vr/jniLibs/arm64-v8a/
+JNI=android/project/app/src/vr/jniLibs/arm64-v8a
+cp android/sdl-prefix-arm64/lib/libSDL2.so \
+    android/build-openxr-arm64/src/loader/libopenxr_loader.so $JNI/
+cp build.android-vr/libmain.so      $JNI/libmain.so
+cp build.android-vr-demo/libmain.so $JNI/libmainDemo.so
 cd android/project
 ./gradlew assembleVrDebug     # or assembleFlatDebug for the 2D app
 adb install app/build/outputs/apk/vr/debug/app-vr-debug.apk
 ```
+
+### One APK, both campaigns
+
+`HW_GAME_DEMO` reaches a long way into the engine — it selects the `.big` file
+opened (`bigFilePrecedence` in `BigFile.c`), the music and speech filenames
+(`utyMusicFilename`, `utyVoiceFilename` in `utility.c`) and the mission
+sequence itself (`missionSequence` in `SinglePlayer.c`, a compile-time array).
+None of that can be decided at runtime, so the VR flavour ships both builds and
+picks between them before SDL loads either.
+
+`app/src/vr/java/org/gardensofkadesh/homeworld/HomeworldActivity.java`
+subclasses `SDLActivity` and, in `onCreate` before `super`:
+
+- looks for `Homeworld.big` in `getExternalFilesDir(null)`. Present means the
+  full game, so `getLibraries()` returns `libmain.so` and the bundled demo
+  files are deleted — `Update.big` included, since it is first in
+  `bigFilePrecedence` and a demo copy left there silently overrides full-game
+  content. Only files whose length still matches the packaged asset are
+  removed, so a retail `Update.big` survives.
+- absent means the demo, so `libmainDemo.so`, and any missing demo asset is
+  unpacked from `assets/`. That is a straight copy rather than an inflate:
+  `androidResources.noCompress` in `build.gradle` stores them uncompressed.
+
+The assets are referenced from `subprojects/demo-assets-1.05/assets` through a
+`sourceSets` entry rather than copied into the repository. That directory comes
+from a meson wrap, so a tree that has never fetched it will fail the VR build
+with a message saying to run `meson subprojects download demo-assets`.
+
+Because the launcher activity changed, the component to `am start` is
+`org.gardensofkadesh.homeworld/.HomeworldActivity`. The vr manifest removes the
+`org.libsdl.app.SDLActivity` entry with `tools:node="remove"`, so that one no
+longer exists to start; the flat flavour is unaffected.

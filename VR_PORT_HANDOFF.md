@@ -23,12 +23,22 @@ Everything described here is committed and pushed; the working tree is clean.
 
 ## Build and deploy loop
 
+The APK carries **both** engine builds — `HW_GAME_DEMO` reaches too far in to
+be a runtime switch, so `build.android-vr` (`-Ddemo=false`) becomes
+`libmain.so` and `build.android-vr-demo` (`-Ddemo=true`) becomes
+`libmainDemo.so`, and `HomeworldActivity` picks by whether `Homeworld.big` is
+in the app's data directory. Rebuild only the one you are testing; the other
+library is already in `jniLibs` and gradle will package whatever is there.
+
 ```sh
 cd /home/berkybear/Homeworld          # shell cwd persists - a stale cd into
                                       # android/project deploys the wrong APK
 ninja -C build.android-vr
 cp build.android-vr/libmain.so \
    android/project/app/src/vr/jniLibs/arm64-v8a/libmain.so
+# the demo half, only when it also needs rebuilding:
+# ninja -C build.android-vr-demo && cp build.android-vr-demo/libmain.so \
+#    android/project/app/src/vr/jniLibs/arm64-v8a/libmainDemo.so
 cd android/project && ./gradlew assembleVrDebug && cd ../..
 adb -s 192.168.1.92:44159 install -r \
    android/project/app/build/outputs/apk/vr/debug/app-vr-debug.apk
@@ -42,8 +52,14 @@ adb -s 192.168.1.92:44159 shell am force-stop org.gardensofkadesh.homeworld
 adb -s 192.168.1.92:44159 shell pidof org.gardensofkadesh.homeworld
 adb -s 192.168.1.92:44159 logcat -c
 adb -s 192.168.1.92:44159 shell am start -n \
-   org.gardensofkadesh.homeworld/org.libsdl.app.SDLActivity
+   org.gardensofkadesh.homeworld/.HomeworldActivity
 ```
+
+**The launch component moved.** It was `org.libsdl.app.SDLActivity`; the VR
+flavour now launches `org.gardensofkadesh.homeworld.HomeworldActivity`, which
+subclasses it to unpack the demo assets and choose the library before SDL
+loads anything. The vr manifest removes the SDLActivity entry outright, so
+starting the old component fails with "Activity class does not exist".
 
 Chaining force-stop straight into `am start` intermittently launches the game
 with **no VR at all**: only one app may hold an OpenXR session, so if the old

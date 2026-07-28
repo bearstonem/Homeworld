@@ -3,9 +3,9 @@
 ## Goal
 
 No screen during gameplay: selection, orders and camera control happen
-directly in the 3D holographic battle space. Orbit with the left stick,
-pinch with both hands to zoom, point at ships to select, and issue orders
-with the controller ray.
+directly in the 3D holographic battle space. Orbit with the left stick, zoom
+with the right, scale the hologram from the wheel, point at ships to select,
+and issue orders with the controller ray.
 
 There is deliberately **no pan**. Homeworld's camera is focus-locked by
 design: every camera verb is a focus verb (`ccFocus`, `ccFocusFar`,
@@ -72,8 +72,11 @@ cutscenes.
   (`vecLineIntersectWithXYPlane`), height offset in a second stage,
   commit via `clWrapMove` (+`Game_Move*` tutorial messages), ghost disc
   and vertical line drawn as overlays.
-- **Grips**: both grips = pinch zoom (`cameraZoom`) + pair rotation (orbit).
-  One grip does not pan - see the note above.
+- **Grips**: no camera gesture on either. The left adds to the selection, the
+  right modifies the right stick into fleet traversal. One grip does not pan -
+  see the note above - and the two-grip pinch that used to zoom and orbit is
+  gone, since the left stick, the right stick and the wheel's View page
+  already carry every camera verb it reached.
 - **Overlays** (aim rays, hover ring, selection rings, sweep preview,
   move disc) drawn in game-world space with `primLine3` /
   `primCircleOutline3` inside each eye pass right after
