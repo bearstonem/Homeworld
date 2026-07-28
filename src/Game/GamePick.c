@@ -428,6 +428,68 @@ alreadyLoaded:;
     Outputs     :
     Return      :
 ----------------------------------------------------------------------------*/
+#ifdef HW_ENABLE_VR
+/*-----------------------------------------------------------------------------
+    Name        : gpSuggestSaveName
+    Description : Fill an empty save-name field with a name that is already
+                  valid and already unused.
+
+                  There is no keyboard in VR, and gpSaveGame rejects a name
+                  under two characters, so an empty field means the Save button
+                  can never be satisfied at all. Numbered rather than stamped
+                  with the time: the field holds 30 characters and a name you
+                  can recognise beats one you can sort. Anywhere a keyboard
+                  exists the player can still type over it.
+    Inputs      :
+    Outputs     : gpTextEntryName and the entry box are filled
+    Return      :
+----------------------------------------------------------------------------*/
+static void gpSuggestSaveName(void)
+{
+    char candidate[GP_GAMENAME_LENGTH];
+    char filename[300];
+    sdword mission;
+    sdword attempt;
+
+    if (gpNameEntryBox == NULL || gpTextEntryName == NULL
+        || gpTextEntryName[0] != 0)
+    {
+        return;                     // the player already has something there
+    }
+    // MISSION_ENUM_NOT_INITIALISED is 0 and the rest preserve the original
+    // mission numbers, so this doubles as "are we in a campaign at all"
+    mission = singlePlayerGame ? (sdword)singlePlayerGameInfo.currentMission : 0;
+
+    for (attempt = 1; attempt < 100; attempt++)
+    {
+        if (mission > 0)
+        {
+            sprintf(candidate, "Mission %d", (int)mission);
+        }
+        else
+        {
+            strcpy(candidate, "Saved Game");
+        }
+        if (attempt > 1)
+        {
+            sprintf(candidate + strlen(candidate), " (%d)", (int)attempt);
+        }
+        if (SavedGamesPath == NULL)
+        {
+            break;                  // no path yet: offer it and let Save sort it out
+        }
+        strcpy(filename, SavedGamesPath);
+        strcat(filename, candidate);
+        if (!fileExists(filename, 0))
+        {
+            break;
+        }
+    }
+    strcpy(gpTextEntryName, candidate);
+    uicTextEntrySet(gpNameEntryBox, candidate, strlen(candidate));
+}
+#endif // HW_ENABLE_VR
+
 void gpTextEntryWindowInit(char *name, featom *atom)
 {
     if (FEFIRSTCALL(atom))
@@ -437,6 +499,9 @@ void gpTextEntryWindowInit(char *name, featom *atom)
 //        uicTextEntrySet(gpNameEntryBox,gpTextEntryName,strlen(gpTextEntryName)+1);
         uicTextBufferResize(gpNameEntryBox,GP_GAMENAME_LENGTH-2);
         bitSet(gpNameEntryBox->textflags, UICTE_FileName);
+#ifdef HW_ENABLE_VR
+        gpSuggestSaveName();
+#endif
         return;
     }
     else if ((FELASTCALL(atom)))
