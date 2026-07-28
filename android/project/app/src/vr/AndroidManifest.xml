@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- VR flavor overlay: marks the app as an immersive Meta Quest app. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-feature
         android:name="android.hardware.vr.headtracking"
@@ -12,7 +13,21 @@
             android:name="com.oculus.supportedDevices"
             android:value="quest2|questpro|quest3" />
 
-        <activity android:name="org.libsdl.app.SDLActivity">
+        <!-- The VR flavour launches HomeworldActivity instead, which picks the
+             demo or the full native library and unpacks the bundled demo
+             assets on first run. Leaving SDLActivity declared as well would
+             put two entries in the Quest library, one of which starts the
+             engine with neither of those things done. -->
+        <activity android:name="org.libsdl.app.SDLActivity" tools:node="remove" />
+
+        <activity android:name="org.gardensofkadesh.homeworld.HomeworldActivity"
+            android:label="@string/app_name"
+            android:screenOrientation="landscape"
+            android:alwaysRetainTaskState="true"
+            android:launchMode="singleInstance"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:preferMinimalPostProcessing="true"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="com.oculus.intent.category.VR" />

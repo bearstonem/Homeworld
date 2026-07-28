@@ -2,9 +2,14 @@
 """
 Homeworld: Unbound - interactive installer for Meta Quest.
 
-Walks through connecting a headset, choosing demo or full game, locating your
-game data, and pushing everything to the right place. Works on Windows and
-Linux.
+Walks through connecting a headset, installing the app, and - if you own
+Homeworld - locating your game data and pushing it across. Works on Windows
+and Linux.
+
+There is one APK and it plays either edition. It carries the freely
+redistributable 1.05 demo assets and unpacks them on first run, and it holds
+both native libraries, choosing between them by whether Homeworld.big is
+present. See HomeworldActivity.java.
 
     python3 install.py          (Linux, macOS)
     py install.py               (Windows)
@@ -30,13 +35,14 @@ PKG = "org.gardensofkadesh.homeworld"
 DATA = "/sdcard/Android/data/%s" % PKG
 DST = "%s/files" % DATA
 APK = REPO / "android/project/app/build/outputs/apk/vr/debug/app-vr-debug.apk"
-# Prebuilt APKs, one per edition. Which edition an APK is cannot be detected
-# from the outside - it is compiled in - so they are kept as separate files
-# rather than guessed at.
 DIST = REPO / "dist"
-PREBUILT = {"d": DIST / "homeworld-unbound-vr-demo.apk",
-            "f": DIST / "homeworld-unbound-vr-full.apk"}
+PREBUILT = DIST / "homeworld-unbound-vr.apk"
 DEMO_ASSETS = REPO / "subprojects/demo-assets-1.05/assets"
+# One build directory per edition of the engine. Both libraries go into the
+# single APK; HomeworldActivity picks between them at launch.
+BUILD_FULL = REPO / "build.android-vr"
+BUILD_DEMO = REPO / "build.android-vr-demo"
+JNILIBS = REPO / "android/project/app/src/vr/jniLibs/arm64-v8a"
 
 WINDOWS = platform.system() == "Windows"
 MACOS = platform.system() == "Darwin"
@@ -49,10 +55,8 @@ MACOS = platform.system() == "Darwin"
 FULL_FILES = [("homeworld.big", "Homeworld.big"),
               ("HW_Music.wxd",  "HW_Music.wxd"),
               ("HW_Comp.vce",   "HW_comp.vce")]
-DEMO_FILES = [("HomeworldDL.big", "HomeworldDL.big"),
-              ("DL_Music.wxd",    "DL_Music.wxd"),
-              ("DL_demo.vce",     "DL_Demo.vce"),
-              ("Update.big",      "Update.big")]
+# The demo files are not pushed from here any more - they ride in the APK and
+# HomeworldActivity unpacks them, which is also where their list lives now.
 
 # Demo assets that would shadow a full install. Update.big is FIRST in the
 # engine's bigFilePrecedence, so leaving the demo copy in place silently
@@ -344,13 +348,17 @@ def find_full_assets(start=None):
 
 
 def choose_edition():
-    title("Which version do you want to install?")
-    info("The demo is included with this project and needs nothing else.")
-    info("The full game needs your own copy of Homeworld (the Remastered")
-    info("Collection on Steam includes the original, which is what this uses).")
+    title("Which version do you want to play?")
+    info("The app carries the demo and unpacks it itself, so it plays without")
+    info("this script copying anything. The full game needs your own copy of")
+    info("Homeworld (the Remastered Collection on Steam includes the original,")
+    info("which is what this uses).")
     print()
-    return ask("Install which?",
-               [("d", "Demo - works right away, a few missions"),
+    info("You can change your mind later by re-running this script: the app")
+    info("switches on whether your game data is present.")
+    print()
+    return ask("Play which?",
+               [("d", "Demo - nothing to copy, a few missions"),
                 ("f", "Full game - all 16 missions, needs your own copy")], "d")
 
 
@@ -384,35 +392,32 @@ def locate_full_assets():
 
 # ------------------------------------------------------------------ build ---
 def have_build_tools():
-    return shutil.which("ninja") and (REPO / "build.android-vr").is_dir()
+    return shutil.which("ninja") and BUILD_FULL.is_dir() and BUILD_DEMO.is_dir()
 
 
-def build_apk(edition):
+def build_apk():
     """Returns a path to an APK, or None."""
     title("Building")
-    want_demo = (edition == "d")
-    builddir = REPO / "build.android-vr"
 
-    prebuilt = PREBUILT[edition]
-    if prebuilt.is_file():
-        ok("Using the prebuilt %s APK" % ("demo" if want_demo else "full game"))
-        info(str(prebuilt))
+    if PREBUILT.is_file():
+        ok("Using the prebuilt APK")
+        info(str(PREBUILT))
         if not have_build_tools() or not yes("Build from source instead?", False):
-            return prebuilt
+            return PREBUILT
 
     if not have_build_tools():
         if APK.is_file():
-            warn("No build toolchain and no prebuilt APK for this edition,")
-            warn("but there is an APK from a previous build:")
+            warn("No build toolchain and no prebuilt APK, but there is one")
+            warn("from a previous build:")
             info(str(APK))
-            info("Its edition cannot be detected from the outside. If the")
-            info("game fails to start, it is the wrong one - rebuild, or get")
-            info("the matching APK from dist/.")
             if yes("Use it anyway?", False):
                 return APK
         err("Cannot build here.")
         info("Building the Quest APK needs the Android NDK, meson, ninja and")
         info("gradle, plus the cross file in android/. See android/README.md.")
+        info("Both build directories are required:")
+        info("  %s  (-Ddemo=false)" % BUILD_FULL.name)
+        info("  %s  (-Ddemo=true)" % BUILD_DEMO.name)
         if WINDOWS:
             info("On Windows the practical route is to build under WSL, or")
             info("get a prebuilt APK, then re-run this to install it.")
@@ -422,34 +427,24 @@ def build_apk(edition):
             info("this to install it.")
         return None
 
-    # Match the meson 'demo' option to what was chosen; a mismatch produces a
-    # binary that opens the wrong filenames and dies at startup with
-    # "Unable to open required .big file".
-    import json
-    current = None
-    intro = builddir / "meson-info/intro-buildoptions.json"
-    if intro.is_file():
-        for o in json.loads(intro.read_text()):
-            if o["name"] == "demo":
-                current = bool(o["value"])
-    if current is not None and current != want_demo:
-        info("Reconfiguring build for %s..." % ("demo" if want_demo else "full game"))
-        meson = shutil.which("meson")
-        if not meson:
-            err("meson not found; cannot switch edition.")
-            return None
-        subprocess.run([meson, "configure", str(builddir),
-                        "-Ddemo=%s" % ("true" if want_demo else "false")],
-                       check=False)
-
-    info("Compiling (this can take a few minutes)...")
-    if subprocess.run(["ninja", "-C", str(builddir)]).returncode != 0:
-        err("Build failed.")
+    if not DEMO_ASSETS.is_dir():
+        err("Demo assets missing at %s" % DEMO_ASSETS)
+        info("They ride inside the APK now, so the build needs them:")
+        info("    meson subprojects download demo-assets")
         return None
-    lib = builddir / "libmain.so"
-    dest = REPO / "android/project/app/src/vr/jniLibs/arm64-v8a/libmain.so"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(lib, dest)
+
+    # Both editions, because the APK carries both. HW_GAME_DEMO reaches too
+    # far into the engine to be a runtime switch - it picks the .big file, the
+    # music and speech filenames, and the mission sequence, that last one as a
+    # compile-time array - so there are two libraries and two build trees.
+    JNILIBS.mkdir(parents=True, exist_ok=True)
+    for builddir, libname, what in ((BUILD_FULL, "libmain.so", "full game"),
+                                    (BUILD_DEMO, "libmainDemo.so", "demo")):
+        info("Compiling the %s engine (this can take a few minutes)..." % what)
+        if subprocess.run(["ninja", "-C", str(builddir)]).returncode != 0:
+            err("Build failed in %s." % builddir.name)
+            return None
+        shutil.copy2(builddir / "libmain.so", JNILIBS / libname)
 
     info("Packaging APK...")
     gradlew = REPO / "android/project" / ("gradlew.bat" if WINDOWS else "gradlew")
@@ -479,7 +474,7 @@ def push_tree(adb, pairs, dest_dir):
     return True
 
 
-def install(adb, apk, edition, assets, music_dir):
+def install(adb, apk, edition, assets):
     title("Installing")
     info("Installing the app...")
     cp = adb.run("install", "-r", str(apk))
@@ -496,58 +491,49 @@ def install(adb, apk, edition, assets, music_dir):
     # up once the copying is done, exactly as the soundtrack folder is handled
     # below. Nothing is chmodded that the app already owns, since shell cannot
     # chmod those anyway.
-    fresh = [d for d in (DATA, DST) if not dir_exists(adb, d)]
-    if fresh:
-        adb.shell("mkdir -p %s" % DST)
+    fresh = []
 
-    # Clear whichever edition's files would shadow this one.
-    stale = STALE_FOR_FULL if edition == "f" else STALE_FOR_DEMO
-    adb.shell("cd %s && rm -f %s" % (DST, " ".join(stale)))
-
-    title("Copying game data")
     if edition == "f":
-        pairs = [(assets[src], dst) for src, dst in FULL_FILES]
-    else:
-        pairs = [(DEMO_ASSETS / src, dst) for src, dst in DEMO_FILES]
-    if not push_tree(adb, pairs, DST):
-        return False
-    # 2775, not 775: the setgid bit is what makes anything created inside
-    # later inherit the ext_data_rw group, and the app makes SavedGames in
-    # here itself. Dropping it also breaks `adb push` into those subdirectories
-    # afterwards, which fails with "remote fchown failed".
-    for d in fresh:
-        adb.shell("chmod 2775 %s" % d)
-    ok("Game data copied")
+        fresh = [d for d in (DATA, DST) if not dir_exists(adb, d)]
+        if fresh:
+            adb.shell("mkdir -p %s" % DST)
 
-    if music_dir:
-        title("Copying the remastered soundtrack")
-        tracks = sorted(music_dir.glob("track*.wav"))
-        info("%d tracks, %.0f MB - this takes a moment"
-             % (len(tracks), sum(t.stat().st_size for t in tracks) / 1e6))
-        adb.shell("mkdir -p %s/music" % DST)
-        # Every push is checked. These can fail as a group while looking fine
-        # (a destination directory that lost its ext_data_rw group refuses the
-        # ownership change adb does as it copies, so all of them come back
-        # "remote fchown failed"), and the game says nothing about it either:
-        # rmMusicHasTrack gates each override, so a missing set just plays the
-        # original .wxd score. Reporting success here would bury both.
-        failed = []
-        for t in tracks:
-            cp = adb.push(t, "%s/music/%s" % (DST, t.name))
-            if cp.returncode != 0:
-                failed.append((cp.stderr or cp.stdout).strip())
-        # chmod AFTER pushing: adb sets ownership as it copies, and doing this
-        # first makes the push fail with "remote fchown failed". A directory
-        # made by adb is mode 2770 owned by shell, which grants the game
-        # nothing - it cannot even traverse in, and simply plays the original
-        # music with no error.
-        adb.shell("chmod -R 775 %s/music" % DST)
-        if failed:
-            err("%d of %d tracks did not copy: %s"
-                % (len(failed), len(tracks), failed[0]))
-            warn("The game will run, playing its original music instead.")
-        else:
-            ok("Soundtrack copied")
+        # Demo files that would shadow the full game. Update.big is FIRST in
+        # bigFilePrecedence, so a demo copy left here silently overrides
+        # full-game content with demo content.
+        adb.shell("cd %s && rm -f %s" % (DST, " ".join(STALE_FOR_FULL)))
+
+        title("Copying game data")
+        pairs = [(assets[src], dst) for src, dst in FULL_FILES]
+        if not push_tree(adb, pairs, DST):
+            return False
+        # 2775, not 775: the setgid bit is what makes anything created inside
+        # later inherit the ext_data_rw group, and the app makes SavedGames in
+        # here itself. Dropping it also breaks `adb push` into those
+        # subdirectories afterwards, which fails with "remote fchown failed".
+        for d in fresh:
+            adb.shell("chmod 2775 %s" % d)
+        ok("Game data copied")
+    else:
+        # Nothing to copy: the APK carries the demo assets and unpacks them on
+        # first run, into a directory it creates and owns. Leaving that to the
+        # app is better than doing it here - no mkdir, so no chmod, so none of
+        # the ownership traps above.
+        present = [n for n in STALE_FOR_DEMO
+                   if "yes" in (adb.shell("[ -f %s/%s ] && echo yes"
+                                          % (DST, n)).stdout or "")]
+        if present:
+            title("Full game data is already on the headset")
+            warn("The app plays the full game whenever Homeworld.big is")
+            warn("present, so the demo means deleting what is there:")
+            for n in present:
+                info("  %s" % n)
+            if not yes("Delete it and go back to the demo?", False):
+                info("Left alone - the app will keep playing the full game.")
+            else:
+                adb.shell("cd %s && rm -f %s" % (DST, " ".join(STALE_FOR_DEMO)))
+                ok("Full game data removed")
+        ok("The app unpacks the demo itself on first launch")
 
     # If the game was ever started before its data landed, that process is
     # still around having already given up looking for it. Launching from the
@@ -590,34 +576,13 @@ def main():
             warn("No full game data - falling back to the demo.")
             edition = "d"
     if edition == "d":
-        missing = [n for n, _ in DEMO_FILES if not (DEMO_ASSETS / n).is_file()]
-        if missing:
-            err("Demo assets missing from the repository: %s" % ", ".join(missing))
-            return 1
-        ok("Using the demo assets included with this project")
+        ok("The demo rides inside the app; nothing to copy")
 
-    music_dir = None
-    for cand in [REPO / "music", Path.home() / "hw-music"]:
-        if cand.is_dir() and list(cand.glob("track*.wav")):
-            music_dir = cand
-            break
-    if music_dir:
-        title("Remastered soundtrack")
-        info("Found converted tracks in %s" % music_dir)
-        if not yes("Install the remastered soundtrack too?", True):
-            music_dir = None
-    elif edition == "f":
-        title("Remastered soundtrack (optional)")
-        info("If you own the Remastered Collection you can also use its")
-        info("re-recorded soundtrack. Convert it once with:")
-        info("    python3 tools/rm_music.py <HomeworldRM/Data> ./music --all")
-        info("then re-run this script. Without it the original music plays.")
-
-    apk = build_apk(edition)
+    apk = build_apk()
     if apk is None:
         return 1
 
-    if not install(adb, apk, edition, assets, music_dir):
+    if not install(adb, apk, edition, assets):
         err("Installation failed.")
         return 1
 

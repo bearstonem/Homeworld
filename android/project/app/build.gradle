@@ -33,8 +33,38 @@ android {
             }
         }
     }
+    sourceSets {
+        // The 1.05 demo assets ride in the VR APK so it is playable without
+        // owning Homeworld; HomeworldActivity unpacks them on first run. They
+        // are referenced where meson already put them rather than copied into
+        // the repository, which would be 65 MB of duplicated binaries in git.
+        vr {
+            assets.srcDirs += ['../../../subprojects/demo-assets-1.05/assets']
+        }
+    }
+    androidResources {
+        // Unpacking is a straight copy this way instead of an inflate, and
+        // these are already compressed formats - zipping them buys a couple of
+        // percent and costs seconds on first launch.
+        noCompress += ['big', 'wxd', 'vce']
+    }
     lint {
         abortOnError false
+    }
+}
+
+// The demo assets come from a meson wrap (subprojects/demo-assets.wrap), so a
+// tree that has only ever been configured for a non-emscripten target may not
+// have them yet. Without this the VR APK builds happily and then finds nothing
+// to unpack on the headset, which looks like a bug in the app.
+tasks.matching { it.name ==~ /(?i)merge.*Vr.*Assets/ }.configureEach {
+    doFirst {
+        def assets = file("${projectDir}/../../../subprojects/demo-assets-1.05/assets")
+        if (!assets.isDirectory()) {
+            throw new GradleException(
+                "Demo assets missing at ${assets}.\n" +
+                "Fetch them with: meson subprojects download demo-assets")
+        }
     }
 }
 
