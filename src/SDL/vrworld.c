@@ -30,6 +30,7 @@
 #include "LaunchMgr.h"
 #include "ResearchGUI.h"
 #include "Sensors.h"
+#include "CommandDefs.h"
 #include "CommandLayer.h"
 #include "Formation.h"
 #include "FormationDefs.h"
@@ -45,6 +46,7 @@
 #include "Select.h"
 #include "ShipSelect.h"
 #include "SpaceObj.h"
+#include "Tactics.h"
 #include "TradeMgr.h"
 #include "Tutor.h"
 #include "Universe.h"
@@ -87,11 +89,26 @@ extern bool32 gameIsRunning;                                //Globals.c
 
 /* Freehand path drawing */
 #define VRW_PATH_MAX_SAMPLES 64     /* raw swept points before decimation */
-#define VRW_PATH_MAX_POINTS  12     /* waypoints handed to the follower */
+#define VRW_PATH_MAX_POINTS  192    /* curve points, evenly spaced by arc length */
 #define VRW_PATH_SPLINE_STEPS 16    /* spline evaluations per raw segment */
 #define VRW_PATH_SMOOTH_PASSES 2    /* [1 2 1] passes over the raw samples */
 #define VRW_PATH_KNOT_MIN   0.001f  /* floor on knot spacing, guards a div0 */
-#define VRW_PATH_LEG_TIMEOUT 45.0f  /* seconds before a stuck leg is skipped */
+
+/* How far ahead of the fleet the carrot rides, and why 10 seconds of travel:
+   aishipFlyToPointAvoidingObjsFunc asks for a velocity of
+   VELOCITY_SCALE_FACTOR (0.1) times the distance left, capped at the ship's
+   maximum. Below ten seconds of travel that product is the cap, so the group
+   throttles back in proportion to how close the target is. Ten seconds out is
+   exactly where full speed is commanded. */
+#define VRW_PATH_LEAD_SECONDS 10.0f
+/* ...but never more than this fraction of the whole path, or a short curl
+   would be flown as a straight line to a point past its own end. Shape wins
+   over speed on a small stroke; on a long one the cap never binds. */
+#define VRW_PATH_LEAD_MAX_FRAC 0.35f
+#define VRW_PATH_LEAD_HULLS   3.0f  /* floor: clear of the group's own bulk */
+#define VRW_PATH_SEARCH_LEADS 2.0f  /* forward window when projecting onto the curve */
+#define VRW_PATH_REISSUE_FRAC 0.25f /* of the lead, before a fallback re-order */
+#define VRW_PATH_STALL_TIME  20.0f  /* seconds of not moving before giving up */
 
 typedef struct {
     bool32  valid;
@@ -123,8 +140,9 @@ static struct {
     sdword  sweepTrailCount;
     real32  sweepReach;                     /* how far down the ray to draw */
 
-    /* attack target sweep, during an A/X order preview */
+    /* attack target sweep, during an order preview */
     bool32  targetSweepActive;
+    bool32  targetSweepPainting;    /* the trigger is down: brush is live */
     sdword  targetSweepHand;
     MaxAnySelection targetSweep;
 
@@ -141,16 +159,24 @@ static struct {
     vector  pathSample[VRW_PATH_MAX_SAMPLES];
     sdword  pathSampleCount;
     real32  pathMinSampleDist;      /* decimation threshold, game units */
-    real32  pathSpacing;            /* arc length between waypoints */
 
-    /* freehand path: resampled waypoints and the follower flying them */
+    /* freehand path: the curve, resampled to even arc length so that
+       "the point s units along" is one divide and one lerp */
     vector  pathPoint[VRW_PATH_MAX_POINTS];
     sdword  pathCount;
+    real32  pathSpacing;            /* arc length between adjacent points */
+    real32  pathLength;             /* arc length of the whole curve */
+
+    /* freehand path: the follower */
     bool32  pathActive;
     MaxSelection pathSelection;
-    sdword  pathLeg;
-    real32  pathArriveDist;
-    real32  pathLegStart;           /* universe time the leg was issued */
+    real32  pathProgress;           /* arc length the fleet has reached */
+    real32  pathLead;               /* how far ahead of that the carrot sits */
+    real32  pathArrive;             /* centre this close to the end = done */
+    vector  pathIssued;             /* destination the command layer was last given */
+    bool32  pathSteering;           /* driving the command directly, not re-ordering */
+    vector  pathStallWhere;         /* centre when the stall clock last reset */
+    real32  pathStallSince;
     real32  pathLastUpdate;
 
     /* diagnostics */
@@ -517,6 +543,9 @@ bool32 vrWorldCommandEnabled(vrworldcommand cmd, sdword arg)
         case VRW_CMD_UNDO:
         case VRW_CMD_SCALE_UP:
         case VRW_CMD_SCALE_DOWN:
+        /* never gated: this is how the player reaches save, options and quit,
+           and it is the wheel's job to always offer a way out */
+        case VRW_CMD_MENU:
             return TRUE;
         case VRW_CMD_BUILD:
         case VRW_CMD_LAUNCH:
@@ -850,6 +879,27 @@ static bool32 vrwPlayerShipSelectable(SpaceObjRotImpTarg const* obj)
    needed. Absolute angle does not care how big the target is, which is what
    makes it match the player's intent: the ship they are pointing most
    directly at is the ship they mean. */
+/* How big this object should be treated as, for anything that answers "did
+   you mean this one" - the ray test, the sweep brush, and every ring drawn to
+   show what is hovered, targeted or selected. All of them go through here so
+   they cannot disagree with each other, which is what happened when the
+   Mothership's selection ring was shrunk on its own and the hover ring around
+   it stayed full size. See VRW_MOTHERSHIP_SCALE for why it is special.
+
+   Not for anything about the ship's actual extent: waypoint arrival distance
+   and panel anchoring want the real sphere. */
+static real32 vrwHullRadius(SpaceObjRotImpTarg const* obj)
+{
+    real32 hull = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
+
+    if (obj->objtype == OBJ_ShipType
+        && ((Ship const*)obj)->shiptype == Mothership)
+    {
+        hull *= VRW_MOTHERSHIP_SCALE;
+    }
+    return hull;
+}
+
 static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
                                    SpaceObjRotImpTarg const* preferred, real32* hitT)
 {
@@ -896,14 +946,7 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
            units. A 25% margin is a handful of units on a fighter and a
            650-unit dead zone around the Mothership, which is precisely how
            a capital ship ends up swallowing its own escorts. */
-        hull = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
-
-        if (obj->objtype == OBJ_ShipType
-            && ((Ship*)obj)->shiptype == Mothership)
-        {
-            hull *= VRW_MOTHERSHIP_SCALE;               //see the constant
-        }
-
+        hull = vrwHullRadius(obj);
         margin = hull * (VRW_PICK_MARGIN - 1.0f);
         if (margin > VRW_PICK_MARGIN_MAX)
         {
@@ -1032,7 +1075,7 @@ static void vrwSweepAccumulate(vrwray const* ray)
         {
             continue;                                       //behind the controller
         }
-        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
+        radius = vrwHullRadius(obj);
         {
             real32 margin = radius * (VRW_SWEEP_MARGIN - 1.0f);
 
@@ -1081,7 +1124,7 @@ static void vrwTargetSweepAccumulate(vrwray const* ray)
         {
             continue;
         }
-        radius = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
+        radius = vrwHullRadius(obj);
         margin = radius * (VRW_SWEEP_MARGIN - 1.0f);
         radius += margin > VRW_PICK_MARGIN_MAX ? VRW_PICK_MARGIN_MAX : margin;
         radius += tCentre * VRW_SWEEP_CONE_TAN;
@@ -1110,7 +1153,9 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
     vrwray* ray = &vrw.ray[hand];
     SpaceObjRotImpTarg* oldHover = ray->hover;
 
-    ray->valid = valid && vrw.worldValid;
+    /* One choke point for hiding the hands during a mission briefing: an
+       invalid ray draws nothing, picks nothing, and so pulses nothing. */
+    ray->valid = valid && vrw.worldValid && !vrWorldSensorsBriefing();
     ray->hover = NULL;
     ray->limitT = 0.0f;
     if (!ray->valid)
@@ -1166,7 +1211,8 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
     {
         vrwSweepAccumulate(ray);
     }
-    if (vrw.targetSweepActive && hand == vrw.targetSweepHand)
+    if (vrw.targetSweepActive && vrw.targetSweepPainting
+        && hand == vrw.targetSweepHand)
     {
         vrwTargetSweepAccumulate(ray);
     }
@@ -1396,6 +1442,7 @@ void vrWorldTargetSweepBegin(sdword hand)
     SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
 
     vrw.targetSweepActive = TRUE;
+    vrw.targetSweepPainting = TRUE;
     vrw.targetSweepHand = hand;
     vrw.targetSweep.numTargets = 0;
     /* the two sweeps are mutually exclusive - one needs the trigger free, the
@@ -1414,6 +1461,14 @@ void vrWorldTargetSweepBegin(sdword hand)
             (int)vrw.targetSweep.numTargets);
 }
 
+void vrWorldTargetSweepPaint(bool32 painting)
+{
+    if (vrw.targetSweepActive)
+    {
+        vrw.targetSweepPainting = painting;
+    }
+}
+
 sdword vrWorldTargetSweepCount(void)
 {
     return vrw.targetSweepActive ? vrw.targetSweep.numTargets : 0;
@@ -1429,6 +1484,7 @@ bool32 vrWorldTargetSweepCommit(void)
         return FALSE;
     }
     vrw.targetSweepActive = FALSE;
+    vrw.targetSweepPainting = FALSE;
     targets = vrw.targetSweep;
     vrw.targetSweep.numTargets = 0;
     if (targets.numTargets == 0 || selSelected.numShips == 0
@@ -1450,6 +1506,9 @@ bool32 vrWorldTargetSweepCommit(void)
         return FALSE;
     }
     MakeShipMastersIncludeSlaves((SelectCommand*)&targets);
+    /* as for any fresh order: a follower still feeding move legs to these
+       ships would otherwise override the attack a fraction of a second later */
+    vrWorldPathCancel();
     clWrapAttack(&universe.mainCommandLayer, (SelectCommand*)&attackers,
                  (SelectAnyCommand*)&targets);
     tutGameMessage("Game_ClickAttack");
@@ -1461,6 +1520,7 @@ bool32 vrWorldTargetSweepCommit(void)
 void vrWorldTargetSweepCancel(void)
 {
     vrw.targetSweepActive = FALSE;
+    vrw.targetSweepPainting = FALSE;
     vrw.targetSweep.numTargets = 0;
 }
 
@@ -1634,6 +1694,55 @@ bool32 vrWorldContextOrder(sdword hand)
     return FALSE;
 }
 
+bool32 vrWorldHandAttackable(sdword hand)
+{
+    SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
+    MaxSelection capable;
+
+    return vrwAttackable(obj) && selSelected.numShips > 0
+        && !vrwOrdersBlocked()
+        && MakeShipsAttackCapable((SelectCommand*)&capable,
+                                  (SelectCommand*)&selSelected) != 0;
+}
+
+/* Deliberately built on the same two filters the swept multi-attack uses -
+   vrwAttackable to decide what the ray may pick up, then the game's own
+   MakeTargetsOnlyNonForceAttackTargets to decide what may be shot without a
+   force-attack. One target or twenty, the button means the same thing. */
+bool32 vrWorldAttackOrder(sdword hand)
+{
+    SpaceObjRotImpTarg* obj = vrw.ray[hand].valid ? vrw.ray[hand].hover : NULL;
+    MaxSelection attackers;
+    MaxAnySelection targets;
+
+    if (!vrwAttackable(obj) || selSelected.numShips == 0 || vrwOrdersBlocked())
+    {
+        return FALSE;
+    }
+    if (!MakeShipsAttackCapable((SelectCommand*)&attackers,
+                                (SelectCommand*)&selSelected))
+    {
+        return FALSE;
+    }
+    targets.numTargets = 1;
+    targets.TargetPtr[0] = obj;
+    MakeTargetsOnlyNonForceAttackTargets((SelectAnyCommand*)&targets,
+                                         universe.curPlayerPtr);
+    if (targets.numTargets == 0)
+    {
+        return FALSE;
+    }
+    MakeShipMastersIncludeSlaves((SelectCommand*)&targets);
+    /* a fresh order supersedes whatever path was being flown */
+    vrWorldPathCancel();
+    clWrapAttack(&universe.mainCommandLayer, (SelectCommand*)&attackers,
+                 (SelectAnyCommand*)&targets);
+    tutGameMessage("Game_ClickAttack");
+    SDL_Log("VR: attack issued: %d ship(s) -> 1 target",
+            (int)attackers.numShips);
+    return TRUE;
+}
+
 bool32 vrWorldMoveBegin(sdword hand)
 {
     vrwray const* ray = &vrw.ray[hand];
@@ -1750,12 +1859,34 @@ real32 vrWorldCursorDist(void)
 /*-----------------------------------------------------------------------------
     Freehand flight paths
 
-    Homeworld has no waypoint order: clWrapMove takes a single destination and
-    replaces whatever the ships were doing. So a drawn path is kept here and
-    flown leg by leg, re-issuing a plain move each time the previous leg is
-    reached. The stroke itself is a Catmull-Rom spline through the swept
-    points, resampled by arc length so waypoint spacing is even regardless of
-    how fast the hand moved.
+    Homeworld has no waypoint order. MoveCommand is one heading and one
+    destination, and clMove either overwrites them or replaces the command
+    outright; there is no list and no "and then". So a drawn curve has to be
+    flown from out here.
+
+    Not as a chain of destinations, though. Handing the fleet each point in
+    turn and waiting for it to arrive fails twice over: ChangeOrderToMove runs
+    InitShipsForAI, which zeroes ship->aistate and drops every hull back into
+    STATE_POINT_IN_DIRECTION - a brake and a pivot at every point - and the
+    arrival radius needed to make a spread-out group ever count as "there"
+    is wider than the gap between the points, so they are consumed as fast as
+    the clock ticks and the curve evaporates.
+
+    Instead the curve is a carrot. One destination slides along it, kept a
+    lead distance ahead of where the fleet has actually got to, and the
+    command layer is steered rather than re-ordered: move.destination, the
+    heading and each ship's moveTo are written directly, leaving aistate
+    alone, so nothing pivots, no engine restarts and nothing flashes. The
+    ships are always chasing a point far enough ahead to be worth full
+    throttle, and always one that lies on the drawn curve.
+
+    Steering the command layer behind its own back is a single-player liberty:
+    in a network game orders have to travel as orders, so there the follower
+    falls back to a rate-limited clWrapMove and accepts the pivots.
+
+    The stroke itself is a centripetal Catmull-Rom spline through the swept
+    points, resampled to even arc length so that "the point s units along"
+    costs one divide and one lerp however fast the hand moved.
 ----------------------------------------------------------------------------*/
 static real32 vrwDistance(vector const* a, vector const* b)
 {
@@ -1879,6 +2010,11 @@ void vrWorldPathBegin(sdword hand)
     {
         return;
     }
+    /* A new stroke replaces whatever was being flown. They share pathPoint,
+       so leaving the follower running would have it indexing a curve that is
+       being overwritten - and drawing a fresh route is the player saying the
+       old one is finished with anyway. */
+    vrWorldPathCancel();
     vrw.pathDrawing = TRUE;
     vrw.pathHand = hand;
     vrw.pathSampleCount = 0;
@@ -1913,11 +2049,38 @@ void vrWorldPathSample(sdword hand)
     vrw.pathSample[vrw.pathSampleCount++] = *point;
 }
 
-/* Trigger released: smooth the stroke and lay waypoints along it evenly. */
+/* The point a given arc length along the curve. Even spacing is what buys
+   this: no table search, just an index and a fraction. */
+static void vrwPathPointAt(real32 s, vector* out)
+{
+    sdword i;
+    real32 f;
+
+    if (vrw.pathCount <= 0)
+    {
+        vecZeroVector(*out);
+        return;
+    }
+    if (s <= 0.0f || vrw.pathSpacing <= 0.0f)
+    {
+        *out = vrw.pathPoint[0];
+        return;
+    }
+    i = (sdword)(s / vrw.pathSpacing);
+    if (i >= vrw.pathCount - 1)
+    {
+        *out = vrw.pathPoint[vrw.pathCount - 1];
+        return;
+    }
+    f = (s - (real32)i * vrw.pathSpacing) / vrw.pathSpacing;
+    vrwLerp(out, &vrw.pathPoint[i], &vrw.pathPoint[i + 1], f);
+}
+
+/* Trigger released: smooth the stroke and resample it to even arc length. */
 bool32 vrWorldPathFinishStroke(void)
 {
-    sdword segment, step;
-    real32 total = 0.0f, spacing, travelled = 0.0f;
+    sdword segment, step, emitted;
+    real32 total = 0.0f, spacing, acc = 0.0f;
     vector previous, current;
 
     if (!vrw.pathDrawing)
@@ -1926,6 +2089,8 @@ bool32 vrWorldPathFinishStroke(void)
     }
     vrw.pathDrawing = FALSE;
     vrw.pathCount = 0;
+    vrw.pathLength = 0.0f;
+    vrw.pathSpacing = 0.0f;
     if (vrw.pathSampleCount < 2)
     {
         SDL_Log("VR: path stroke too short (%d samples)",
@@ -1935,6 +2100,7 @@ bool32 vrWorldPathFinishStroke(void)
 
     vrwPathSmoothSamples();
 
+    /* pass one: how long the smoothed curve actually is */
     previous = vrw.pathSample[0];
     for (segment = 0; segment + 1 < vrw.pathSampleCount; segment++)
     {
@@ -1946,47 +2112,63 @@ bool32 vrWorldPathFinishStroke(void)
             previous = current;
         }
     }
-    if (total <= 0.0f)
+    spacing = total / (real32)(VRW_PATH_MAX_POINTS - 1);
+    if (total <= 0.0f || spacing <= 0.0f)
     {
         return FALSE;
     }
 
-    /* Spacing follows the path length so the waypoint budget is never
-       exceeded and a long sweep does not become a dense stutter of orders. */
-    spacing = total / (real32)VRW_PATH_MAX_POINTS;
-    vrw.pathSpacing = spacing;
+    /* Pass two: emit a point at every multiple of the spacing, interpolating
+       within whichever spline step straddles it. Walking the curve a second
+       time rather than keeping the thousand-odd fine points around - they are
+       only wanted for their lengths, and this is not a hot path. */
+    vrw.pathPoint[0] = vrw.pathSample[0];
+    emitted = 1;
     previous = vrw.pathSample[0];
     for (segment = 0; segment + 1 < vrw.pathSampleCount; segment++)
     {
         for (step = 1; step <= VRW_PATH_SPLINE_STEPS; step++)
         {
+            real32 segLen;
+
             vrwSplineAt(segment, (real32)step / (real32)VRW_PATH_SPLINE_STEPS,
                         &current);
-            travelled += vrwDistance(&previous, &current);
-            previous = current;
-            if (travelled >= spacing && vrw.pathCount < VRW_PATH_MAX_POINTS - 1)
+            segLen = vrwDistance(&previous, &current);
+            while (emitted < VRW_PATH_MAX_POINTS - 1 && segLen > 0.0f
+                   && (real32)emitted * spacing <= acc + segLen)
             {
-                vrw.pathPoint[vrw.pathCount++] = current;
-                travelled = 0.0f;
+                real32 f = ((real32)emitted * spacing - acc) / segLen;
+
+                vrwLerp(&vrw.pathPoint[emitted], &previous, &current, f);
+                emitted++;
             }
+            acc += segLen;
+            previous = current;
         }
     }
-    /* finish exactly where the hand stopped */
-    if (vrw.pathCount < VRW_PATH_MAX_POINTS)
+    /* rounding can leave the tail a point or two short; pad, then finish
+       exactly where the hand stopped */
+    while (emitted < VRW_PATH_MAX_POINTS)
     {
-        vrw.pathPoint[vrw.pathCount++] =
-            vrw.pathSample[vrw.pathSampleCount - 1];
+        vrw.pathPoint[emitted++] = previous;
     }
-    SDL_Log("VR: path stroke done: %d samples, length=%.0f spacing=%.0f "
-            "-> %d waypoints", (int)vrw.pathSampleCount, total, spacing,
-            (int)vrw.pathCount);
-    return vrw.pathCount > 0;
+    vrw.pathPoint[VRW_PATH_MAX_POINTS - 1] =
+        vrw.pathSample[vrw.pathSampleCount - 1];
+    vrw.pathCount = VRW_PATH_MAX_POINTS;
+    vrw.pathSpacing = spacing;
+    vrw.pathLength = total;
+
+    SDL_Log("VR: path stroke done: %d samples, length=%.0f -> %d points "
+            "spaced %.0f", (int)vrw.pathSampleCount, total,
+            (int)vrw.pathCount, spacing);
+    return TRUE;
 }
 
 bool32 vrWorldPathCommit(void)
 {
     sdword i;
-    real32 maxColl = 0.0f;
+    real32 maxColl = 0.0f, paceVel = 0.0f, leadCap;
+    vector first;
 
     if (vrw.pathCount <= 0)
     {
@@ -2007,36 +2189,58 @@ bool32 vrWorldPathCommit(void)
     }
     for (i = 0; i < vrw.pathSelection.numShips; i++)
     {
-        real32 coll = vrw.pathSelection.ShipPtr[i]->staticinfo
-                      ->staticheader.staticCollInfo.collspheresize;
+        Ship* ship = vrw.pathSelection.ShipPtr[i];
+        real32 coll = ship->staticinfo->staticheader.staticCollInfo.collspheresize;
+        real32 vel = tacticsGetShipsMaxVelocity(ship);
 
         if (coll > maxColl)
         {
             maxColl = coll;
         }
+        /* the slowest hull sets the pace: lead the group by more than its
+           laggard can cover and the fast ships simply run off the front */
+        if (paceVel <= 0.0f || vel < paceVel)
+        {
+            paceVel = vel;
+        }
     }
-    /* Arrive generously: the follower only needs to know the leg is done, and
-       a tight radius on a spread-out group would stall the whole path until
-       the timeout rescued it. Scale with leg length as well as group size. */
-    vrw.pathArriveDist = maxColl * 3.0f + 0.10f * vrw.scale;
-    if (vrw.pathArriveDist < vrw.pathSpacing * 0.25f)
+
+    /* Ten seconds of travel is where the game's own velocity controller stops
+       throttling back (see VRW_PATH_LEAD_SECONDS), capped so a short stroke
+       keeps its shape and floored so the carrot is always clear of the
+       group's own hulls and of MOVE_ARRIVE_TOLERANCE. */
+    vrw.pathLead = paceVel * VRW_PATH_LEAD_SECONDS;
+    leadCap = vrw.pathLength * VRW_PATH_LEAD_MAX_FRAC;
+    if (vrw.pathLead > leadCap)
     {
-        vrw.pathArriveDist = vrw.pathSpacing * 0.25f;
+        vrw.pathLead = leadCap;
     }
+    if (vrw.pathLead < maxColl * VRW_PATH_LEAD_HULLS + vrw.pathSpacing)
+    {
+        vrw.pathLead = maxColl * VRW_PATH_LEAD_HULLS + vrw.pathSpacing;
+    }
+    vrw.pathArrive = maxColl * 3.0f + vrw.pathSpacing;
 
     selCentrePointCompute();
     vrw.pathActive = TRUE;
     vrw.pathSampleCount = 0;            //the drawn stroke has served its purpose
-    vrw.pathLeg = 0;
-    vrw.pathLegStart = universe.totaltimeelapsed;
+    vrw.pathProgress = 0.0f;
+    vrw.pathStallWhere = selCentrePoint;
+    vrw.pathStallSince = universe.totaltimeelapsed;
     vrw.pathLastUpdate = universe.totaltimeelapsed;
+    vrw.pathSteering = !multiPlayerGame;
+
+    /* One real order, so the command layer, formation and speech all see a
+       move being given. Everything after this steers that same command. */
+    vrwPathPointAt(vrw.pathLead, &first);
+    vrw.pathIssued = first;
     clWrapMove(&universe.mainCommandLayer, (SelectCommand*)&vrw.pathSelection,
-               selCentrePoint, vrw.pathPoint[0]);
+               selCentrePoint, first);
     tutGameMessage("Game_MoveIssued");
-    SDL_Log("VR: path commit: %d ships, %d legs, arrive=%.0f, leg 0 -> "
-            "(%.0f %.0f %.0f)", (int)vrw.pathSelection.numShips,
-            (int)vrw.pathCount, vrw.pathArriveDist, vrw.pathPoint[0].x,
-            vrw.pathPoint[0].y, vrw.pathPoint[0].z);
+    SDL_Log("VR: path commit: %d ships, length=%.0f lead=%.0f arrive=%.0f "
+            "steering=%d, first target (%.0f %.0f %.0f)",
+            (int)vrw.pathSelection.numShips, vrw.pathLength, vrw.pathLead,
+            vrw.pathArrive, (int)vrw.pathSteering, first.x, first.y, first.z);
     return TRUE;
 }
 
@@ -2044,15 +2248,16 @@ void vrWorldPathCancel(void)
 {
     if (vrw.pathDrawing || vrw.pathActive || vrw.pathCount > 0)
     {
-        SDL_Log("VR: path cancelled (drawing=%d active=%d leg=%d/%d)",
-                (int)vrw.pathDrawing, (int)vrw.pathActive, (int)vrw.pathLeg,
-                (int)vrw.pathCount);
+        SDL_Log("VR: path cancelled (drawing=%d active=%d %.0f/%.0f flown)",
+                (int)vrw.pathDrawing, (int)vrw.pathActive, vrw.pathProgress,
+                vrw.pathLength);
     }
     vrw.pathDrawing = FALSE;
     vrw.pathActive = FALSE;
     vrw.pathSampleCount = 0;
     vrw.pathCount = 0;
-    vrw.pathLeg = 0;
+    vrw.pathLength = 0.0f;
+    vrw.pathProgress = 0.0f;
     vrw.pathSelection.numShips = 0;
 }
 
@@ -2071,15 +2276,99 @@ sdword vrWorldPathPointCount(void)
     return vrw.pathCount;
 }
 
+/* How far along the curve the fleet has actually got. Searched forward only,
+   and only within a window a couple of leads wide: nearest-point over the
+   whole remaining curve would let a stroke that doubles back teleport the
+   carrot across the loop, and searching backwards would let a group that
+   overshoots a corner undo its own progress. */
+static void vrwPathAdvance(vector const* centre)
+{
+    sdword first = (sdword)(vrw.pathProgress / vrw.pathSpacing);
+    sdword window = (sdword)((vrw.pathLead * VRW_PATH_SEARCH_LEADS)
+                             / vrw.pathSpacing) + 2;
+    sdword last = first + window;
+    sdword i, best = first;
+    real32 bestSqr = -1.0f;
+
+    if (last >= vrw.pathCount)
+    {
+        last = vrw.pathCount - 1;
+    }
+    for (i = first; i <= last; i++)
+    {
+        vector d;
+        real32 sqr;
+
+        vecSub(d, vrw.pathPoint[i], *centre);
+        sqr = vecMagnitudeSquared(d);
+        if (bestSqr < 0.0f || sqr < bestSqr)
+        {
+            bestSqr = sqr;
+            best = i;
+        }
+    }
+    if ((real32)best * vrw.pathSpacing > vrw.pathProgress)
+    {
+        vrw.pathProgress = (real32)best * vrw.pathSpacing;
+    }
+}
+
+/* Point the fleet's existing move command at a new destination without
+   re-issuing it. ChangeOrderToMove would do the same three writes and then
+   call InitShipsForAI, whose ship->aistate = 0 is exactly the brake-and-pivot
+   this whole approach exists to avoid; aistatecommand is reset because that
+   one is the outer "have I arrived" latch, and a ship that tripped it would
+   otherwise sit steady while the carrot moved on without it.
+
+   The command is looked up fresh every tick rather than cached: clProcess
+   frees a move command the moment processMoveToDo reports everyone done, and
+   the player can replace it from the wheel at any time. */
+static bool32 vrwPathSteer(vector const* from, vector const* to)
+{
+    CommandToDo* command;
+    bool32 formation;
+    sdword i;
+
+    if (!vrw.pathSteering)
+    {
+        return FALSE;
+    }
+    command = IsSelectionAlreadyDoingSomething(&universe.mainCommandLayer,
+                                               (SelectCommand*)&vrw.pathSelection);
+    if (command == NULL || command->ordertype.order != COMMAND_MOVE
+        || (command->ordertype.attributes & COMMAND_MASK_ATTACKING_AND_MOVING))
+    {
+        return FALSE;                   //not ours to steer any more
+    }
+    command->move.destination = *to;
+    vecSub(command->move.heading, *to, *from);
+    vecNormalize(&command->move.heading);
+    CalculateMoveToPoints(command->selection, *from, *to);
+
+    /* In formation only the leader is flown - processMoveLeaderToDo reads
+       move.destination directly and the rest hold station around it. */
+    formation = (command->ordertype.attributes & COMMAND_MASK_FORMATION) != 0;
+    for (i = 0; i < command->selection->numShips; i++)
+    {
+        Ship* ship = command->selection->ShipPtr[i];
+
+        ship->moveFrom = ship->posinfo.position;
+        if (i == 0 || !formation)
+        {
+            ship->aistatecommand = 0;
+        }
+    }
+    return TRUE;
+}
+
 /* Advance the committed path. Called once per frame from vrWorldFrameBegin;
    gated on universe time so the extra rndFlush passes a manager triggers
-   cannot re-issue the same leg several times and stall the ships. */
+   cannot run the follower several times against one tick of simulation. */
 static void vrwPathFollow(void)
 {
-    vector centre;
+    vector centre, target;
     sdword i, alive = 0;
-    real32 invAlive, toLeg;
-    bool32 reached, timedOut;
+    real32 invAlive, toEnd;
 
     if (!vrw.pathActive)
     {
@@ -2113,40 +2402,71 @@ static void vrwPathFollow(void)
     }
     vecDivideByScalar(centre, (real32)alive, invAlive);
 
-    toLeg = vrwDistance(&centre, &vrw.pathPoint[vrw.pathLeg]);
-    reached = toLeg <= vrw.pathArriveDist;
-    timedOut = (universe.totaltimeelapsed - vrw.pathLegStart)
-               > VRW_PATH_LEG_TIMEOUT;
-    if (!reached && !timedOut)
-    {
-        if (vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
-        {
-            SDL_Log("VR: path leg %d/%d, %d ship(s) %.0f away, arrive at %.0f",
-                    (int)vrw.pathLeg, (int)vrw.pathCount, (int)alive, toLeg,
-                    vrw.pathArriveDist);
-        }
-        return;
-    }
-    if (timedOut && !reached)
-    {
-        SDL_Log("VR: path leg %d timed out, skipping", (int)vrw.pathLeg);
-    }
+    vrwPathAdvance(&centre);
 
-    vrw.pathLeg++;
-    if (vrw.pathLeg >= vrw.pathCount)
+    /* Done when the group is at the far end. Progress has to agree, or a
+       curve that loops back past its own start would finish on the spot. */
+    toEnd = vrwDistance(&centre, &vrw.pathPoint[vrw.pathCount - 1]);
+    if (vrw.pathProgress >= vrw.pathLength - vrw.pathSpacing
+        && toEnd <= vrw.pathArrive)
     {
-        SDL_Log("VR: path complete (%d legs)", (int)vrw.pathCount);
+        SDL_Log("VR: path complete (%.0f units flown)", vrw.pathLength);
         vrw.pathActive = FALSE;
         vrw.pathCount = 0;
         vrw.pathSelection.numShips = 0;
         return;
     }
-    vrw.pathLegStart = universe.totaltimeelapsed;
-    clWrapMove(&universe.mainCommandLayer, (SelectCommand*)&vrw.pathSelection,
-               centre, vrw.pathPoint[vrw.pathLeg]);
-    SDL_Log("VR: path leg %d/%d -> (%.0f %.0f %.0f)", (int)vrw.pathLeg,
-            (int)vrw.pathCount, vrw.pathPoint[vrw.pathLeg].x,
-            vrw.pathPoint[vrw.pathLeg].y, vrw.pathPoint[vrw.pathLeg].z);
+
+    /* Stuck means the ships have stopped moving, not that the curve has
+       stopped being consumed: the run in to the start of a long path can eat
+       a lot of clock without advancing any arc length at all, and measuring
+       progress along the curve would call that a stall and give up on it. */
+    if (vrwDistance(&centre, &vrw.pathStallWhere) > vrw.pathArrive)
+    {
+        vrw.pathStallWhere = centre;
+        vrw.pathStallSince = universe.totaltimeelapsed;
+    }
+    else if (universe.totaltimeelapsed - vrw.pathStallSince
+             > VRW_PATH_STALL_TIME)
+    {
+        SDL_Log("VR: path stalled at %.0f/%.0f, releasing the fleet",
+                vrw.pathProgress, vrw.pathLength);
+        vrw.pathActive = FALSE;
+        vrw.pathCount = 0;
+        vrw.pathSelection.numShips = 0;
+        return;
+    }
+
+    vrwPathPointAt(vrw.pathProgress + vrw.pathLead, &target);
+
+    /* Steering is free, so it happens every tick and the carrot slides
+       smoothly. Re-ordering is not - it flashes the ships, restarts their
+       engines and pivots them - so the fallback waits until the target has
+       moved a worthwhile fraction of the lead. */
+    if (!vrwPathSteer(&centre, &target))
+    {
+        if (vrwDistance(&target, &vrw.pathIssued)
+            > vrw.pathLead * VRW_PATH_REISSUE_FRAC)
+        {
+            clWrapMove(&universe.mainCommandLayer,
+                       (SelectCommand*)&vrw.pathSelection, centre, target);
+            vrw.pathIssued = target;
+            SDL_Log("VR: path re-ordered at %.0f/%.0f -> (%.0f %.0f %.0f)",
+                    vrw.pathProgress, vrw.pathLength, target.x, target.y,
+                    target.z);
+        }
+    }
+    else
+    {
+        vrw.pathIssued = target;
+    }
+
+    if (vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
+    {
+        SDL_Log("VR: path %.0f/%.0f flown, %d ship(s), lead=%.0f, %.0f to end",
+                vrw.pathProgress, vrw.pathLength, (int)alive, vrw.pathLead,
+                toEnd);
+    }
 }
 
 /*-----------------------------------------------------------------------------
@@ -2231,9 +2551,16 @@ void vrWorldCameraFocusSelection(void)
 
 bool32 vrWorldSensorsActive(void)
 {
-    /* not during the zoom transition either way - smViewportProcess ignores
-       input then, and steering a camera mid-flight fights the animation */
-    return smSensorsActive && !smZoomingIn && !smZoomingOut;
+    /* Not during the zoom transition either way - smViewportProcess ignores
+       input then, and steering a camera mid-flight fights the animation. Nor
+       during a mission briefing: that map is the mission's to drive, and the
+       sticks bypass the smFleetIntel guards Sensors.c uses on the mouse. */
+    return smSensorsActive && !smZoomingIn && !smZoomingOut && !smFleetIntel;
+}
+
+bool32 vrWorldSensorsBriefing(void)
+{
+    return smFleetIntel && (smSensorsActive || smZoomingIn || smZoomingOut);
 }
 
 bool32 vrWorldToggleSensors(void)
@@ -2412,7 +2739,7 @@ void vrWorldDrawOverlays(void)
         if (ray->hover != NULL && ray->intent != VRW_INTENT_PANEL)
         {
             primCircleOutline3(&ray->hover->collInfo.collPosition,
-                               ray->hover->staticinfo->staticheader.staticCollInfo.collspheresize,
+                               vrwHullRadius(ray->hover),
                                24, 0, rayColor, Z_AXIS);
         }
     }
@@ -2421,16 +2748,8 @@ void vrWorldDrawOverlays(void)
     {
         Ship* ship = selSelected.ShipPtr[i];
 
-        real32 ringScale = 1.1f;
-
-        if (ship->shiptype == Mothership)
-        {
-            ringScale *= VRW_MOTHERSHIP_SCALE;          //see the constant
-        }
-
         primCircleOutline3(&ship->collInfo.collPosition,
-                           ship->staticinfo->staticheader.staticCollInfo.collspheresize
-                               * ringScale,
+                           vrwHullRadius((SpaceObjRotImpTarg*)ship) * 1.1f,
                            24, 0, selColor, Z_AXIS);
     }
 
@@ -2438,7 +2757,7 @@ void vrWorldDrawOverlays(void)
        that is what gets drawn - a box would misstate which ships are actually
        inside it. Rings down the ray show the capture volume, and the trail of
        recent far-edge positions shows the region already swept. */
-    if ((vrw.sweepActive || vrw.targetSweepActive)
+    if ((vrw.sweepActive || (vrw.targetSweepActive && vrw.targetSweepPainting))
         && vrw.sweepHand >= 0
         && vrw.ray[vrw.sweepHand].valid && vrw.sweepReach > 0.0f)
     {
@@ -2482,7 +2801,7 @@ void vrWorldDrawOverlays(void)
             SpaceObjRotImpTarg* obj = vrw.targetSweep.TargetPtr[i];
 
             primCircleOutline3(&obj->collInfo.collPosition,
-                               obj->staticinfo->staticheader.staticCollInfo.collspheresize * 1.3f,
+                               vrwHullRadius(obj) * 1.3f,
                                20, 0, attackColor, Z_AXIS);
         }
     }
@@ -2492,22 +2811,27 @@ void vrWorldDrawOverlays(void)
         Ship* ship = vrw.sweepPreview.ShipPtr[i];
 
         primCircleOutline3(&ship->collInfo.collPosition,
-                           ship->staticinfo->staticheader.staticCollInfo.collspheresize * 1.2f,
+                           vrwHullRadius((SpaceObjRotImpTarg*)ship) * 1.2f,
                            16, 0, hoverColor, Z_AXIS);
     }
 
-    /* Freehand path: the smoothed spline as a fine polyline, with a ring at
-       each waypoint the ships will be ordered to. This is purely a planning
-       aid - once the path is committed and the ships are flying it, it has
-       served its purpose and stops drawing. */
-    if (!vrw.pathActive && (vrw.pathDrawing || vrw.pathCount > 0))
+    /* Freehand path. While the hand is still drawing, the live spline through
+       the raw samples; after that, the resampled curve the follower is
+       actually working from. It keeps drawing once committed - dimmed behind
+       the fleet, lit ahead of it, with a ring on the carrot - because seeing
+       the route being tracked is the whole point of having drawn one. */
+    if (vrw.pathDrawing || vrw.pathCount > 0)
     {
         color const strokeColor = colRGB(120, 200, 255);
+        color const flownColor = colRGB(45, 75, 100);
         color const pointColor = colRGB(255, 235, 140);
         real32 ringSize = selAverageSize > 0.0f ? selAverageSize : 150.0f;
         sdword segment, step;
 
-        if (vrw.pathSampleCount >= 2)
+        /* only while the hand is still moving: once the stroke is finished the
+           resampled curve below is the same shape, and drawing both doubles
+           every line */
+        if (vrw.pathDrawing && vrw.pathSampleCount >= 2)
         {
             vector previous = vrw.pathSample[0];
 
@@ -2525,15 +2849,29 @@ void vrWorldDrawOverlays(void)
                 }
             }
         }
-        for (i = 0; i < vrw.pathCount; i++)
+        for (i = 1; i < vrw.pathCount; i++)
         {
-            primCircleOutline3(&vrw.pathPoint[i], ringSize, 12, 0, pointColor,
+            bool32 flown = vrw.pathActive
+                && (real32)i * vrw.pathSpacing <= vrw.pathProgress;
+
+            primLine3(&vrw.pathPoint[i - 1], &vrw.pathPoint[i],
+                      flown ? flownColor : strokeColor);
+        }
+        /* Ends only. At this resolution a ring per point would be a tube. */
+        if (vrw.pathCount > 0)
+        {
+            primCircleOutline3(&vrw.pathPoint[0], ringSize, 12, 0, pointColor,
                                Z_AXIS);
-            if (i > 0)
-            {
-                primLine3(&vrw.pathPoint[i - 1], &vrw.pathPoint[i],
-                          strokeColor);
-            }
+            primCircleOutline3(&vrw.pathPoint[vrw.pathCount - 1], ringSize, 12,
+                               0, pointColor, Z_AXIS);
+        }
+        if (vrw.pathActive)
+        {
+            vector carrot;
+
+            vrwPathPointAt(vrw.pathProgress + vrw.pathLead, &carrot);
+            primCircleOutline3(&carrot, ringSize * 1.4f, 16, 0, moveColor,
+                               Z_AXIS);
         }
     }
 

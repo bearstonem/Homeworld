@@ -91,7 +91,7 @@
 #define VR_WHEEL_REPEAT_NS   110000000LL  /* interval once it is repeating */
 
 #define VR_CARD_CONTROLS_WIN_W   330    /* layout size, logical UI pixels */
-#define VR_CARD_CONTROLS_WIN_H   540
+#define VR_CARD_CONTROLS_WIN_H   580    /* the attack section costs four rows */
 #define VR_CARD_CONTROLS_WIDTH   0.24f  /* physical width, metres */
 #define VR_CARD_STATUS_WIN_W     300
 #define VR_CARD_STATUS_WIN_H     200
@@ -250,6 +250,7 @@ typedef struct {
     XrTime       lastSelectTime[VR_HAND_COUNT];
     sdword       contextGestureHand;
     sdword       contextGestureMode;
+    sdword       attackGestureHand;  /* B held: attack preview owns this hand */
     sdword       backKey[VR_HAND_COUNT];
     sdword       stickClickKey[VR_HAND_COUNT];
     bool32       stickRotating;     /* left stick currently orbiting the camera */
@@ -263,6 +264,7 @@ typedef struct {
     real32       moveDepthHeld;     /* seconds the depth stick has been held */
     XrTime       lastInputTime;
     bool32       panelHidden;       /* wrist panel toggled off in-game */
+    bool32       prevBriefing;      /* mission-driven Sensors was up last frame */
     vrcard       card[VR_CARD_COUNT];
     fonthandle   cardFont;
     bool32       cardFontTried;
@@ -280,10 +282,6 @@ typedef struct {
     bool32       managerPlaced;     /* panel pose established in space */
     bool32       managerPoseValid;  /* this frame's pose is submittable */
     bool32       managerFollowing;  /* panel gliding back into view */
-    bool32       pinchValid;
-    real32       pinchPrevDist;
-    real32       pinchPrevAzimuth;
-    real32       pinchPrevElev;
     sdword       prevCycleDir;      /* right-stick flick edge state */
     XrVector3f   worldOffset;       /* where the hologram sits in the room,
                                        metres. Set by recentring, which is a
@@ -1716,6 +1714,7 @@ static void vrCardDrawControls(vrcard const* card)
         {"  tilt stick",         "pick an entry"},
         {"  rest on an entry",   "open submenu"},
         {"  let go",             "run it"},
+        {"  Menu wedge",         "save, options, quit"},
         {"Tilt stick",           "orbit the view"},
         {"Click stick",          "focus + recentre"},
         {"Hold grip",            "add to selection"},
@@ -1729,8 +1728,12 @@ static void vrCardDrawControls(vrcard const* card)
         {"Push stick up/down",   "zoom in and out"},
         {"Click stick",          "open Sensors"},
         {"Grip + stick sideways","step through fleet"},
-        {"Both grips",           "pinch to zoom"},
-        {"B",                    "cancel or go back"},
+        {"",                     NULL},
+        {"HOLD B TO ATTACK",     NULL},
+        {"aim, then let go",     "attack that ship"},
+        {"Trigger, then sweep",  "attack them all"},
+        {"aimed at anything else","nothing happens"},
+        {"Y",                    "throw it away"},
         {"",                     NULL},
         {"POINT AND PULL TRIGGER", NULL},
         {"at an enemy",          "attack it"},
@@ -1745,10 +1748,10 @@ static void vrCardDrawControls(vrcard const* card)
         {"over an asteroid",     "harvest"},
         {"over your own ship",   "dock with it"},
         {"Push stick up/down",   "near or far"},
-        {"Trigger, then sweep",  "draw a route"},
+        {"Trigger, then sweep",  "fly a drawn curve"},
         {"Trigger on more foes", "attack them all"},
         {"Let go of A",          "confirm"},
-        {"B",                    "throw it away"},
+        {"B or Y",               "throw it away"},
     };
     sdword const count = (sdword)(sizeof(rows) / sizeof(rows[0]));
     color const heading = colRGB(120, 230, 255);
@@ -1830,15 +1833,21 @@ typedef struct {
 /* A wedge with both a cmd and a page does the cmd on a flick and opens the
    page on a dwell, so the common case stays a single gesture. */
 static vrwheelpage const vrWheelPage[VR_WHEEL_PAGE_COUNT] = {
-    { "COMMAND", 8, {
+    { "COMMAND", 9, {
         { "Formation",  VRW_CMD_NONE,        0, VR_WHEEL_PAGE_FORMATIONS },
         { "Groups",     VRW_CMD_NONE,        0, VR_WHEEL_PAGE_GROUPS },
         { "Tactics",    VRW_CMD_NONE,        0, VR_WHEEL_PAGE_TACTICS },
         { "Build",      VRW_CMD_BUILD,       0, -1 },
         { "Undo",       VRW_CMD_UNDO,        0, -1 },
         { "Research",   VRW_CMD_RESEARCH,    0, -1 },
-        { "Sensors",    VRW_CMD_SENSORS,     0, VR_WHEEL_PAGE_VIEW },
+        /* named for the page it opens, not for the command a flick runs -
+           Sensors is the headline entry on that page and stays the flick, but
+           the page is also where focus, scale and select-all live */
+        { "View",       VRW_CMD_SENSORS,     0, VR_WHEEL_PAGE_VIEW },
         { "Orders",     VRW_CMD_NONE,        0, VR_WHEEL_PAGE_ORDERS },
+        /* B used to be Escape; it is the attack button now, so the game's own
+           menu needs a home that is always reachable */
+        { "Menu",       VRW_CMD_MENU,        0, -1 },
     }},
     { "FORMATION", 7, {
         { "Delta",      VRW_CMD_FORM_DELTA,  0, -1 },
@@ -2558,6 +2567,18 @@ static void vrWheelFire(vrwheelslot const* slot, real32 haptic)
         }
         return;
     }
+    /* Escape is a keystroke into the game's own region tree, not a fleet
+       order, so it belongs on this side of the boundary too. Pressed and
+       released together: the menu opens on the key down, and leaving it held
+       would arm nothing but the next screen's Escape handler. */
+    if (cmd == VRW_CMD_MENU)
+    {
+        vrPushKey(SDLK_ESCAPE, SDL_SCANCODE_ESCAPE, TRUE);
+        vrPushKey(SDLK_ESCAPE, SDL_SCANCODE_ESCAPE, FALSE);
+        vrHapticPulse(VR_HAND_LEFT, haptic, 40000000);
+        SDL_Log("VR: wheel opened the game menu");
+        return;
+    }
     if (vrWorldCommand(cmd, slot->arg))
     {
         vrHapticPulse(VR_HAND_LEFT, haptic, 40000000);
@@ -2717,6 +2738,47 @@ static void vrUpdateInput(XrTime time)
     managerOpen = vr.worldInteractive && vrWorldManagerActive();
     managerActive = managerOpen && vr.managerState == VR_MGR_VISIBLE;
 
+    /* The mission has taken the sensors map to show the player something. The
+       hands are hidden for the duration (vrWorldSetRay invalidates the rays),
+       so end whatever gesture they were in the middle of: releasing a button
+       the player can no longer aim would otherwise commit an order at a
+       destination frozen at the moment the briefing started. A path already
+       committed goes on being flown - that fleet has its orders. */
+    {
+        bool32 briefing = vr.worldInteractive && vrWorldSensorsBriefing();
+
+        if (briefing && !vr.prevBriefing)
+        {
+            if (vrWorldMoveActive())
+            {
+                vrWorldMoveCancel();
+            }
+            if (vrWorldPathDrawing())
+            {
+                vrWorldPathCancel();
+            }
+            vrWorldSweepCancel();
+            vrWorldTargetSweepCancel();
+            if (vr.wheelOpen)
+            {
+                vrWheelClose(FALSE);
+            }
+            vr.selectGestureHand = -1;
+            vr.selectGestureMode = VR_GESTURE_NONE;
+            vr.contextGestureHand = -1;
+            vr.contextGestureMode = VR_GESTURE_NONE;
+            vr.attackGestureHand = -1;
+            vr.moveDepthInput = 0.0f;
+            vr.moveDepthHeld = 0.0f;
+            SDL_Log("VR: mission sensors briefing - hands hidden");
+        }
+        else if (!briefing && vr.prevBriefing)
+        {
+            SDL_Log("VR: mission sensors briefing over - hands back");
+        }
+        vr.prevBriefing = briefing;
+    }
+
     /* The command wheel owns the left hand while it is up. In menus the left
        trigger keeps its ordinary click, so this is in-game only.
 
@@ -2760,48 +2822,13 @@ static void vrUpdateInput(XrTime time)
                     dir[VR_HAND_RIGHT][0], dir[VR_HAND_RIGHT][1],
                     dir[VR_HAND_RIGHT][2]);
         }
-        /* grab-the-space gestures. Two grips: pinch zoom + pair rotation.
-           One grip: 1:1 pan (your hand drags the hologram). */
-        if (!managerActive
-            && grip[VR_HAND_LEFT] && grip[VR_HAND_RIGHT]
-            && tracked[VR_HAND_LEFT] && tracked[VR_HAND_RIGHT])
-        {
-            real32 dx = pos[VR_HAND_RIGHT][0] - pos[VR_HAND_LEFT][0];
-            real32 dy = pos[VR_HAND_RIGHT][1] - pos[VR_HAND_LEFT][1];
-            real32 dz = pos[VR_HAND_RIGHT][2] - pos[VR_HAND_LEFT][2];
-            real32 dist = sqrtf(dx * dx + dy * dy + dz * dz);
-            real32 azimuth = atan2f(dz, dx);
-            real32 elev = (dist > 1e-4f) ? asinf(dy / dist) : 0.0f;
-
-            if (vr.pinchValid && dist > 0.05f && vr.pinchPrevDist > 0.05f)
-            {
-                real32 dAz = azimuth - vr.pinchPrevAzimuth;
-                real32 dElev = elev - vr.pinchPrevElev;
-
-                if (dAz > 3.14159f)  dAz -= 6.28318f;
-                if (dAz < -3.14159f) dAz += 6.28318f;
-                if (vr.frameCount % VR_DEBUG_INTERVAL == 1)
-                {
-                    SDL_Log("VRDBG INPUT frame=%u source=pinch grips=1/1 "
-                            "distance=%.4f zoom=%.6f orbit=(%.6f %.6f)",
-                            (unsigned)vr.frameCount, dist,
-                            vr.pinchPrevDist / dist, dAz, dElev);
-                }
-                vrWorldCameraZoom(vr.pinchPrevDist / dist);
-                vrWorldCameraOrbit(dAz, dElev);
-            }
-            vr.pinchPrevDist = dist;
-            vr.pinchPrevAzimuth = azimuth;
-            vr.pinchPrevElev = elev;
-            vr.pinchValid = TRUE;
-        }
-        else
-        {
-            /* Traversal follows Homeworld's own mechanic: select a ship and
-               focus on it (left stick click). Single-grip drags do nothing;
-               two-grip pinch handles orbit/zoom above. */
-            vr.pinchValid = FALSE;
-        }
+        /* No grab-the-space gestures. Traversal follows Homeworld's own
+           mechanic: select a ship and focus on it (left stick click). Single
+           grip drags did nothing, and the two-grip pinch that used to zoom and
+           orbit the hologram is gone - the grips have plainer jobs now (add to
+           selection, step through the fleet) and holding both to reach a
+           camera verb that the left stick and the wheel already carry made a
+           two-handed chord out of something either hand could do alone. */
     }
 
     if (!vr.worldInteractive)
@@ -2929,7 +2956,13 @@ static void vrUpdateInput(XrTime time)
     vr.pointerHand = -1;
     if (!vr.stickRotating)
     {
-        bool32 panelAvailable = !vr.worldInteractive || !vr.panelHidden || managerOpen;
+        /* A mission briefing on the sensors map takes the pointer too, or the
+           reticle would go on tracking a beam that is no longer drawn. The
+           game ignores clicks there anyway - Sensors.c gates them on
+           smFleetIntel - so nothing is lost by not aiming at it. */
+        bool32 panelAvailable = (!vr.worldInteractive || !vr.panelHidden
+                                 || managerOpen)
+                             && !(vr.worldInteractive && vrWorldSensorsBriefing());
         sdword lockedPanelHand = -1;
         sdword pointerCandidate = -1;
 
@@ -3011,10 +3044,30 @@ static void vrUpdateInput(XrTime time)
         }
         if (select[hand] && !vr.prevSelect[hand])
         {
+            /* B is the attack button and the trigger is the brush: hold B and
+               pull the trigger to paint a target list, let the trigger go to
+               stop painting while keeping it, and release B to fire. Taken
+               before the A/X cases below because B owns the hand outright. */
+            if (vr.attackGestureHand == (sdword)hand)
+            {
+                if (vrWorldTargetSweepCount() > 0)
+                {
+                    vrWorldTargetSweepPaint(TRUE);          //resume the brush
+                }
+                else
+                {
+                    vrWorldTargetSweepBegin((sdword)hand);
+                }
+                vr.selectGestureHand = hand;
+                vr.selectGestureMode = VR_SELECT_TARGETS;
+                vrHapticPulse(hand, 0.30f, 22000000);
+                SDL_Log("VR: hand %u attack brush on, %d target(s)",
+                        (unsigned)hand, (int)vrWorldTargetSweepCount());
+            }
             /* The trigger is otherwise unbound during a move preview, so it
                is what draws a freehand flight path: sweep with both held and
                the swept curve becomes the waypoints. */
-            if (vr.contextGestureMode == VR_CONTEXT_MOVE
+            else if (vr.contextGestureMode == VR_CONTEXT_MOVE
                 && vr.contextGestureHand == (sdword)hand
                 && vrWorldMoveActive())
             {
@@ -3142,7 +3195,10 @@ static void vrUpdateInput(XrTime time)
             }
             else if (vr.selectGestureMode == VR_SELECT_TARGETS)
             {
-                /* keep the list; A/X release is what issues the order */
+                /* Keep the list; the order button's release is what issues the
+                   order. Lift the brush though, or the ray would go on adding
+                   whatever it crosses while the player looks around. */
+                vrWorldTargetSweepPaint(FALSE);
                 SDL_Log("VR: hand %u target sweep holding %d target(s)",
                         (unsigned)hand, (int)vrWorldTargetSweepCount());
             }
@@ -3164,7 +3220,10 @@ static void vrUpdateInput(XrTime time)
         hand = handOrder[orderIndex];
         if (context[hand] && !vr.prevContext[hand])
         {
-            if (vr.contextGestureHand < 0 && vr.selectGestureHand < 0)
+            /* attackGestureHand too: two order previews on one hand would
+               each think they owned the trigger */
+            if (vr.contextGestureHand < 0 && vr.selectGestureHand < 0
+                && vr.attackGestureHand < 0)
             {
                 if (hand == VR_HAND_LEFT && vr.worldInteractive && !managerActive)
                 {
@@ -3211,7 +3270,6 @@ static void vrUpdateInput(XrTime time)
                         vr.contextGestureMode = VR_CONTEXT_MOVE;
                         vr.moveDepthInput = 0.0f;
                         vr.moveDepthHeld = 0.0f;
-            vr.moveDepthHeld = 0.0f;
                         vrHapticPulse(hand, 0.24f, 26000000);
                         SDL_Log("VR: hand %u move preview begin", (unsigned)hand);
                     }
@@ -3266,7 +3324,7 @@ static void vrUpdateInput(XrTime time)
                 {
                     vrWorldMoveCancel();
                     issued = vrWorldPathCommit();
-                    SDL_Log("VR: hand %u path commit issued=%d legs=%d",
+                    SDL_Log("VR: hand %u path commit issued=%d points=%d",
                             (unsigned)hand, (int)issued,
                             (int)vrWorldPathPointCount());
                 }
@@ -3339,10 +3397,15 @@ static void vrUpdateInput(XrTime time)
         vrWorldPathSample(vr.contextGestureHand);
     }
 
-    /* B/Y cancels a move first, then closes any open manager - that path is
-       unconditional, so a manager is always escapable no matter what its
-       panel is doing. Otherwise left-grip+B/Y toggles the wrist panel,
-       right-grip+B/Y opens Build, and an unmodified press is Escape. */
+    /* B/Y cancels an order preview first, then closes any open manager - that
+       path is unconditional, so a manager is always escapable no matter what
+       its panel is doing. What is left over differs by hand: Y on the
+       commander's hand toggles the wrist panel, and B on the pointing hand is
+       the attack button, held to aim and released to fire.
+
+       B only means attack while the game world is live. In the front end and
+       the briefings it is still Escape, which is the one thing a back button
+       must do in a menu. In-game Escape moved to the wheel's Menu wedge. */
     for (orderIndex = 0; orderIndex < VR_HAND_COUNT; orderIndex++)
     {
         hand = handOrder[orderIndex];
@@ -3368,8 +3431,13 @@ static void vrUpdateInput(XrTime time)
                 }
                 vrHapticPulse(hand, 0.22f, 18000000);
             }
+            /* A path already committed and being flown is cancellable from Y
+               only. On the right hand that press is wanted for the attack
+               itself, and an attack supersedes the flown path anyway, so
+               nothing is lost by letting it through. */
             else if (vrWorldMoveActive() || vrWorldPathDrawing()
-                || vrWorldPathActive() || vrWorldTargetSweepCount() > 0)
+                || vrWorldTargetSweepCount() > 0
+                || (hand == VR_HAND_LEFT && vrWorldPathActive()))
             {
                 vrWorldMoveCancel();
                 vrWorldPathCancel();
@@ -3386,6 +3454,7 @@ static void vrUpdateInput(XrTime time)
                     vr.selectGestureHand = -1;
                     vr.selectGestureMode = VR_GESTURE_NONE;
                 }
+                vr.attackGestureHand = -1;
                 vrHapticPulse(hand, 0.30f, 30000000);
                 SDL_Log("VR: order preview cancelled");
             }
@@ -3419,6 +3488,33 @@ static void vrUpdateInput(XrTime time)
                 vrHapticPulse(hand, 0.25f, 25000000);
                 SDL_Log("VR: wrist panel %s", vr.panelHidden ? "hidden" : "shown");
             }
+            else if (vr.worldInteractive && !managerActive)
+            {
+                /* Attack preview. Nothing is decided yet - the ray simply
+                   turns hostile and waits - so this is safe to start with an
+                   empty selection or over empty space; the release is what
+                   asks whether an order is actually legal.
+
+                   When another gesture already owns the hand the press is
+                   swallowed rather than falling through to Escape: in-game,
+                   B opening the menu because the trigger happened to be down
+                   is the kind of surprise a modal button must never spring. */
+                if (vr.selectGestureHand < 0 && vr.contextGestureHand < 0)
+                {
+                    vr.attackGestureHand = (sdword)hand;
+                    vrHapticPulse(hand, 0.26f, 28000000);
+                    SDL_Log("VR: hand %u attack preview begin, hover=%d",
+                            (unsigned)hand,
+                            (int)vrWorldHandHasTarget((sdword)hand));
+                }
+                else
+                {
+                    SDL_Log("VR: hand %u attack preview ignored, hand busy "
+                            "(select=%d context=%d)", (unsigned)hand,
+                            (int)vr.selectGestureMode,
+                            (int)vr.contextGestureMode);
+                }
+            }
             else
             {
                 vr.backKey[hand] = SDLK_ESCAPE;
@@ -3426,10 +3522,41 @@ static void vrUpdateInput(XrTime time)
                 vrPushKey(SDLK_ESCAPE, SDL_SCANCODE_ESCAPE, TRUE);
             }
         }
-        else if (!back[hand] && vr.prevBack[hand] && vr.backKey[hand] != 0)
+        else if (!back[hand] && vr.prevBack[hand])
         {
-            vrPushKey(vr.backKey[hand], SDL_SCANCODE_ESCAPE, FALSE);
-            vr.backKey[hand] = 0;
+            if (vr.attackGestureHand == (sdword)hand)
+            {
+                sdword targets = vrWorldTargetSweepCount();
+                bool32 issued;
+
+                /* Swept or single, one clWrapAttack goes out. The swept list
+                   wins when there is one: it was built deliberately, and the
+                   ray may well have drifted off it by now. */
+                if (targets > 0)
+                {
+                    issued = vrWorldTargetSweepCommit();
+                }
+                else
+                {
+                    vrWorldTargetSweepCancel();
+                    issued = vrWorldAttackOrder((sdword)hand);
+                }
+                vr.attackGestureHand = -1;
+                if (vr.selectGestureMode == VR_SELECT_TARGETS)
+                {
+                    vr.selectGestureHand = -1;
+                    vr.selectGestureMode = VR_GESTURE_NONE;
+                }
+                vrHapticPulse(hand, issued ? 0.52f : 0.10f,
+                              issued ? 45000000 : 16000000);
+                SDL_Log("VR: hand %u attack commit issued=%d targets=%d",
+                        (unsigned)hand, (int)issued, (int)targets);
+            }
+            if (vr.backKey[hand] != 0)
+            {
+                vrPushKey(vr.backKey[hand], SDL_SCANCODE_ESCAPE, FALSE);
+                vr.backKey[hand] = 0;
+            }
         }
         vr.prevBack[hand] = back[hand];
     }
@@ -3452,6 +3579,16 @@ static void vrUpdateInput(XrTime time)
             else if (managerActive)
             {
                 intent = VRW_INTENT_INVALID;
+            }
+            /* Once a button has declared attack, the ray says only whether
+               the thing under it can be shot - it must not fall through to
+               the select colour just because the trigger is also down. */
+            else if (vr.attackGestureHand == (sdword)hand
+                     || (vr.selectGestureHand == (sdword)hand
+                         && vr.selectGestureMode == VR_SELECT_TARGETS))
+            {
+                intent = vrWorldHandAttackable((sdword)hand)
+                       ? VRW_INTENT_ATTACK : VRW_INTENT_INVALID;
             }
             else if (vr.selectGestureHand == (sdword)hand)
             {
@@ -3609,6 +3746,12 @@ static void vrReleaseInputCapture(void)
     {
         vrWorldTargetSweepCancel();
     }
+    /* the brush stops with the trigger, so a held attack preview can be
+       carrying a target list the branch above never saw */
+    if (vr.attackGestureHand >= 0)
+    {
+        vrWorldTargetSweepCancel();
+    }
     if (vr.contextGestureMode == VR_CONTEXT_PANEL)
     {
         vrPushMouseButton(SDL_BUTTON_RIGHT, FALSE);
@@ -3657,6 +3800,7 @@ static void vrReleaseInputCapture(void)
     vr.selectGestureMode = VR_GESTURE_NONE;
     vr.contextGestureHand = -1;
     vr.contextGestureMode = VR_GESTURE_NONE;
+    vr.attackGestureHand = -1;
     vr.stickRotating = FALSE;
     vr.pointerValid = FALSE;
     vr.pointerHand = -1;
@@ -4205,6 +4349,7 @@ bool32 vrInit(sdword width, sdword height)
     vr.debugEye = -1;
     vr.selectGestureHand = -1;
     vr.contextGestureHand = -1;
+    vr.attackGestureHand = -1;
     vr.pointerHand = -1;
     vrCardInit();
     for (pass = 0; pass < 3; pass++)

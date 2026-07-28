@@ -85,11 +85,17 @@ void vrWorldSweepCancel(void);
 
 /* Multi-target attack. Homeworld's clWrapAttack takes a whole target list, and
    the desktop reaches it with a ctrl-drag band box. In VR it extends the order
-   grammar already in place: A previews an order, and sweeping the trigger
-   during that preview elaborates it - a route during a move, a target list
-   during an attack. Committing is still the A release, so one order goes out
-   against everything swept. */
+   grammar already in place: a button previews an order, and sweeping the
+   trigger during that preview elaborates it - a route during a move, a target
+   list during an attack. Committing is still the button release, so one order
+   goes out against everything swept.
+
+   Paint is what the trigger holds down. Begin turns it on so the first sweep
+   needs no second press, and letting the trigger go stops the brush without
+   discarding the list - otherwise the ray would keep collecting targets while
+   the player is merely looking around before committing. */
 void   vrWorldTargetSweepBegin(sdword hand);
+void   vrWorldTargetSweepPaint(bool32 painting);
 bool32 vrWorldTargetSweepCommit(void);
 void   vrWorldTargetSweepCancel(void);
 sdword vrWorldTargetSweepCount(void);
@@ -98,6 +104,14 @@ sdword vrWorldTargetSweepCount(void);
    resource, dock at friendly. Returns TRUE if an order was issued. */
 vrworldintent vrWorldContextIntent(sdword hand);
 bool32 vrWorldContextOrder(sdword hand);
+
+/* Attack whatever this hand is pointing at, with no smart-order fallback:
+   the dedicated attack button has already said what the player means, so
+   aiming at a rock or a friendly is a no-op rather than a harvest or a dock.
+   Returns TRUE if an order went out. vrWorldHandAttackable asks the same
+   question without issuing anything, for colouring the ray. */
+bool32 vrWorldAttackOrder(sdword hand);
+bool32 vrWorldHandAttackable(sdword hand);
 
 /* Move order placed freely in 3D. The destination rides the hand's ray at a
    cursor depth, seeded from whatever the beam is touching (or the fleet's
@@ -116,10 +130,11 @@ real32 vrWorldCursorDist(void);
 
 /* Freehand flight paths. While a move preview is running, holding the
    trigger draws a path through space: the swept points are smoothed into a
-   Catmull-Rom spline, then resampled by arc length into a bounded set of
-   waypoints. Committing hands the waypoints to a follower that issues each
-   leg with clWrapMove as the previous one is reached, since Homeworld's
-   command layer has no waypoint order of its own. */
+   centripetal Catmull-Rom spline, then resampled to even arc length.
+   Committing hands the curve to a follower that slides one destination along
+   it, kept far enough ahead of the fleet to be worth full throttle, and
+   steers the existing move command rather than re-issuing it - Homeworld has
+   no waypoint order, and re-ordering pivots the whole group every time. */
 void   vrWorldPathBegin(sdword hand);
 void   vrWorldPathSample(sdword hand);
 bool32 vrWorldPathFinishStroke(void);   /* trigger released: build waypoints */
@@ -159,6 +174,14 @@ void vrWorldCameraFocusSelection(void);
     globals, which the main camera's own cameraControl would otherwise consume
     first. Deltas are radians / a zoom ratio, as for the main camera. */
 bool32 vrWorldSensorsActive(void);
+
+/* The mission has put the Sensors Manager up to show the player something,
+   rather than the player having opened it. smFleetIntel is the game's own
+   marker for that - KASFunc sets it around kasfOpenSensors/kasfCloseSensors,
+   and Sensors.c reads it throughout to lock the player out of the map while
+   the briefing runs. In VR the hands are steering nothing during one, so the
+   beams and the controller gizmos are hidden until it finishes. */
+bool32 vrWorldSensorsBriefing(void);
 
 /* Open the Sensors Manager, or close it when already open, so one control
    both enters and leaves. Returns TRUE when it is open afterwards. */
@@ -245,6 +268,12 @@ typedef enum
     VRW_CMD_FOCUS_PREV,
     VRW_CMD_SENSORS,
     VRW_CMD_UNDO,
+
+    /* The game's own Escape menu. Handled by the OpenXR layer rather than
+       here: it is an SDL keystroke, not a fleet order. It lives on the wheel
+       because B - the only button that used to reach it - is the attack
+       button now. */
+    VRW_CMD_MENU,
 
     /* Hologram scale. Handled by the OpenXR layer rather than here, since it
        changes how the world is presented and not what the fleet is doing. */

@@ -247,6 +247,9 @@ void InitShipAI(Ship *ship,bool32 fresh);
 // Initializes selection ships AI state variables
 void InitShipsForAI(SelectCommand *selection,bool32 fresh);
 
+// Spreads a selection's individual moveTo points around a common destination
+void CalculateMoveToPoints(SelectCommand *selection,vector from,vector to);
+
 // clears any protecting in command
 void ClearProtecting(CommandToDo *command);
 
