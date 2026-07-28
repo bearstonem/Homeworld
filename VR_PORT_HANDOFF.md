@@ -17,8 +17,10 @@ were renamed:
 under `/sdcard/Android/data/`, so changing it orphans the install, its settings
 and its assets. The meson project name (`homeworld`) is likewise internal.
 
-State as of commit `d3f4f50` on `master-tenhauser` (fork
+State as of commit `d3f4f50` on `main` (fork
 `github.com/bearstonem/Homeworld`, upstream `GardensOfKadesh/Homeworld`).
+The branch was called `master-tenhauser` until 2026-07-28, inherited from
+upstream's default; it was renamed once the fork stopped tracking upstream.
 Everything described here is committed and pushed; the working tree is clean.
 
 ## Build and deploy loop
