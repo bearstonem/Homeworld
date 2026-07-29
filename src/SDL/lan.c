@@ -142,6 +142,27 @@ typedef struct
 static LanAlias lanAliases[LAN_MAX_ALIASES];
 static sdword   lanAliasCount = 0;
 
+/* Relaying, so that only the host has to forward a port.
+
+   Homeworld's lockstep is a full mesh: titanBroadcastPacket sends from every
+   peer to every other peer. On a LAN that is fine. Across the internet it
+   means every pair needs a path between them, so every player would have to
+   configure their router - and a player on mobile data cannot, since there is
+   no router of theirs to configure.
+
+   So when there is no direct path to a peer, the message goes to the host
+   wrapped in an envelope saying who it is really for, and the host passes it
+   on. The game above knows nothing about this: it still believes it is
+   talking to everyone directly, which is the point. Only the host forwards
+   TCP LAN_TCP_PORT and UDP LAN_UDP_PORT; everyone else configures nothing.
+
+   Cost is one extra hop for client to client traffic, on packets that carry
+   commands rather than world state. Everyone in a lockstep game already runs
+   at the pace of the slowest link. */
+#define LAN_MSG_RELAY       0xFE        /* free: TITANMSGTYPE_* stops at 0xd0 */
+#define LAN_RELAY_HEADER    9           /* dest(4) + origin(4) + inner type(1) */
+static udword   lanRelay = 0;           /* who forwards for us; 0 = nobody */
+
 /*=============================================================================
     Socket helpers
 =============================================================================*/
@@ -355,6 +376,25 @@ static void lanAddRemoteAt(udword ip, uword port)
 void lanAddRemote(udword ip)
 {
     lanAddRemoteAt(ip, 0);
+}
+
+void lanSetRelay(udword ip)
+{
+    struct in_addr shown;
+
+    if (lanRelay == ip)
+    {
+        return;
+    }
+    lanRelay = ip;
+    if (ip == 0)
+    {
+        dbgMessagef("lan: no longer relaying through anyone");
+        return;
+    }
+    shown.s_addr = ip;
+    dbgMessagef("lan: relaying through %s for peers we cannot reach",
+                inet_ntoa(shown));
 }
 
 void lanAddAlias(udword published, udword reachable)
@@ -655,6 +695,8 @@ void lanShutdown(void)
     lanMyAddress = 0;
     lanMyNetmask = 0;
     lanRemoteCount = 0;
+    lanAliasCount = 0;
+    lanRelay = 0;
 #ifdef _WIN32
     WSACleanup();
 #endif
@@ -816,6 +858,29 @@ static void lanQueue(LanPeer* peer, ubyte messageType, const void* data,
     }
 }
 
+/* Wrap a message for somebody we cannot reach and hand it to whoever can.
+   Written byte by byte for the same reason the frame header is: a struct
+   would put this platform's padding on the wire. */
+static void lanQueueRelayed(LanPeer* via, udword destination, udword origin,
+                            ubyte messageType, const void* data, uword length)
+{
+    ubyte envelope[LAN_MAX_MESSAGE];
+
+    if ((udword)length + LAN_RELAY_HEADER > LAN_MAX_MESSAGE)
+    {
+        dbgMessagef("lan: message too big to relay (%u bytes)", (unsigned)length);
+        return;
+    }
+    memcpy(envelope, &destination, 4);          /* already network order */
+    memcpy(envelope + 4, &origin, 4);
+    envelope[8] = messageType;
+    if (length > 0)
+    {
+        memcpy(envelope + LAN_RELAY_HEADER, data, length);
+    }
+    lanQueue(via, LAN_MSG_RELAY, envelope, (uword)(length + LAN_RELAY_HEADER));
+}
+
 void lanSendTo(udword ip, ubyte messageType, const void* data, uword length)
 {
     LanPeer* peer;
@@ -829,9 +894,22 @@ void lanSendTo(udword ip, ubyte messageType, const void* data, uword length)
     {
         struct in_addr shown;
 
+        /* No path of our own. If somebody is relaying for us - the host, in
+           practice - hand it to them instead of dropping it. This is what
+           lets everyone but the host skip forwarding a port. */
+        if (lanRelay != 0 && lanRelay != ip)
+        {
+            LanPeer* via = lanFindPeer(lanRouteTo(lanRelay));
+
+            if (via != NULL)
+            {
+                lanQueueRelayed(via, ip, lanMyAddress, messageType, data, length);
+                return;
+            }
+        }
         shown.s_addr = ip;
-        dbgMessagef("lan: no link to %s, message type %u dropped",
-                    inet_ntoa(shown), (unsigned)messageType);
+        dbgMessagef("lan: no link to %s and nobody relaying, message type %u "
+                    "dropped", inet_ntoa(shown), (unsigned)messageType);
         return;
     }
     lanQueue(peer, messageType, data, length);
@@ -992,7 +1070,58 @@ static bool32 lanDispatch(sdword index)
                     peer->recvUsed);
         }
 
-        HandleTCPMessage(peerIp, type, payload, (uword)length);
+        if (type == LAN_MSG_RELAY)
+        {
+            udword destination, origin;
+            ubyte inner;
+
+            if (length < LAN_RELAY_HEADER)
+            {
+                dbgMessagef("lan: runt relay envelope (%u bytes), ignored",
+                            (unsigned)length);
+                continue;
+            }
+            memcpy(&destination, payload, 4);
+            memcpy(&origin, payload + 4, 4);
+            inner = payload[8];
+
+            if (destination == lanMyAddress)
+            {
+                /* Ours. Dispatch it as though it had come from whoever sent
+                   it, not from whoever passed it on, or the lobby would file
+                   every relayed player under the host's address. */
+                HandleTCPMessage(origin, inner, payload + LAN_RELAY_HEADER,
+                                 (uword)(length - LAN_RELAY_HEADER));
+            }
+            else
+            {
+                /* Somebody else's, so we are the host. Pass it on still
+                   wrapped, so the far end knows who it came from.
+
+                   One hop only: a forwarded envelope is never forwarded
+                   again, and never goes back to the peer that sent it. Two
+                   players who could both relay would otherwise hand the same
+                   message back and forth forever. */
+                LanPeer* out = lanFindPeer(lanRouteTo(destination));
+
+                if (out != NULL && out->ip != peerIp)
+                {
+                    lanQueue(out, LAN_MSG_RELAY, payload, (uword)length);
+                }
+                else
+                {
+                    struct in_addr shown;
+
+                    shown.s_addr = destination;
+                    dbgMessagef("lan: asked to relay to %s and cannot, dropped",
+                                inet_ntoa(shown));
+                }
+            }
+        }
+        else
+        {
+            HandleTCPMessage(peerIp, type, payload, (uword)length);
+        }
 
         /* The dispatch may have dropped this peer, in which case the slot now
            holds somebody else entirely. */

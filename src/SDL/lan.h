@@ -94,6 +94,22 @@ bool32 lanHaveRemotes(void);
    down here. Cheap and idempotent: it is called once a second per peer. */
 void   lanAddAlias(udword published, udword reachable);
 
+/* Nominate a peer to forward for us: anything with no path of its own is
+   wrapped and handed to `ip` instead of being dropped, and that peer passes
+   it on. 0 turns it off.
+
+   This is what lets everyone except the host skip configuring a router.
+   Homeworld's lockstep is a full mesh - every peer sends to every other peer -
+   so without it each pair needs a path between them, which means every player
+   forwarding ports, which a player on mobile data cannot do at all.
+
+   The game above is unaware; it still addresses everyone directly. Costs one
+   extra hop between clients, on packets carrying commands rather than world
+   state, in a game where everyone already runs at the pace of the slowest
+   link. Set it to the captain: the captain is the one peer everybody has a
+   path to, by construction, since joining required it. */
+void   lanSetRelay(udword ip);
+
 /* Whether an address is one we could plausibly reach directly: on a local
    subnet, or a remote we already know. A game advertised from behind NAT
    carries its host's private address, which is meaningless to us. */

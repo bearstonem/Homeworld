@@ -291,6 +291,16 @@ void titanConnectToClient(Address *address)
 	   saw, which is why it blocked here waiting for a reply. getifaddrs told
 	   us at startup, so this only has to open the link. */
 	lanConnect(address->AddrPart.IP);
+
+	/* Called in one place only, by a player joining, with the captain's
+	   address - so this is the moment we learn who can reach everybody. The
+	   captain relays for us: the lockstep needs a path to every other player,
+	   and across the internet the captain's is the only one we are sure of,
+	   since joining at all required it. Without this, every player would have
+	   to forward a port of their own, and a player on mobile data could never
+	   join a game of more than two. The captain itself never sets a relay: it
+	   has a direct link to everyone by construction. */
+	lanSetRelay(address->AddrPart.IP);
 #endif
 }
 
