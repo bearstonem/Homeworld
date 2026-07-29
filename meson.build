@@ -181,6 +181,13 @@ else
 	c_base_args += ['-DHW_GAME_HOMEWORLD']
 endif
 
+if get_option('network')
+	# The transport is plain BSD sockets rather than SDL2_net, so there is no
+	# dependency to add here on any of the platforms this builds for. Windows
+	# would need ws2_32; add it when a Windows build is actually attempted.
+	c_base_args += ['-DHW_ENABLE_NETWORK']
+endif
+
 if get_option('debug') and get_option('debug_asserts')
 	c_args = c_base_args + '-DHW_BUILD_FOR_DEBUGGING'
 else

@@ -6,7 +6,7 @@
  * Created: Sat Oct 4 2003
  *==========================================================================*/
 #include "TitanInterfaceC.h"
-#include "NetworkInterface.h"
+#include "lan.h"
 
 #include "Debug.h"
 
@@ -41,14 +41,34 @@ void titanGotNumUsersInRoomCB(const wchar_t *theRoomName, int theNumUsers)
 
 unsigned long titanStart(unsigned long isLan, unsigned long isIP)
 {
-	dbgMessagef("\ntitanStart");
 #ifdef HW_ENABLE_NETWORK
-	initNetwork();
-	myAddress.AddrPart.IP = getMyAddress();
-	myAddress.Port = TCPPORT;
-	dbgMessagef("\nmyAddress Ip : %d",myAddress.AddrPart.IP);
-	return 1; 
+	/* IPX is gone and is not coming back. The lobby tries both protocols and
+	   takes whichever answers, so refusing the non-IP one here is how it ends
+	   up on TCP/IP rather than reporting no network at all. */
+	if (!isIP)
+	{
+		return 0;
+	}
+	if (!lanStart())
+	{
+		return 0;
+	}
+
+	myAddress.AddrPart.IP = lanLocalAddress();
+	myAddress.Port = LAN_TCP_PORT;
+
+	/* Task.c gates titanPumpEngine on this, and nothing else ever set it, so
+	   without this line the transport is never serviced. */
+	TitanActive = TRUE;
+
+	dbgMessagef("titanStart: up on %u.%u.%u.%u",
+	            (unsigned)(myAddress.AddrPart.IP        & 0xff),
+	            (unsigned)((myAddress.AddrPart.IP >>  8) & 0xff),
+	            (unsigned)((myAddress.AddrPart.IP >> 16) & 0xff),
+	            (unsigned)((myAddress.AddrPart.IP >> 24) & 0xff));
+	return 1;
 #else
+	dbgMessagef("titanStart: built without networking");
 	return 0;
 #endif
 }
@@ -88,10 +108,11 @@ void titanLeaveGameNotify(void)
 
 void titanShutdown(void)
 {
+	dbgMessagef("titanShutdown");
 #ifdef HW_ENABLE_NETWORK
-	shutdownNetwork();
+	lanShutdown();
+	TitanActive = FALSE;
 #endif
-	dbgMessagef("\ntitanShutdown");
 }
 
 
@@ -167,9 +188,10 @@ void titanSendLanBroadcast(const void* thePacket, unsigned short theLen)
 {
 //	dbgMessagef("\ntitanSendLanBroadcast");
 #ifdef HW_ENABLE_NETWORK
-	sendBroadcastPacket(thePacket, theLen);
+	/* Our own broadcast comes back to us through the UDP socket, so the
+	   direct callback this used to need is gone. */
+	lanSendDiscovery(thePacket, theLen);
 #endif
-//	titanReceivedLanBroadcastCB(thePacket, theLen);
 }
 
 
@@ -178,47 +200,61 @@ void titanSendPacketTo(Address *address, unsigned char titanMsgType,
 {
 	dbgMessagef("\ntitanSendPacketTo");
 #ifdef HW_ENABLE_NETWORK
-	if(!InternetAddressesAreEqual(*address,myAddress))
-		putPacket(address->AddrPart.IP,titanMsgType,thePacket,theLen);
-	else
+	/* A message addressed to ourselves is dispatched directly. The lobby
+	   really does send to every player including the local one, and looping
+	   it through a socket would need us to be our own peer. */
+	if (InternetAddressesAreEqual(*address, myAddress))
 		HandleTCPMessage(address->AddrPart.IP, titanMsgType, thePacket, theLen);
+	else
+		lanSendTo(address->AddrPart.IP, titanMsgType, thePacket, theLen);
 #endif
 
 }
 
 
+/* To every player in the game except me.
+
+   The original branches on mGameCreationState three ways
+   (TitanInterface.cpp:5607) and sends in all three; the only real difference
+   is that the started case could route through a WON server, which does not
+   exist here. This port kept only the GAME_NOT_STARTED branch, which was
+   harmless while nothing ever moved the state off it. It stopped being
+   harmless when titanReadyToStartGame started setting TITANGAME_STARTED for
+   real: in-game traffic goes through here too (titanSendBroadcastMessage in
+   TitanNet.c wraps it as TITANMSGTYPE_GAME), so the gate would have silently
+   dropped every sync packet from the moment a game began. */
 void titanBroadcastPacket(unsigned char titanMsgType, const void* thePacket, unsigned short theLen)
 {
-	dbgMessagef("\ntitanBroadcastPacket");
 #ifdef HW_ENABLE_NETWORK
-    	int i;
+	int i;
 
-	if(mGameCreationState==TITANGAME_NOT_STARTED) {
-		for (i=0;i<tpGameCreated.numPlayers;i++)
+	for (i = 0; i < tpGameCreated.numPlayers; i++)
+	{
+		if (!InternetAddressesAreEqual(tpGameCreated.playerInfo[i].address, myAddress))
 		{
-			if (!InternetAddressesAreEqual(tpGameCreated.playerInfo[i].address,myAddress))
-			{
-				putPacket((tpGameCreated.playerInfo[i].address.AddrPart.IP), titanMsgType, thePacket, theLen);
-			}
+			lanSendTo(tpGameCreated.playerInfo[i].address.AddrPart.IP,
+			          titanMsgType, thePacket, theLen);
 		}
 	}
 #endif
-
 }
 
 
 void titanAnyoneSendPacketTo(Address *address, unsigned char titanMsgType,
                        const void* thePacket, unsigned short theLen)
 {
-	dbgMessagef("\ntitanAnyoneSendPacketTo");
-
+	/* The "Anyone" pair exists for the window during captaincy transfer when
+	   there is no captain to route through, so WON could not use its normal
+	   path. Peer to peer there is no difference. Leaving them empty would make
+	   host migration fail silently: the survivors would elect nobody and sit
+	   waiting for a captain that never speaks. */
+	titanSendPacketTo(address, titanMsgType, thePacket, theLen);
 }
 
 
 void titanAnyoneBroadcastPacket(unsigned char titanMsgType, const void* thePacket, unsigned short theLen)
 {
-	dbgMessagef("\ntitanAnyoneBroadcastPacket");
-
+	titanBroadcastPacket(titanMsgType, thePacket, theLen);
 }
 
 
@@ -226,8 +262,10 @@ void titanConnectToClient(Address *address)
 {
 	dbgMessagef("\ntitanConnectToClient");
 #ifdef HW_ENABLE_NETWORK
-	myAddress.AddrPart.IP = connectToServer(address->AddrPart.IP);
-	dbgMessagef("\nmyAddress Ip : %d",myAddress.AddrPart.IP);
+	/* The old implementation learned our own address from what the server
+	   saw, which is why it blocked here waiting for a reply. getifaddrs told
+	   us at startup, so this only has to open the link. */
+	lanConnect(address->AddrPart.IP);
 #endif
 }
 
@@ -245,9 +283,13 @@ void titanSendPing(Address *address,unsigned int pingsizebytes)
 }
 
 
+/* Task.c calls this once per active task per scheduler pass, so it is the
+   transport's service tick. It must stay cheap when there is nothing to do. */
 void titanPumpEngine()
 {
-	dbgMessagef("\ntitanPumpEngine");
+#ifdef HW_ENABLE_NETWORK
+	lanService();
+#endif
 }
 
 
@@ -347,6 +389,15 @@ void titanConnectingCancelHit(void)
 }
 
 #ifdef HW_ENABLE_NETWORK
+/* Dispatch targets, private to this file: the transport only ever calls
+   HandleTCPMessage, which fans out to these. */
+static void HandleJoinGame(Uint32, const void*, unsigned short);
+static void HandleJoinConfirm(Uint32, const void*, unsigned short);
+static void HandleJoinReject(Uint32, const void*, unsigned short);
+static void HandleGameData(const void*, unsigned short);
+static void HandleGameStart(const void*, unsigned short);
+static void HandleGameMsg(const void*, unsigned short);
+
 void HandleTCPMessage(Uint32 address, unsigned char msgTyp, const void* data, unsigned short len)
 {
 	switch(msgTyp)
@@ -403,11 +454,11 @@ void HandleTCPMessage(Uint32 address, unsigned char msgTyp, const void* data, un
 	}
 }
 
-void HandleJoinGame(Uint32 address, const void* data, unsigned short len)
+static void HandleJoinGame(Uint32 address, const void* data, unsigned short len)
 {
 	Address anAddress;
 	anAddress.AddrPart.IP = address;
-	anAddress.Port = TCPPORT;
+	anAddress.Port = LAN_TCP_PORT;
 	long requestResult;
 
 	if(mGameCreationState==TITANGAME_NOT_STARTED)
@@ -426,35 +477,35 @@ void HandleJoinGame(Uint32 address, const void* data, unsigned short len)
         }
 }
 
-void HandleJoinConfirm(Uint32 address, const void* data, unsigned short len)
+static void HandleJoinConfirm(Uint32 address, const void* data, unsigned short len)
 {
 	Address anAddress;
 	anAddress.AddrPart.IP = address;
-	anAddress.Port = TCPPORT;
+	anAddress.Port = LAN_TCP_PORT;
 
         titanConfirmReceivedCB(&anAddress, data, len);
 }
 
-void HandleJoinReject(Uint32 address, const void* data, unsigned short len)
+static void HandleJoinReject(Uint32 address, const void* data, unsigned short len)
 {
 	Address anAddress;
 	anAddress.AddrPart.IP = address;
-	anAddress.Port = TCPPORT;
+	anAddress.Port = LAN_TCP_PORT;
 
         titanRejectReceivedCB(&anAddress, data, len);
 }
 
-void HandleGameData(const void* data, unsigned short len)
+static void HandleGameData(const void* data, unsigned short len)
 {
         titanUpdateGameDataCB(data,len);
 }
 
-void HandleGameStart(const void* data, unsigned short len)
+static void HandleGameStart(const void* data, unsigned short len)
 {
 	mgGameStartReceivedCB(data,len);
 }
 
-void HandleGameMsg(const void* data, unsigned short len)
+static void HandleGameMsg(const void* data, unsigned short len)
 {
 	titanGameMsgReceivedCB(data,len);
 }

@@ -32,3 +32,10 @@ option(
 	type: 'boolean',
 	value: true,
 )
+
+option(
+	'network',
+	description: 'Toggle HW_ENABLE_NETWORK. Build the LAN and direct-address multiplayer transport (src/SDL/lan.c). Without it every titan* entry point is a stub and no game can be hosted or joined.',
+	type: 'boolean',
+	value: true,
+)

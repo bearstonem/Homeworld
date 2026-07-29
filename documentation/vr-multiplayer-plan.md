@@ -11,9 +11,8 @@ returns zero. One attempt at a real transport exists, from HomeworldSDL around
 not actually use.
 
 So multiplayer is dead on *every* platform in this fork, not only in VR. That
-is the useful part of the finding: most of the work is testable as two
-processes on a Linux desktop, and the VR-specific layer is the last one, not
-the first.
+is the useful part of the finding: almost none of the work is VR work, and the
+VR-specific layer is the last one rather than the first.
 
 Neither LAN nor internet play works today, and no amount of front-end fixing
 changes that: the work is the transport. See
@@ -267,8 +266,18 @@ Implement the `titan*` contract against `TitanInterface.cpp` as the reference:
   no `exit()`.
 - Local address from `getifaddrs`, not from a self-addressed broadcast.
 
-Test as two processes on loopback. Fast iteration, no headset, and the network
-log (`/logOn`, `/logOnVerbose`, `main.c:791`) already exists to read.
+Two processes on one machine will **not** work as peers, so do not plan around
+it. The game compares peers with `InternetAddressesAreEqual`, which tests the
+IP and nothing else, so two instances behind one address are the same peer as
+far as every layer above the socket is concerned. Real testing needs two hosts.
+
+What is testable without a second machine is the transport by itself, driven
+from a harness that stubs `HandleTCPMessage` and
+`titanReceivedLanBroadcastCB`: startup, address discovery, broadcast
+round-trip, accept, frame reassembly across a split write, batched frames in
+one read, zero-length payloads, peer drop and restart. That is the whole of
+lan.c short of two-host routing, and it catches the framing bugs that are
+otherwise found by watching a game desync.
 
 ### M2 — Build and Android wiring
 
