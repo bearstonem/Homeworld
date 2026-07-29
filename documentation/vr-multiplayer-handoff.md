@@ -150,22 +150,65 @@ Decided 2026-07-28: a player must never edit a file to host or join. That
 makes this the critical path, ahead of everything else, because there is
 currently no way to enter an address or a name from inside the headset.
 
-The design is de-risked but unwritten. All three unknowns are resolved:
+**There is nowhere to type an address, and this is the larger half of the
+job.** The multiplayer screens contain exactly three text entries, all in
+`multiplayer_lan_game.fib`: `LG_NameEntry`, `LG_ChatTextEntry` and
+`LG_GameChatTextEntry`. No address field exists anywhere, because a LAN never
+needed one. The screen definitions live inside `Homeworld.big`, which belongs
+to the player and cannot be edited, so the field cannot be added where the
+others are. It has to be drawn by the VR layer itself. That falls out
+naturally if the keyboard is an overlay, since the address field is then just
+more of the same overlay, but it does mean "add a keyboard" is not sufficient
+on its own.
+
+Nothing in the engine needs changing. Four findings, all verified:
 
 - **Synthesized keys already reach text entry.** `main.c:1791` does
   `keyPressDown(keyLanguageTranslate(pEvent->key.keysym.scancode))`, so the
-  engine keys off the **scancode**, and `vrPushKey` already sets it. This is
-  how Escape works in VR today. No engine changes are needed.
+  engine keys off the **scancode**, not the keysym, and `vrPushKey`
+  (`vr.c:1498`) already sets both. This is how Escape works in VR today.
+- **Never send characters, only scancodes.** The engine derives the character
+  itself through `uicKeyEntryTable[keycode].regularKey` / `.shiftKey`
+  (`UIControls.c:3749`), one table per language. A keyboard that tried to
+  inject letters directly would fight it.
+- **Shift has to be genuinely held, not applied as a transform.**
+  `Region.c:816` reads the key and its shift state together with
+  `keyBufferedKeyGet(&bShift)` and ORs in `RF_ShiftBit`, which is what
+  `UIControls.c:3650` tests. So the shift key must push `SDLK_LSHIFT` down and
+  keep it down across the letter press. There is already a precedent for
+  exactly that in the VR layer: `vr.c:3715` holds `SDL_SCANCODE_LSHIFT` for
+  the grip.
+
+  **Latch it rather than making it momentary** (decided 2026-07-28). Pointing
+  at a shift key and a letter key at the same time is not possible with one
+  ray, so a held shift would have to be bracketed around each press. Latching
+  suits the mechanism better anyway: one `LSHIFT` down when the key is tapped,
+  one up when it is tapped again, and every letter in between arrives shifted
+  because the state is sampled per key at buffering time.
+
+  One wrinkle if it is to read as caps lock rather than as a stuck shift: a
+  latched `LSHIFT` shifts *everything*, so the number row would give `!"£`
+  rather than digits, which is wrong for typing an address. Caps lock
+  semantics means holding the latch as the keyboard's own flag and only
+  pushing `LSHIFT` for letter keys. Worth deciding deliberately, since the
+  address field is the reason the keyboard exists.
 - **`regKeysFocussed` (`Region.h:174`) is TRUE exactly while a text entry
   holds key capture**, which is when the keyboard should appear.
-- **It belongs on the panel, not on a card.** A fourth wrist card would need a
-  new swapchain, a new pose and new ray hit-testing. `vr.pointerX/pointerY`
-  already holds the controller ray mapped onto the panel in logical UI
-  pixels, and `vrPushMouseButton` fires clicks at exactly those coordinates
-  (`vr.c:1493`). Draw the key grid as an overlay, hit-test against the
-  pointer that is already computed, and push a scancode on trigger instead of
-  a mouse click. Roughly a quarter of the code and it reuses paths already
-  proven on device.
+
+Beyond the letters, `uicTextEntryProcess` handles `ESCKEY`, `RETURNKEY` and
+`ENTERKEY`, `BACKSPACEKEY`, `DELETEKEY`, and `ARRLEFT`/`ARRRIGHT`, the last
+two jumping by word when `CONTROLKEY` is held. Those are the non-character
+keys worth having.
+
+**Put it on the panel, not on a card.** A fourth wrist card would need a new
+swapchain, a new pose and new ray hit-testing. `vr.pointerX/pointerY` already
+holds the controller ray mapped onto the panel in logical UI pixels, and
+`vrPushMouseButton` fires clicks at exactly those coordinates (`vr.c:1493`).
+Draw the key grid as an overlay, hit-test against the pointer that is already
+computed, and push a scancode on trigger instead of a mouse click. Roughly a
+quarter of the code, reusing paths proven on device. The card system is there
+if a later reason to prefer it appears (`vr.card[]`, dispatch at
+`vr.c:2322`); it was considered and rejected on cost, not on principle.
 
 `MultiplayerHost` in the config stays as an override, since it is how the
 desktop and any automated test join without a headset. It must not be the
@@ -197,3 +240,8 @@ route a player takes.
   something the transport can improve.
 - The demo library has multiplayer disabled at compile time
   (`MultiplayerGame.c:1855`), so only `libmain.so` needs any of this.
+
+## Working practice
+
+**Do not `git push` without being asked.** Committing as work lands is wanted;
+publishing is the user's call and they will say when. Stated 2026-07-28.
