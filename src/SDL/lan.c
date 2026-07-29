@@ -100,9 +100,23 @@ static sdword   lanPeerCount = 0;
 
 /* Addresses that discovery is unicast to as well as broadcast, so peers
    beyond this subnet are reachable. Seeded from configuration and grown from
-   whoever sends us discovery. */
+   whoever sends us discovery.
+
+   With the port, which is not always LAN_UDP_PORT. A peer on mobile data sits
+   behind carrier-grade NAT, where thousands of subscribers share one address
+   and the source port therefore cannot be preserved: its packets arrive from
+   some arbitrary port, and that port is the only way back through the
+   mapping. Replying to LAN_UDP_PORT instead reaches nothing, which is exactly
+   what happened - the first packet crossed the internet and was answered into
+   a void. An address typed by a player keeps LAN_UDP_PORT, since that is what
+   the host will have forwarded, and is corrected the moment they answer. */
 #define LAN_MAX_REMOTES 8
-static udword   lanRemotes[LAN_MAX_REMOTES];
+typedef struct
+{
+    udword ip;
+    uword  port;                        /* network byte order, as sockaddr holds it */
+} LanRemote;
+static LanRemote lanRemotes[LAN_MAX_REMOTES];
 static sdword   lanRemoteCount = 0;
 
 /* Our own address and netmask, for deciding whether an advertised address is
@@ -182,7 +196,7 @@ static udword lanRouteTo(udword ip)
 {
     if (lanFindPeer(ip) == NULL && !lanAddressIsLocal(ip) && lanRemoteCount == 1)
     {
-        return lanRemotes[0];
+        return lanRemotes[0].ip;
     }
     return ip;
 }
@@ -254,7 +268,10 @@ bool32 lanPeerConnected(udword ip)
     Remote peers
 =============================================================================*/
 
-void lanAddRemote(udword ip)
+/* port in network byte order. Learned from a packet that reached us, so it is
+   the way back through whatever translated it; 0 means "the standard one",
+   which is what an address a player typed gets. */
+static void lanAddRemoteAt(udword ip, uword port)
 {
     struct in_addr shown;
     sdword i;
@@ -263,10 +280,25 @@ void lanAddRemote(udword ip)
     {
         return;
     }
+    if (port == 0)
+    {
+        port = htons(LAN_UDP_PORT);
+    }
+    shown.s_addr = ip;
     for (i = 0; i < lanRemoteCount; i++)
     {
-        if (lanRemotes[i] == ip)
+        if (lanRemotes[i].ip == ip)
         {
+            /* A mapping that moved - the peer's NAT rebound, or we had only
+               guessed the port from configuration and have now heard from
+               them. Follow it, or every reply after this goes nowhere. */
+            if (lanRemotes[i].port != port)
+            {
+                dbgMessagef("lan: remote peer %s moved from port %u to %u",
+                            inet_ntoa(shown), (unsigned)ntohs(lanRemotes[i].port),
+                            (unsigned)ntohs(port));
+                lanRemotes[i].port = port;
+            }
             return;
         }
     }
@@ -274,10 +306,16 @@ void lanAddRemote(udword ip)
     {
         return;
     }
-    lanRemotes[lanRemoteCount++] = ip;
-    shown.s_addr = ip;
-    dbgMessagef("lan: remote peer %s added, discovery will be sent to it",
-                inet_ntoa(shown));
+    lanRemotes[lanRemoteCount].ip = ip;
+    lanRemotes[lanRemoteCount].port = port;
+    lanRemoteCount++;
+    dbgMessagef("lan: remote peer %s port %u added, discovery will be sent to it",
+                inet_ntoa(shown), (unsigned)ntohs(port));
+}
+
+void lanAddRemote(udword ip)
+{
+    lanAddRemoteAt(ip, 0);
 }
 
 bool32 lanHaveRemotes(void)
@@ -296,7 +334,7 @@ bool32 lanAddressIsLocal(udword ip)
     }
     for (i = 0; i < lanRemoteCount; i++)
     {
-        if (lanRemotes[i] == ip)
+        if (lanRemotes[i].ip == ip)
         {
             return TRUE;
         }
@@ -569,7 +607,8 @@ void lanSendDiscovery(const void* data, uword length)
        a router. */
     for (i = 0; i < lanRemoteCount; i++)
     {
-        addr.sin_addr.s_addr = lanRemotes[i];
+        addr.sin_addr.s_addr = lanRemotes[i].ip;
+        addr.sin_port = lanRemotes[i].port;
         sendto(lanUdpSock, (const char*)data, length, 0,
                (struct sockaddr*)&addr, sizeof(addr));
     }
@@ -598,7 +637,24 @@ static void lanServiceDiscovery(void)
         if (from.sin_addr.s_addr != lanMyAddress
             && !lanAddressIsLocal(from.sin_addr.s_addr))
         {
-            lanAddRemote(from.sin_addr.s_addr);
+            lanAddRemoteAt(from.sin_addr.s_addr, from.sin_port);
+        }
+        /* Already known, but the port it reaches us on can move under us:
+           behind carrier-grade NAT it is whatever the carrier assigned, and
+           it is re-assigned freely. Track it on every packet, not only the
+           first, or the link goes quiet the moment the mapping changes. */
+        else if (from.sin_addr.s_addr != lanMyAddress)
+        {
+            sdword r;
+
+            for (r = 0; r < lanRemoteCount; r++)
+            {
+                if (lanRemotes[r].ip == from.sin_addr.s_addr)
+                {
+                    lanAddRemoteAt(from.sin_addr.s_addr, from.sin_port);
+                    break;
+                }
+            }
         }
 
         /* Our own broadcast comes back to us. The lobby is written expecting
@@ -727,12 +783,19 @@ bool32 lanConnect(udword ip)
 
         if (routed != ip)
         {
-            struct in_addr was, now;
+            struct in_addr shown;
+            char was[24];
 
-            was.s_addr = ip;
-            now.s_addr = routed;
+            /* Two inet_ntoa calls in one printf both read the same static
+               buffer, so the line came out naming one address twice - which
+               reads as a no-op substitution and sent a real diagnosis down
+               the wrong path for a while. */
+            shown.s_addr = ip;
+            strncpy(was, inet_ntoa(shown), sizeof(was) - 1);
+            was[sizeof(was) - 1] = '\0';
+            shown.s_addr = routed;
             dbgMessagef("lan: %s is not reachable from here, dialling the named "
-                        "remote %s instead", inet_ntoa(was), inet_ntoa(now));
+                        "remote %s instead", was, inet_ntoa(shown));
             ip = routed;
         }
     }
