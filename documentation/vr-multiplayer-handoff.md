@@ -267,6 +267,15 @@ right-hand button column between JOIN GAME (ends at y=192) and CHANGE COLORS
 engine, and commits through `lanAddRemote`; the host's game then appears in
 the list alongside the LAN ones.
 
+**Both connection buttons now open these screens.** Internet used to open the
+WON login, which hands a name and password to `authAuthenticate` — an empty
+stub, and it could not be anything else, since the service has not existed
+since 2004. The button named after the thing this port can do was the one that
+led nowhere. There is only one transport, and a game beyond the subnet is
+reached by naming its host, which is a field on the lobby rather than a
+different set of screens. The WON screens are still there and simply
+unreachable from the connection screen.
+
 Front-end screens are laid out in a **640x480 box centred in the window**
 (`feResRepositionCentredX`), which is where those coordinates come from and
 what makes the side bands free real estate on a wide panel. The layout was
