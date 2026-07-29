@@ -382,8 +382,8 @@ mgCommandInfo mgCommandSpanish[] =
 {
     {"Ignorar",     mgProcessIgnore,    1,  0,  1,  0   },
     {"Acabar",      mgProcessKick,      1,  1,  0,  1   },
-    {"Prohibición", mgProcessBan,       1,  1,  0,  1   },
-    {"Límite",      mgProcessLimit,     0,  1,  0,  1   },
+    {"Prohibiciï¿½n", mgProcessBan,       1,  1,  0,  1   },
+    {"Lï¿½mite",      mgProcessLimit,     0,  1,  0,  1   },
     {"",            NULL,               0,  1,  0,  1   }
 };
 
@@ -1822,45 +1822,15 @@ void mgSkirmish(char *name, featom *atom)
 #endif
 }
 
-void mgInternetWON(char *name, featom *atom)
+/* Both connection buttons end up here, because there is only one transport.
+   A game beyond this subnet is reached by naming its host, which is a field
+   on the lobby screen and not a different set of screens; the WON login the
+   Internet button used to open cannot authenticate against anything, since
+   the service it was written for has not existed since 2004. Leaving it
+   wired up meant the button named after the thing this port can now do was
+   the one that led nowhere. */
+static void mgEnterNetworkScreens(void)
 {
-#if defined(HW_GAME_DEMO) || defined(HW_GAME_RAIDER_RETREAT)
-    bitSet(atom->flags, FAF_Disabled);
-    bitSet(((region *)atom->region)->status, RSF_RegionDisabled);
-#else
-    if (FEFIRSTCALL(atom))
-    {
-        return;
-    }
-    WaitingForGame  = FALSE;
-    GameCreator     = FALSE;
-    LANGame = FALSE;
-    IPGame = 1; // DO NOT USE TRUE for CPP reasons
-    tpGameCreated.numComputers  = 0;
-
-    if (!titanStart(LANGame,IPGame))
-    {
-        mgPrepareMessageBox(strGetString(strNoInternetTCPIP),NULL);
-        mgShowScreen(MGS_Message_Box,FALSE);
-        return;
-    }
-    mgShowScreen(MGS_Internet_Login,TRUE);
-#endif
-}
-
-void mgLANIPX(char *name, featom *atom)
-{
-    //mgShowScreen(MGS_LAN_Login,TRUE);
-
-#if defined(HW_GAME_DEMO)
-    //disable this function in demos
-    bitSet(atom->flags, FAF_Disabled);
-    bitSet(((region *)atom->region)->status, RSF_RegionDisabled);
-#else
-    if (FEFIRSTCALL(atom))
-    {
-        return;
-    }
     LanProtocalsValid = 2;
     LANGame = TRUE;
 
@@ -1892,6 +1862,39 @@ void mgLANIPX(char *name, featom *atom)
 
     mgShutdownMultiPlayerGameScreens();
     lgStartMultiPlayerLANGameScreens(ghMainRegion, 0, 0, 0, FALSE);
+}
+
+void mgInternetWON(char *name, featom *atom)
+{
+#if defined(HW_GAME_DEMO) || defined(HW_GAME_RAIDER_RETREAT)
+    bitSet(atom->flags, FAF_Disabled);
+    bitSet(((region *)atom->region)->status, RSF_RegionDisabled);
+#else
+    if (FEFIRSTCALL(atom))
+    {
+        return;
+    }
+    WaitingForGame  = FALSE;
+    GameCreator     = FALSE;
+    tpGameCreated.numComputers  = 0;
+    mgEnterNetworkScreens();
+#endif
+}
+
+void mgLANIPX(char *name, featom *atom)
+{
+    //mgShowScreen(MGS_LAN_Login,TRUE);
+
+#if defined(HW_GAME_DEMO)
+    //disable this function in demos
+    bitSet(atom->flags, FAF_Disabled);
+    bitSet(((region *)atom->region)->status, RSF_RegionDisabled);
+#else
+    if (FEFIRSTCALL(atom))
+    {
+        return;
+    }
+    mgEnterNetworkScreens();
 #endif
 }
 
