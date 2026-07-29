@@ -931,7 +931,13 @@ void gcStartup(void)
         textentrypos.x1     = gcScreenHandle->atoms[1].x+gcScreenHandle->atoms[1].width;
         textentrypos.y1     = gcScreenHandle->atoms[1].y+gcScreenHandle->atoms[1].height;
 
-        chatdrawregion = regChildAlloc(ghMainRegion, (sdword)&chatdrawatom, chatdrawatom.x, chatdrawatom.y,
+        /* smemsize, not sdword. regChildAlloc stores this in region->userID
+           and feUserRegionDraw reads it straight back as a featom *, so an
+           sdword cast lops the top 32 bits off a pointer and the first frame
+           that draws this region dies. The chat window only exists in a
+           multiplayer game, which is why it survived: nothing in the campaign
+           ever creates it. */
+        chatdrawregion = regChildAlloc(ghMainRegion, (smemsize)&chatdrawatom, chatdrawatom.x, chatdrawatom.y,
                                        chatdrawatom.width, chatdrawatom.height, 0, 0);
         chatdrawatom.region = (void*)chatdrawregion;
         regDrawFunctionSet(chatdrawregion, feUserRegionDraw);

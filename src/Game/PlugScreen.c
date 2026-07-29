@@ -491,7 +491,9 @@ void psPlugLinkSet(char *directory,char *field,void *dataToFillIn)
     header = trLIFFileLoad(fileName, NonVolatile);
     dbgAssertOrIgnore(bitTest(header->flags, TRF_Paletted));
 
-    link = (pluglink *)regChildAlloc(psBaseRegion->child, (sdword)dataToFillIn, //create the region
+    /* smemsize, not sdword: dataToFillIn is a void * and this ends up in
+       region->userID. Same truncation as the chat window had. */
+    link = (pluglink *)regChildAlloc(psBaseRegion->child, (smemsize)dataToFillIn, //create the region
             plugXMargin + x, plugYMargin + y, header->width, header->height, plugLinkExtra(linkName),
             RPE_Enter | RPE_Exit | RPE_EnterHoldLeft | RPE_ExitHoldLeft | RPE_PressLeft);
     regFunctionSet(&link->reg, (regionfunction) psLinkProcess);
