@@ -358,6 +358,29 @@ buffer that no longer went back far enough.
    types one, which they now can. Prefilling `utyName` the way
    `gpSuggestSaveName` fills a save name would still save them the trouble.
 
+## Seen once, not chased
+
+A SIGSEGV on the SDL audio thread, 2026-07-29, starting a game shortly after
+backing out of the multiplayer screens:
+
+```
+#04 isoundmixerprocess+732   libmain.so
+#05 soundfeedercb+240        libmain.so
+#06 libSDL2.so               (audio callback)
+```
+
+`code=2` is SEGV_ACCERR, so it is a bad write rather than a null read. The
+mixer runs on SDL's callback thread while everything else in this engine is
+single threaded, and the crash lands at the point a level load tears the
+sound system down and builds it again - which is the shape of a teardown race
+rather than anything about the level.
+
+Not a regression from the VR or multiplayer work: the native library was
+byte-identical to the one that had just played a saved game through. Recorded
+because it happened once with a backtrace in hand, and a second sighting is
+worth more than a first. Reproducing it probably means going in and out of the
+multiplayer screens a few times before starting a game.
+
 ## Known gaps
 
 - Lobby structs (`CaptainGameInfo`, `Address`) go over the wire as raw
