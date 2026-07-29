@@ -147,6 +147,16 @@ typedef struct
     char behindFirewall;
     unsigned char pad[3];
     char PersonalName[MAX_PERSONAL_NAME_LEN];
+    /* Who the joiner says it is. The captain used to file a joining player
+       under the address its own socket reported, which is the same thing on a
+       LAN and is not the same thing behind NAT: the joiner publishes a private
+       address and the captain sees a public one. Every player then gets a copy
+       of the lobby naming the joiner by an address the joiner has never heard
+       of, so at game start it cannot find itself in the list and gives up
+       (mgGameStartReceivedCB). Identity has to be what the peer calls itself;
+       reaching it is the transport's problem, and lanRouteTo already solves
+       that one. */
+    Address address;
 } PlayerJoinInfo;
 
 typedef struct CaptainGameInfo

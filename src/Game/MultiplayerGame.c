@@ -3151,6 +3151,7 @@ void titanJoinGameRequest(tpscenario *gametojoin)
     pInfo.race = whichRaceSelected;
         pInfo.behindFirewall = titanBehindFirewall();
     strcpy(pInfo.PersonalName, utyName);
+    pInfo.address = myAddress;                  //who we are, not who we look like
 
     if (!LANGame)
     {

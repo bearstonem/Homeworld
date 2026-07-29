@@ -482,9 +482,29 @@ void HandleTCPMessage(Uint32 address, unsigned char msgTyp, const void* data, un
 static void HandleJoinGame(Uint32 address, const void* data, unsigned short len)
 {
 	Address anAddress;
+	long requestResult;
+
 	anAddress.AddrPart.IP = address;
 	anAddress.Port = LAN_TCP_PORT;
-	long requestResult;
+
+	/* The joiner tells us the address it calls itself, and that is what the
+	   lobby has to record: every player gets a copy of it, and each of them
+	   looks for its own entry by comparing against its own address. The
+	   socket address is what we can reach, which is a different question and
+	   one lanRouteTo answers. On a LAN the two are the same and this changes
+	   nothing; behind NAT the joiner would otherwise be listed under an
+	   address it has never heard of and would fail to find itself at game
+	   start. A joiner that sends no address of its own still gets the old
+	   behaviour rather than being refused. */
+	if (data != NULL && len == sizeof(PlayerJoinInfo))
+	{
+		Address const claimed = ((PlayerJoinInfo const*)data)->address;
+
+		if (claimed.AddrPart.IP != 0)
+		{
+			anAddress = claimed;
+		}
+	}
 
 	if(mGameCreationState==TITANGAME_NOT_STARTED)
 		requestResult = titanRequestReceivedCB(&anAddress, data, len);
