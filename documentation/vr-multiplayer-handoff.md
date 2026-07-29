@@ -153,15 +153,31 @@ did not compile, assumed a topology the game does not use).
   the first of those was the only one that used to, which is why internet play
   could connect and then do nothing.
 
-  Two consequences worth knowing before relying on it. Over the internet this
-  is a **two-player** transport: with several remotes named the resolution is
-  ambiguous and is deliberately not guessed. And it **cannot help when both
-  ends sit on the same private range** — two 192.168.1.x home networks, which
-  is the common case — because the peer's address then looks local, is left
-  alone, and reaches somebody else's machine or nothing at all. Fixing that
-  properly needs the peers to exchange who they are on connect rather than
-  inferring it from addresses; there is no room in the frame header for it
-  today and the lobby has nowhere to put it.
+  That guess only works with one candidate, and it is now a fallback rather
+  than the mechanism — see below. It still **cannot help when both ends sit on
+  the same private range** (two 192.168.1.x home networks, the common case),
+  because the peer's address then looks local, is left alone, and reaches
+  somebody else's machine or nothing at all.
+- **A peer is routed by what it told us, not by what can be guessed**
+  (`lanAddAlias`). Every advertisement carries `LANAdvertHeader.from`, which is
+  what the sender calls itself, while `recvfrom` says where it really came
+  from. Those two arrive together once a second from every peer that can reach
+  us, so nothing has to be inferred: `titanReceivedLanBroadcastCB` takes the
+  source address as its first argument now and hands the pair down.
+  `lanRouteTo` consults what it has been told first, and falls back to the
+  single-remote guess only for the gap before a peer's first advertisement.
+
+  The alias is learned in the lobby rather than in `lan.c` on purpose: reading
+  the sender's own idea of its address means knowing the advertisement's
+  shape, and that is the lobby's business, not the transport's.
+
+  **This lifts the two-player limit only where every player forwards their own
+  ports.** Homeworld's lockstep is a full mesh - `titanBroadcastPacket` sends
+  from every peer to every other peer directly - so every pair needs a path
+  between them. `lan.h` used to claim the rest was relayed through the captain;
+  it is not, and no relaying exists: `lanSendTo` finds a peer or drops. Three
+  players behind one forwarded port still needs either relaying or hole
+  punching, neither of which is written.
 - **A reply goes to the port the packet came from, not to `LAN_UDP_PORT`.** A
   peer on mobile data is behind carrier-grade NAT, where thousands of
   subscribers share one address and the source port therefore *cannot* be
@@ -343,18 +359,22 @@ buffer that no longer went back far enough.
    last real unknown, and it is M5 in the plan: VR-issued orders, and
    particularly a drawn flight path, are the one feature that touches the
    command layer unusually.
-2. **Two players over the internet is the limit**, and both ends must be on
-   different private ranges. Lifting either needs peers to exchange identity
-   on connect. `PlayerJoinInfo` now carries an address, so the precedent for
-   putting identity in the payload rather than inferring it exists — the
-   in-game path would need the same treatment.
-3. **The address field writes `MultiplayerHost` back to the config**, so a
+2. **More than two players over the internet is untested.** The addressing no
+   longer stands in the way (`lanAddAlias`), but it has only been reasoned
+   about and driven through the harness — three real machines on three real
+   networks have never tried it. Every player must forward their own TCP 10500
+   and UDP 10600, because the lockstep is a full mesh with no relaying. Both
+   ends of every pair still have to be on different private ranges.
+3. **Relaying through the captain does not exist**, though `lan.h` used to say
+   it did. It is what would let three or more play with only the host
+   forwarding a port, which is the arrangement anyone would actually expect.
+4. **The address field writes `MultiplayerHost` back to the config**, so a
    machine that has ever typed an address seeds a remote on every launch
    after. That arms `lanRouteTo`'s single-remote substitution in games that
    have nothing to do with the internet. Harmless as it stands, since a LAN
    peer's address is local and is left alone, but it makes behaviour depend
    on what was typed months ago and is worth scoping to the session.
-4. **Player name.** The headset joins as `unnamed_player` unless the player
+5. **Player name.** The headset joins as `unnamed_player` unless the player
    types one, which they now can. Prefilling `utyName` the way
    `gpSuggestSaveName` fills a save name would still save them the trouble.
 
