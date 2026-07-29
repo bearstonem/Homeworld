@@ -1,20 +1,48 @@
 apply plugin: 'com.android.application'
 
+/* The port's version is declared once, in src/SDL/main.h, because that is what
+   the game itself puts on screen. It is read here rather than written out a
+   second time: two copies, in two languages, in two directories, drift - and
+   this particular drift is silent. A sideloader compares versionCode and
+   nothing else to decide a build is newer, so an APK that never changes it
+   simply stops offering updates rather than reporting anything wrong. That is
+   what shipped for seven releases before anyone looked. */
+def unboundHeader = new File(rootDir, "../../src/SDL/main.h")
+if (!unboundHeader.isFile()) {
+    throw new GradleException(
+        "Cannot read ${unboundHeader.canonicalPath}. The APK version comes from " +
+        "HW_UNBOUND_VERSION there and must not be guessed.")
+}
+def unboundMatch = (unboundHeader.text =~ /define\s+HW_UNBOUND_VERSION\s+"([^"]+)"/)
+if (!unboundMatch) {
+    throw new GradleException(
+        "HW_UNBOUND_VERSION is not defined in ${unboundHeader.canonicalPath}, " +
+        "so the APK has no version to declare.")
+}
+def unboundVersionName = unboundMatch[0][1]
+def unboundParts = unboundVersionName.tokenize('.')
+if (unboundParts.size() != 2 || !unboundParts.every { it.isInteger() }) {
+    throw new GradleException(
+        "HW_UNBOUND_VERSION is '${unboundVersionName}', which is not major.minor, " +
+        "so no version code can be derived from it.")
+}
+/* major*100 + minor: always increases, never collides, and leaves room for a
+   minor to reach 99. 0.7 -> 7, 0.10 -> 10, 1.0 -> 100. */
+def unboundVersionCode = unboundParts[0].toInteger() * 100 + unboundParts[1].toInteger()
+
 android {
-    namespace "org.gardensofkadesh.homeworld"
+    namespace "org.homeworldunbound.game"
     compileSdkVersion 34
     defaultConfig {
         applicationId "org.homeworldunbound.game"
         minSdkVersion 26
         targetSdkVersion 34
-        // The port's own release, not the engine's. versionName matches the
-        // unbound-0.N tag and HW_UNBOUND_VERSION in main.h; versionCode is the
-        // same N, and is what a store or a sideloader compares to decide a
-        // build is newer - left at 1 it would mean no release ever reads as an
-        // update. Bump both with the tag. The engine version it is built on is
-        // minorBuildVersion in main.h and moves with upstream instead.
-        versionCode 7
-        versionName "0.7"
+        // Both derived from HW_UNBOUND_VERSION above, so bumping that one line
+        // for a release is enough and nothing here can fall behind it. The
+        // engine version this is built on is minorBuildVersion in the same
+        // header, and moves with upstream instead.
+        versionCode unboundVersionCode
+        versionName unboundVersionName
         ndk {
             abiFilters 'arm64-v8a', 'x86_64'
         }
