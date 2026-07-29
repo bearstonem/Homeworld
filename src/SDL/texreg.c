@@ -77,7 +77,22 @@ char *trSpecialTextureName[TSM_NumberModes] =
 {"Normal", "Uncolored", "Base color buffer", "Stripe color buffer"};
 #endif
 
-sdword texLinearFiltering = TRUE;               //enable bi-linear filtering
+/* Off by default. These textures are a few kilobytes each - the Mothership's
+   are 32x32 and 64x64, one per surface region - and were drawn to be seen at
+   1999 resolutions. Filtering them is filtering pixel art: it does not recover
+   detail that was never there, it just smears what is. On a headset the
+   difference is larger than on a monitor, because the panel resolution
+   magnifies a 64x64 texture far past anything its author considered.
+
+   Only the magnification filter goes to NEAREST. Minification stays
+   NEAREST_MIPMAP_LINEAR (see trTextureCreate), which matters more in stereo
+   than it ever did flat: unmipmapped minification shimmers, and shimmer that
+   crawls differently in each eye while the head moves is genuinely unpleasant
+   rather than merely ugly.
+
+   Still a setting - Options, Video, Custom Effects, "Surface Filtering" - and
+   still saved in the config, so this only changes what a fresh install gets. */
+sdword texLinearFiltering = FALSE;              //enable bi-linear filtering
 sdword texLinearMag = TRUE;
 
 //multiplier to the team color effect multipliers
