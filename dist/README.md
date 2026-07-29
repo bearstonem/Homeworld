@@ -33,7 +33,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-582fb2d27b90067996dc646a6f8fabbe  homeworld-unbound-vr.apk  99M
+82138969996d0d8f792a78b91bcbf8c8  homeworld-unbound-vr.apk  99M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -71,8 +71,12 @@ your library under the same name, one of which has all your data.
   port through carrier NAT, and the host filing a joining player under an
   address that player had never heard of — which killed the joiner the moment
   the game started.
-- **The host forwards two ports** on their router: **TCP 10500** and **UDP
-  10600**. Whoever is joining forwards nothing.
-- **Two-player only over the internet**, and both ends have to be on different
-  home network ranges — if you are both on `192.168.1.x`, one of you needs to
-  change your router's range. LAN play is unaffected by all of this.
+- **Only the host forwards two ports** on their router: **TCP 10500** and
+  **UDP 10600**. Nobody else configures anything — anything a player cannot
+  reach directly is now passed on by the host.
+- **Both ends have to be on different home network ranges.** If you are both
+  on `192.168.1.x`, one of you needs to change your router's range. LAN play
+  is unaffected by all of this.
+- **More than two players over the internet has not been tested.** Nothing is
+  known to stand in the way of it any more, but that is not the same as it
+  having worked.
