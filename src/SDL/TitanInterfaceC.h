@@ -411,6 +411,23 @@ int titanSaveWonstuff();
 
 extern Address myAddress;
 
+/* How far along the transport thinks game creation is. TitanInterface.cpp
+   holds this as a member enum on the C++ class, which is why the C side never
+   had it and why the HW_ENABLE_NETWORK code referring to it does not compile.
+
+   The names are prefixed because Globals.h already defines GAME_STARTED as 5,
+   for the unrelated startingGameState machine. An unprefixed enum constant
+   would be textually replaced by that macro anywhere both headers are
+   included, which is most of the game. */
+typedef enum
+{
+    TITANGAME_NOT_STARTED,
+    TITANGAME_STARTING,
+    TITANGAME_STARTED
+} TitanGameCreationState;
+
+extern TitanGameCreationState mGameCreationState;
+
 extern unsigned long TitanActive;
 
 extern int LANGame;

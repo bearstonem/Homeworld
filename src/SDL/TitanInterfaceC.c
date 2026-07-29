@@ -19,6 +19,7 @@ TPChannelList tpChannelList;
 TPServerList tpServerList;
 CaptainGameInfo tpGameCreated;
 Address myAddress;
+TitanGameCreationState mGameCreationState = TITANGAME_NOT_STARTED;
 unsigned long DIRSERVER_PORTS[MAX_PORTS];
 unsigned long PATCHSERVER_PORTS[MAX_PORTS];
 ipString DIRSERVER_IPSTRINGS[MAX_IPS];
@@ -79,6 +80,9 @@ void titanStartShutdown(unsigned long titanMsgType, const void* thePacket,
 void titanLeaveGameNotify(void)
 {
 	dbgMessagef("\ntitanLeaveGameNotify");
+	/* Matches TitanInterface::LeaveGameNotify. Without it a second game in
+	   the same session would still see the state left by the first. */
+	mGameCreationState = TITANGAME_NOT_STARTED;
 }
 
 
@@ -97,10 +101,37 @@ void titanRefreshRequest(char* theDir)
 }
 
 
+/* Returns whether the game may start now, and is the last gate before
+   mgStartGameCB sets sigsPressedStartGame and the universe task calls
+   utyNewGameStart.
+
+   Returning 0 unconditionally, as this did, means no game can ever start by
+   any route: not LAN, and not a single-player skirmish against the AI, which
+   needs no transport at all.
+
+   TitanInterface::CheckStartingGame is the original. Its first branch covers
+   exactly the cases reachable here - a LAN game, or one human - and answers by
+   marking the game started and returning true. The rest of that function
+   negotiates a WON routing server for internet play, which has no counterpart
+   in this build. InitPacketList() is not ported with it: it clears the resend
+   list and sequence number belonging to that routing scheme, and there is no
+   such list on this side.
+
+   Anything else still returns 0 rather than pretending, so an internet game
+   fails visibly instead of starting into a transport that cannot carry it. */
 unsigned long titanReadyToStartGame(unsigned char *routingaddress)
 {
-	dbgMessagef("\ntitanReadyToStartGame");
-	return 0; 
+	if (LANGame || tpGameCreated.numPlayers == 1)
+	{
+		mGameCreationState = TITANGAME_STARTED;
+		dbgMessagef("titanReadyToStartGame: starting (%s, %d player(s))",
+		            LANGame ? "LAN" : "local", (int)tpGameCreated.numPlayers);
+		return 1;
+	}
+
+	dbgMessagef("titanReadyToStartGame: refused, no transport for a %d player "
+	            "internet game", (int)tpGameCreated.numPlayers);
+	return 0;
 }
 
 
@@ -162,7 +193,7 @@ void titanBroadcastPacket(unsigned char titanMsgType, const void* thePacket, uns
 #ifdef HW_ENABLE_NETWORK
     	int i;
 
-	if(mGameCreationState==GAME_NOT_STARTED) {
+	if(mGameCreationState==TITANGAME_NOT_STARTED) {
 		for (i=0;i<tpGameCreated.numPlayers;i++)
 		{
 			if (!InternetAddressesAreEqual(tpGameCreated.playerInfo[i].address,myAddress))
@@ -379,7 +410,7 @@ void HandleJoinGame(Uint32 address, const void* data, unsigned short len)
 	anAddress.Port = TCPPORT;
 	long requestResult;
 
-	if(mGameCreationState==GAME_NOT_STARTED)
+	if(mGameCreationState==TITANGAME_NOT_STARTED)
 		requestResult = titanRequestReceivedCB(&anAddress, data, len);
 	else
 		requestResult = REQUEST_RECV_CB_JUSTDENY;

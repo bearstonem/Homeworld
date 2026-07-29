@@ -40,6 +40,7 @@ void HandleTCPMessage(Uint32, unsigned char, const void*, unsigned short);
 
 void HandleJoinGame(Uint32, const void*, unsigned short);
 void HandleJoinConfirm(Uint32, const void*, unsigned short);
+void HandleJoinReject(Uint32, const void*, unsigned short);
 void HandleGameData(const void*, unsigned short);
 void HandleGameStart(const void*, unsigned short);
 void HandleGameMsg(const void*, unsigned short);
