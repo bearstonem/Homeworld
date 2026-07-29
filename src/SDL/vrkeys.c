@@ -54,6 +54,17 @@ extern udword uicTextEntryProcess(regionhandle reg, smemsize ID, udword event, u
 #define VRK_UNITS           12      /* every row is this many key units wide */
 #define VRK_MAX_KEYS        16      /* per row */
 
+/* Key height as a fraction of a key unit, and the most of the panel's height
+   the whole grid may take. Both are about how much of the game it hides. */
+#define VRK_KEY_NUM         5
+#define VRK_KEY_DEN         8
+#define VRK_MAX_HEIGHT_NUM  3
+#define VRK_MAX_HEIGHT_DEN  10
+
+/* Between the grid and whatever it is keeping clear of. Small on purpose:
+   every pixel of it pushes the grid further up the screen it is covering. */
+#define VRK_GAP             6
+
 /* The front end lays every screen out in a 640x480 box centred in the window
    (feResRepositionCentredX), so these are that box's coordinates. */
 #define VRK_SCREEN_W        640
@@ -247,7 +258,8 @@ static void vrKeysLayout(regionhandle focused)
     sdword const originX = feResRepositionCentredX(0);
     sdword const originY = feResRepositionCentredY(0);
     sdword width = MAIN_WindowWidth * 2 / 3;
-    sdword unit, keyHeight, boardHeight, x0, y0, row, keepClearTo = 0;
+    sdword unit, keyHeight, boardHeight, x0, y0, row;
+    sdword keepClearFrom = 0, keepClearTo = 0;
 
     if (width > 720) width = 720;
     if (width < 420) width = 420;
@@ -255,40 +267,50 @@ static void vrKeysLayout(regionhandle focused)
 
     /* Even, so the half-unit keys land on whole pixels and the rows stay
        flush with each other. Capped by height as well as width: the keyboard
-       may take at most two fifths of the panel, or on a short one there is no
-       band left to put it in that does not cover the field being typed. */
+       may take at most VRK_MAX_HEIGHT of the panel. A ray is a precise
+       pointer, so the keys can be a good deal shorter than they are wide
+       without becoming hard to hit, and every pixel of height is one taken
+       off the screen behind. */
     {
         sdword byWidth = (width / VRK_UNITS) & ~1;
-        sdword byHeight = ((MAIN_WindowHeight * 2 / 5) * 4 / (3 * VRK_ROWS)) & ~1;
+        sdword byHeight = (MAIN_WindowHeight * VRK_MAX_HEIGHT_NUM
+                           / VRK_MAX_HEIGHT_DEN) * VRK_KEY_DEN
+                        / (VRK_KEY_NUM * VRK_ROWS);
 
-        unit = byWidth < byHeight ? byWidth : byHeight;
+        unit = byWidth < (byHeight & ~1) ? byWidth : (byHeight & ~1);
     }
     if (unit < 16) unit = 16;
     width = unit * VRK_UNITS;
-    keyHeight = unit * 3 / 4;
+    keyHeight = unit * VRK_KEY_NUM / VRK_KEY_DEN;
     boardHeight = keyHeight * VRK_ROWS;
 
     x0 = originX + (VRK_SCREEN_W - width) / 2;
-    y0 = MAIN_WindowHeight - boardHeight - 8;
+    y0 = MAIN_WindowHeight - boardHeight - VRK_GAP;
 
     /* Never over whatever is being typed into. On the lobby the game's chat
        entry sits along the bottom, which is exactly where the keyboard wants
-       to be; on a short panel the address field would collide too. */
+       to be. When it has to move, it goes *just above* that field rather than
+       to the top of the panel: the lobby's list of games is up there and is
+       the one thing a player is in the lobby to read. Only the two rows the
+       keyboard actually needs get covered, and it reads as belonging to the
+       field it is attached to. */
     if (focused != NULL)
     {
+        keepClearFrom = focused->rect.y0;
         keepClearTo = focused->rect.y1;
     }
-    if (vrk.addressFocus && originY + VRK_ADDR_Y1 > keepClearTo)
+    else if (vrk.addressFocus)
     {
+        keepClearFrom = originY + VRK_ADDR_Y0;
         keepClearTo = originY + VRK_ADDR_Y1;
     }
-    if (keepClearTo > y0 - 8)                               /* 8: frame + slack */
+    if (keepClearTo > y0 - VRK_GAP)
     {
-        y0 = 8;
+        y0 = keepClearFrom - boardHeight - VRK_GAP;
     }
-    if (y0 < 0)
+    if (y0 < 4)
     {
-        y0 = 0;
+        y0 = 4;
     }
 
     vrk.board.x0 = x0;
@@ -325,6 +347,20 @@ static void vrKeysLayout(regionhandle focused)
     vrk.addRect.x1 = vrk.fieldRect.x1;
     vrk.addRect.y0 = originY + VRK_ADDR_Y0 + VRK_ADDR_BUTTON;
     vrk.addRect.y1 = vrk.addRect.y0 + VRK_ADDR_ROW_H;
+
+    /* Typing into one of the game's own fields near the bottom puts the grid
+       over the right-hand column, address panel included. Stand it down for
+       the duration rather than drawing half of it under the keys - it is not
+       what the player is doing, and it comes straight back. It can never be
+       the field being typed into: that case places the grid above it. */
+    if (vrk.boardUp && vrk.addressUp
+        && originX + VRK_ADDR_X0 < vrk.board.x1
+        && vrk.board.x0 < originX + VRK_ADDR_X1
+        && originY + VRK_ADDR_Y0 < vrk.board.y1 + 4
+        && vrk.board.y0 - 4 < originY + VRK_ADDR_Y1)
+    {
+        vrk.addressUp = FALSE;
+    }
 }
 
 static bool32 vrKeysInside(rectangle const* rect, sdword x, sdword y)
@@ -664,10 +700,13 @@ static void vrKeysCentredText(rectangle const* rect, char const* text, color c)
 
 static void vrKeysDrawBoard(void)
 {
-    color const backdrop = colRGBA(6, 12, 20, 235);
+    /* The backdrop is nearly clear and the key faces are not: what the grid
+       hides is then only the keys themselves, and the screen behind reads
+       through everything between them. */
+    color const backdrop = colRGBA(6, 12, 20, 120);
     color const edge = colRGB(60, 140, 180);
-    color const face = colRGBA(22, 40, 56, 235);
-    color const faceHover = colRGBA(40, 90, 120, 245);
+    color const face = colRGBA(22, 40, 56, 225);
+    color const faceHover = colRGBA(40, 90, 120, 240);
     color const faceHeld = colRGBA(70, 160, 200, 250);
     color const faceLatched = colRGBA(30, 90, 70, 240);
     color const capLabel = colRGB(215, 232, 240);
