@@ -171,13 +171,27 @@ did not compile, assumed a topology the game does not use).
   the sender's own idea of its address means knowing the advertisement's
   shape, and that is the lobby's business, not the transport's.
 
-  **This lifts the two-player limit only where every player forwards their own
-  ports.** Homeworld's lockstep is a full mesh - `titanBroadcastPacket` sends
-  from every peer to every other peer directly - so every pair needs a path
-  between them. `lan.h` used to claim the rest was relayed through the captain;
-  it is not, and no relaying exists: `lanSendTo` finds a peer or drops. Three
-  players behind one forwarded port still needs either relaying or hole
-  punching, neither of which is written.
+- **Anything with no path of its own is relayed through the host**
+  (`lanSetRelay`, `LAN_MSG_RELAY`). Homeworld's lockstep is a full mesh -
+  `titanBroadcastPacket` sends from every peer to every other peer - so without
+  this every pair needs a path between them, meaning every player forwards a
+  port, and a player on mobile data has no router of their own to configure and
+  could never join a game of more than two.
+
+  The message is wrapped in an envelope naming who it is really for and handed
+  to the captain, which passes it on. It fits behind `lanSendTo` - the only way
+  the game sends anything, two call sites - so no lobby, captaincy or lockstep
+  code knows it happens. The relay is set from `titanConnectToClient`, called
+  in one place with the captain's address, because the captain is the one peer
+  everybody must have a path to already. The captain relays through nobody.
+
+  An envelope is forwarded once and never back to the peer that handed it
+  over, so two peers that both relay cannot bounce it forever. Inbound is
+  credited to the *original* sender, not to whoever passed it on - the same
+  distinction that, one layer up, is what `PlayerJoinInfo.address` fixed.
+
+  **So only the host forwards TCP 10500 and UDP 10600.** Everyone else
+  configures nothing.
 - **A reply goes to the port the packet came from, not to `LAN_UDP_PORT`.** A
   peer on mobile data is behind carrier-grade NAT, where thousands of
   subscribers share one address and the source port therefore *cannot* be
@@ -335,8 +349,8 @@ from it and writes back to it, so an address typed once survives the session.
 
 ## Running a WAN test
 
-The host forwards **TCP 10500** and **UDP 10600** to its machine, and opens
-them locally if a firewall is running (`ufw allow 10500/tcp`,
+Only the **host** forwards **TCP 10500** and **UDP 10600** to its machine, and
+opens them locally if a firewall is running (`ufw allow 10500/tcp`,
 `ufw allow 10600/udp` — ufw being active was worth half an hour on its own).
 Nobody else configures anything: the joiner types the host's public address
 and the host learns the joiner from the first packet it sends.
@@ -359,15 +373,17 @@ buffer that no longer went back far enough.
    last real unknown, and it is M5 in the plan: VR-issued orders, and
    particularly a drawn flight path, are the one feature that touches the
    command layer unusually.
-2. **More than two players over the internet is untested.** The addressing no
-   longer stands in the way (`lanAddAlias`), but it has only been reasoned
-   about and driven through the harness — three real machines on three real
-   networks have never tried it. Every player must forward their own TCP 10500
-   and UDP 10600, because the lockstep is a full mesh with no relaying. Both
-   ends of every pair still have to be on different private ranges.
-3. **Relaying through the captain does not exist**, though `lan.h` used to say
-   it did. It is what would let three or more play with only the host
-   forwarding a port, which is the arrangement anyone would actually expect.
+2. **More than two players over the internet is untested.** Nothing is known
+   to stand in the way any more - the addressing is told rather than guessed
+   (`lanAddAlias`) and anything unreachable relays through the host
+   (`lanSetRelay`) - but that has been reasoned about and driven through the
+   harness, which is not the same as three machines on three networks having
+   played a game. That test is the next real one, and only the host should
+   need to forward a port for it.
+3. **The relay is a single point of failure and has no timeout.** If the
+   captain goes, everything relayed through it goes with it - which was
+   already true of captaincy over the internet, but is now true of ordinary
+   traffic between two clients who could otherwise have reached each other.
 4. **The address field writes `MultiplayerHost` back to the config**, so a
    machine that has ever typed an address seeds a remote on every launch
    after. That arms `lanRouteTo`'s single-remote substitution in games that
