@@ -21,6 +21,7 @@ src_sdl = files('avi.c',
                 'TitanInterfaceC.c',
                 'utility.c',
                 'vr.c',
+                'vrkeys.c',
                 'vrworld.c')
 
 src_sdl += files('fqcodec.c',

@@ -13,6 +13,7 @@
 #ifdef HW_ENABLE_VR
 
 #include "vr.h"
+#include "vrkeys.h"
 #include "vrworld.h"
 
 #include <math.h>
@@ -113,6 +114,7 @@
 #define VR_SELECT_SWEEP          3
 #define VR_SELECT_PATH           4
 #define VR_SELECT_TARGETS        5
+#define VR_SELECT_KEYBOARD       6
 #define VR_CONTEXT_PANEL         1
 #define VR_CONTEXT_ORDER         2
 #define VR_CONTEXT_MOVE          3
@@ -1529,6 +1531,15 @@ static void vrHapticPulse(uword hand, real32 amplitude, XrDuration duration)
     xrApplyHapticFeedback(vr.session, &info, (XrHapticBaseHeader const*)&vibration);
 }
 
+/* The pointer is in framebuffer pixels, which on Quest is an integer multiple
+   of the logical UI resolution prim2d and the front end draw in (4128x2208 vs
+   1032x552). Anything drawn or hit-tested in UI space needs this. */
+static void vrPanelLogical(sdword x, sdword y, sdword* lx, sdword* ly)
+{
+    *lx = vr.width  > 0 ? x * MAIN_WindowWidth  / vr.width  : x;
+    *ly = vr.height > 0 ? y * MAIN_WindowHeight / vr.height : y;
+}
+
 /* The game cursor is drawn before vrFrame updates the OpenXR pointer. Draw a
    small current-frame reticle into the same framebuffer copied to the wrist
    quad, making the visual hit exact even though the beam is in another
@@ -1544,11 +1555,8 @@ static void vrDrawPanelReticle(void)
     {
         return;
     }
-    /* The pointer is in framebuffer pixels, which on Quest is an integer
-       multiple of the logical UI resolution prim2d draws in (4128x2208 vs
-       1032x552). Drawing it unscaled put the reticle off the panel entirely. */
-    x = vr.pointerX * MAIN_WindowWidth / vr.width;
-    y = vr.pointerY * MAIN_WindowHeight / vr.height;
+    /* Drawing it unscaled put the reticle off the panel entirely. */
+    vrPanelLogical(vr.pointerX, vr.pointerY, &x, &y);
     primModeSet2();
     primLineThick2(x - 11, y, x - 4, y, 4, shadow);
     primLineThick2(x + 4, y, x + 11, y, 4, shadow);
@@ -2778,7 +2786,7 @@ static void vrUpdateInput(XrTime time)
     bool32 panelHit[VR_HAND_COUNT] = {FALSE, FALSE};
     bool32 panelOwns[VR_HAND_COUNT] = {FALSE, FALSE};
     bool32 select[VR_HAND_COUNT], context[VR_HAND_COUNT], back[VR_HAND_COUNT];
-    bool32 managerOpen, managerActive;
+    bool32 managerOpen, managerActive, keysOpen;
     uword const handOrder[VR_HAND_COUNT] = {VR_HAND_RIGHT, VR_HAND_LEFT};
     real32 deltaSeconds = 1.0f / 72.0f;
     uword hand, orderIndex;
@@ -2820,6 +2828,18 @@ static void vrUpdateInput(XrTime time)
        of every control they could use to recover. */
     managerOpen = vr.worldInteractive && vrWorldManagerActive();
     managerActive = managerOpen && vr.managerState == VR_MGR_VISIBLE;
+
+    /* Typing is not only a menu activity: the escape menu's save-game name and
+       the in-game chat both ask for text with a world up and the wheel owning
+       the left trigger. While the keyboard is on screen it behaves like an
+       open manager - the panel is shown whatever the player toggled, it owns
+       any ray that crosses it, and the wheel stands down - because a keyboard
+       you cannot see or click is worse than none.
+
+       One frame behind, since vrKeysUpdate runs below once the pointer has
+       been resolved. At 72Hz that is the frame the key appears on, not one
+       where a press could go astray: the keyboard is not hittable yet either. */
+    keysOpen = vrKeysActive();
 
     /* The mission has taken the sensors map to show the player something. The
        hands are hidden for the duration (vrWorldSetRay invalidates the rays),
@@ -2871,7 +2891,7 @@ static void vrUpdateInput(XrTime time)
        regions from the region tree (tbDisable) and modal front-end screens
        set RPE_ModalBreak, which stops events propagating to it. Without this
        there is no way to go from one manager to another. */
-    if (vr.worldInteractive)
+    if (vr.worldInteractive && !keysOpen)
     {
         vrUpdateWheelInput(time, select[VR_HAND_LEFT]);
     }
@@ -3044,7 +3064,7 @@ static void vrUpdateInput(XrTime time)
            game ignores clicks there anyway - Sensors.c gates them on
            smFleetIntel - so nothing is lost by not aiming at it. */
         bool32 panelAvailable = (!vr.worldInteractive || !vr.panelHidden
-                                 || managerOpen)
+                                 || managerOpen || keysOpen)
                              && !(vr.worldInteractive && vrWorldSensorsBriefing());
         sdword lockedPanelHand = -1;
         sdword pointerCandidate = -1;
@@ -3064,8 +3084,8 @@ static void vrUpdateInput(XrTime time)
                 continue;
             }
             worldT = vr.worldInteractive ? vrWorldHandHitDistance((sdword)hand) : -1.0f;
-            panelOwns[hand] = !vr.worldInteractive || managerOpen || worldT < 0.0f
-                           || panelT[hand] <= worldT;
+            panelOwns[hand] = !vr.worldInteractive || managerOpen || keysOpen
+                           || worldT < 0.0f || panelT[hand] <= worldT;
             if (panelOwns[hand] && vr.worldInteractive)
             {
                 vrWorldSetRayLimit((sdword)hand, panelT[hand]);
@@ -3114,13 +3134,23 @@ static void vrUpdateInput(XrTime time)
         }
     }
 
+    /* The keyboard overlay decides for itself whether it is up, and needs the
+       pointer before the trigger is looked at so a press lands on the key the
+       player can see highlighted. */
+    {
+        sdword keyX, keyY;
+
+        vrPanelLogical(vr.pointerX, vr.pointerY, &keyX, &keyY);
+        vrKeysUpdate(vr.pointerValid, keyX, keyY);
+    }
+
     /* Trigger selection is captured by the hand and surface on press. This
        prevents the other controller, or a ray crossing the wrist panel,
        from stealing the release. */
     for (orderIndex = 0; orderIndex < VR_HAND_COUNT; orderIndex++)
     {
         hand = handOrder[orderIndex];
-        if (hand == VR_HAND_LEFT && vr.worldInteractive)
+        if (hand == VR_HAND_LEFT && vr.worldInteractive && !keysOpen)
         {
             vr.prevSelect[hand] = select[hand];             //wheel owns it
             continue;
@@ -3176,15 +3206,30 @@ static void vrUpdateInput(XrTime time)
             {
                 if (panelOwns[hand])
                 {
+                    sdword keyX, keyY;
+
                     vr.pointerX = panelX[hand];
                     vr.pointerY = panelY[hand];
                     vr.panelHitT = panelT[hand];
                     vr.pointerHand = hand;
                     vr.pointerValid = TRUE;
                     SDL_WarpMouseInWindow(sdlwindow, vr.pointerX, vr.pointerY);
-                    vrPushMouseButton(SDL_BUTTON_LEFT, TRUE);
-                    vr.selectGestureHand = hand;
-                    vr.selectGestureMode = VR_SELECT_PANEL;
+                    /* The keyboard is drawn over the game's own screen, so it
+                       gets first refusal on a press landing inside it: what is
+                       underneath a key must never also be clicked. */
+                    vrPanelLogical(vr.pointerX, vr.pointerY, &keyX, &keyY);
+                    if (vrKeysPress(keyX, keyY))
+                    {
+                        vrHapticPulse(hand, 0.28f, 18000000);
+                        vr.selectGestureHand = hand;
+                        vr.selectGestureMode = VR_SELECT_KEYBOARD;
+                    }
+                    else
+                    {
+                        vrPushMouseButton(SDL_BUTTON_LEFT, TRUE);
+                        vr.selectGestureHand = hand;
+                        vr.selectGestureMode = VR_SELECT_PANEL;
+                    }
                 }
                 else if (vr.worldInteractive && !managerActive)
                 {
@@ -3263,6 +3308,10 @@ static void vrUpdateInput(XrTime time)
             {
                 vrPushMouseButton(SDL_BUTTON_LEFT, FALSE);
             }
+            else if (vr.selectGestureMode == VR_SELECT_KEYBOARD)
+            {
+                vrKeysRelease();
+            }
             else if (vr.selectGestureMode == VR_SELECT_SWEEP)
             {
                 changed = vrWorldSweepCommit((sdword)hand, vr.selectAdditive);
@@ -3308,7 +3357,8 @@ static void vrUpdateInput(XrTime time)
             if (vr.contextGestureHand < 0 && vr.selectGestureHand < 0
                 && vr.attackGestureHand < 0)
             {
-                if (hand == VR_HAND_LEFT && vr.worldInteractive && !managerActive)
+                if (hand == VR_HAND_LEFT && vr.worldInteractive && !managerActive
+                    && !keysOpen)
                 {
                     /* Left hand is the commander's: X is undo, not a mirror of
                        the right hand's order button. The old right-grip+A/X
@@ -3323,15 +3373,23 @@ static void vrUpdateInput(XrTime time)
                 }
                 else if (panelOwns[hand])
                 {
+                    sdword keyX, keyY;
+
                     vr.pointerX = panelX[hand];
                     vr.pointerY = panelY[hand];
                     vr.panelHitT = panelT[hand];
                     vr.pointerHand = hand;
                     vr.pointerValid = TRUE;
                     SDL_WarpMouseInWindow(sdlwindow, vr.pointerX, vr.pointerY);
-                    vrPushMouseButton(SDL_BUTTON_RIGHT, TRUE);
-                    vr.contextGestureHand = hand;
-                    vr.contextGestureMode = VR_CONTEXT_PANEL;
+                    vrPanelLogical(vr.pointerX, vr.pointerY, &keyX, &keyY);
+                    /* The keyboard has no right-button verb, but the screen
+                       underneath does, and a key press must not reach it. */
+                    if (!vrKeysCovers(keyX, keyY))
+                    {
+                        vrPushMouseButton(SDL_BUTTON_RIGHT, TRUE);
+                        vr.contextGestureHand = hand;
+                        vr.contextGestureMode = VR_CONTEXT_PANEL;
+                    }
                 }
                 else if (vr.worldInteractive && !managerActive)
                 {
@@ -4701,6 +4759,7 @@ static void vrFrameInner(void)
         vrUpdateCardPoses(frameState.predictedDisplayTime);
         vrUpdateWheelPose(frameState.predictedDisplayTime);
         vrDrawManagerBorder();
+        vrKeysDraw();
         vrDrawPanelReticle();
 
         memset(&acquireInfo, 0, sizeof(acquireInfo));
@@ -4742,9 +4801,12 @@ static void vrFrameInner(void)
                submittable - never at a stale wrist pose. */
             {
                 bool32 managerOpen = vr.worldInteractive && vrWorldManagerActive();
+                /* The keyboard is drawn into this quad, so a panel toggled off
+                   in game would hide the very thing the player is typing on. */
                 bool32 showQuad = managerOpen
                                 ? vr.managerPoseValid
-                                : !(vr.worldInteractive && vr.panelHidden);
+                                : !(vr.worldInteractive && vr.panelHidden
+                                    && !vrKeysActive());
 
                 if (showQuad && vrPoseSubmittable(&vr.quadPose))
                 {
