@@ -5099,8 +5099,16 @@ void utyDrawDroppedPlayer(featom *atom, regionhandle region)
 
     if (FELASTCALL(atom))
     {
-        KeepAliveDontDropPlayerCB(utyPlayerDroppedDisplay);
-        utyPlayerDroppedDisplay = -1;
+        /* -1 means the dialog has already been answered. utyYesDropPlayer and
+           utyDontDropPlayer both clear it and then call feScreenDisappear,
+           which lands right back here, so without this the answer is undone
+           and, worse, AliveTimeoutTimers is indexed at -1. The drawing branch
+           below has always tested for it; this one never did. */
+        if (utyPlayerDroppedDisplay != -1)
+        {
+            KeepAliveDontDropPlayerCB(utyPlayerDroppedDisplay);
+            utyPlayerDroppedDisplay = -1;
+        }
 
         mrEnable();
 
