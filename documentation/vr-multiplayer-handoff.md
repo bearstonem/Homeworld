@@ -3,7 +3,7 @@
 Companion to `documentation/vr-multiplayer-plan.md`, which is the plan. This
 is the state of it, the things that cost time to find, and what to do next.
 
-State as of `c6e6385` on `main`. Everything described is committed and pushed.
+State as of the VR keyboard work on `main`, 2026-07-28.
 
 ## Where it got to
 
@@ -14,18 +14,27 @@ other's lobby, join over TCP, and load into the same game. Both reached
 normal`, so `CommandNetwork.c` and `Captaincy.c` ran for the first time in
 this fork and agreed with each other about who was captain.
 
-**Internet play is written but unverified.** Same transport, reached by naming
-the host instead of broadcasting. Never tested against a genuinely remote
-endpoint — both machines here are on one subnet, so nothing has yet crossed a
-router, let alone NAT.
+**There is a keyboard.** `src/SDL/vrkeys.c`, drawn on the panel, up whenever
+any text entry in the game holds key focus — the player name, the game name,
+chat, a save game's name, all of them. It carries the join-by-address field
+too, since no such field exists in the game's own screens. See
+[Typing in VR](#typing-in-vr).
+
+**Internet play could not have worked as written, and now can.** Every peer
+publishes the address its own machine has, so behind a router both ends name
+each other by addresses that only mean something on the other's LAN.
+`lanConnect` already substituted the named remote when it dialled; nothing
+else did, so the link came up and then every message on it was dropped by
+`lanSendTo` for want of a peer at that address. `lanRouteTo` now applies that
+rule at every point that names a peer. Verified with the standalone harness
+(below), which fails on the old code and passes on the new. **Still never
+tested against a genuinely remote endpoint** — both machines here are on one
+subnet, so nothing has yet crossed a router.
 
 **No sync error has been seen**, but nor has a game been played out. A match
 that has just loaded has not had the opportunity to desync. `SYNC_CHECK` is 1
 (`Switches.h:14`) so a mismatch reports itself with a frame number; that
 remains the acceptance test and it has not been run in anger.
-
-**The keyboard does not exist**, and it now blocks everything else. See
-[What to do next](#what-to-do-next).
 
 ## Traps
 
@@ -86,6 +95,23 @@ The expensive part of the session. None of these are in the networking.
   own allocator, so use-after-free inside it presents as a bare SEGV with no
   ASan report. It still catches globals and the real heap, which is how the
   `AliveTimeoutTimers[-1]` write was found.
+- **`grep` silently finds nothing in several of these sources.** They carry
+  extended-ASCII bytes that are not valid UTF-8 — `UIControls.c` is the worst
+  of them — and in a UTF-8 locale GNU grep gives up on the file and reports no
+  matches at all rather than an error. It is not "the symbol is not there", it
+  is "grep declined". Half an hour went into concluding that `regKeysFocussed`
+  was dead code and `uicTextEntryProcess` did not exist, both of which are
+  false. Use `LC_ALL=C grep -a`.
+- **The screens in `multiplayer_lan_game.fib` are named with an `L` prefix**
+  — `LChannel_Chat`, `LLAN_Login`, `LCaptain_Wait` — where the internet ones
+  in `multiplayer_game.fib` are not (`mgShowScreen`). Matching on the
+  unprefixed name finds the wrong screen, or none.
+- **`tools/big_extract.py` reads the retail `.big`,** which is how the screen
+  layouts were read at all. A `.fib` is a 12-byte header, then 20 bytes per
+  screen, then 76 bytes per atom (the 32-bit on-disk form in `FEFlow.h`), and
+  atom rectangles are two corners rather than a corner and a size until
+  `feScreensLoad` converts them. Worth rebuilding that dumper before guessing
+  where anything is on a screen.
 
 ## The transport
 
@@ -104,17 +130,39 @@ did not compile, assumed a topology the game does not use).
   to as well as broadcast. Learning is symmetric: any non-local address we
   receive discovery from is added, so only the joining side configures
   anything.
-- A game hosted behind a router advertises its *private* address. When that
-  address is unreachable and exactly one remote is named, that remote is
-  necessarily where the advertisement came from, so it is dialled instead.
-  With several named it is ambiguous and deliberately not guessed.
+- **A peer is not reachable at the address it calls itself.** Everyone
+  publishes what `getifaddrs` gave them, so behind a router the lobby names
+  the other end by an address that only means something on its own LAN, while
+  the link is keyed by the address the socket really uses. `lanRouteTo`
+  resolves the one to the other: when exactly one remote is named, that remote
+  is necessarily the other end of the internet link. Every path that names a
+  peer goes through it — `lanConnect`, `lanSendTo`, `lanPeerConnected` — and
+  the first of those was the only one that used to, which is why internet play
+  could connect and then do nothing.
+
+  Two consequences worth knowing before relying on it. Over the internet this
+  is a **two-player** transport: with several remotes named the resolution is
+  ambiguous and is deliberately not guessed. And it **cannot help when both
+  ends sit on the same private range** — two 192.168.1.x home networks, which
+  is the common case — because the peer's address then looks local, is left
+  alone, and reaches somebody else's machine or nothing at all. Fixing that
+  properly needs the peers to exchange who they are on connect rather than
+  inferring it from addresses; there is no room in the frame header for it
+  today and the lobby has nowhere to put it.
 
 There is a standalone harness for it. It covers startup, address discovery,
-broadcast round-trip, accept, a frame split across two writes, two frames in
-one read, zero-length payloads, peer drop and restart — everything short of
-two-host routing. It is not in the repository; recreate it by stubbing
-`HandleTCPMessage`, `titanReceivedLanBroadcastCB` and `dbgMessagef` and
-linking `lan.c` directly. Worth doing before touching framing.
+accept, the routing rule above (both as a unit and end to end against a plain
+socket standing in for the other machine), a frame split across two writes,
+two frames in one read, and zero-length payloads. It is not in the repository;
+recreate it by `#include "lan.c"` — the routing rule is static — and stubbing
+`HandleTCPMessage`, `titanReceivedLanBroadcastCB` and `dbgMessagef`. Build it
+against `git show <old>:src/SDL/lan.c` as well as the current file: that is
+how the routing change was shown to fix something rather than to look like it
+did. Worth doing before touching framing or addressing.
+
+`lan.c` cannot be both ends of a link, so the harness must be the other end
+itself: `lanServiceAccept` dedups an inbound connection against an existing
+peer at the same address, and on loopback those are the same address.
 
 ## Running the two-machine test
 
@@ -142,89 +190,107 @@ Then: host on one, join from the other, START GAME on the host. The host's
 Setup Game screen needs a **game name of two or more characters** or
 `mgInvalidGameName` bounces it back without saying why.
 
-## What to do next
+## Typing in VR
 
-### A keyboard, in VR
+`src/SDL/vrkeys.c`. Decided 2026-07-28: a player must never edit a file to
+host or join, so this came before everything else.
 
-Decided 2026-07-28: a player must never edit a file to host or join. That
-makes this the critical path, ahead of everything else, because there is
-currently no way to enter an address or a name from inside the headset.
+**It is not a multiplayer feature.** It is up whenever *any* text entry in
+the game holds key focus, found by walking the region tree from
+`regRootRegion` and matching `uicTextEntryProcess`. That covers the player
+name, the game name, lobby and in-game chat, game and room passwords, the
+resource-option numbers, and the escape menu's save-game name — every
+`FA_TextEntry` in every `.fib`, plus the ones `GameChat.c` and `HorseRace.c`
+focus by hand. Matching on the process function and not on the status bit
+matters: list windows take `RSF_KeyCapture` too (`uicSetCurrent`), and a
+keyboard over a focused list would be wrong.
 
-**There is nowhere to type an address, and this is the larger half of the
-job.** The multiplayer screens contain exactly three text entries, all in
-`multiplayer_lan_game.fib`: `LG_NameEntry`, `LG_ChatTextEntry` and
-`LG_GameChatTextEntry`. No address field exists anywhere, because a LAN never
-needed one. The screen definitions live inside `Homeworld.big`, which belongs
-to the player and cannot be edited, so the field cannot be added where the
-others are. It has to be drawn by the VR layer itself. That falls out
-naturally if the keyboard is an overlay, since the address field is then just
-more of the same overlay, but it does mean "add a keyboard" is not sufficient
-on its own.
+**It is on the panel, not on a card.** A fourth wrist card would have needed
+a new swapchain, a new pose and new ray hit-testing. `vr.pointerX/pointerY`
+is already the controller ray mapped onto the panel, so the grid is drawn
+into the window framebuffer just before `vrCopyFrame` — the same place the
+reticle goes — and hit-tested against that pointer. The card system is there
+if a reason to prefer it appears (`vr.card[]`); it was rejected on cost.
 
-Nothing in the engine needs changing. Four findings, all verified:
+Findings behind it, all verified:
 
-- **Synthesized keys already reach text entry.** `main.c:1791` does
+- **Synthesized keys already reach text entry.** `main.c` does
   `keyPressDown(keyLanguageTranslate(pEvent->key.keysym.scancode))`, so the
-  engine keys off the **scancode**, not the keysym, and `vrPushKey`
-  (`vr.c:1498`) already sets both. This is how Escape works in VR today.
-- **Never send characters, only scancodes.** The engine derives the character
-  itself through `uicKeyEntryTable[keycode].regularKey` / `.shiftKey`
-  (`UIControls.c:3749`), one table per language. A keyboard that tried to
-  inject letters directly would fight it.
+  engine keys off the **scancode**. This is how Escape works in VR today.
+- **Never send characters, only scancodes.** But note *how* the engine gets
+  from one to the other, because it is not what it looks like:
+  `uicTextEntryProcess` does `keycode = SDL_GetKeyFromScancode(data)` and
+  then indexes `uicKeyEntryTable` **by ASCII**, not by scancode — entry 65 is
+  `{'a','A'}`, entry 46 is `{'.','>'}`. So the whole path depends on SDL's
+  default keymap being populated with no physical keyboard attached. If it
+  ever is not, every key silently types nothing; `vrKeysPushKey` logs the
+  resolved keycode once for exactly that reason.
 - **Shift has to be genuinely held, not applied as a transform.**
-  `Region.c:816` reads the key and its shift state together with
-  `keyBufferedKeyGet(&bShift)` and ORs in `RF_ShiftBit`, which is what
-  `UIControls.c:3650` tests. So the shift key must push `SDLK_LSHIFT` down and
-  keep it down across the letter press. There is already a precedent for
-  exactly that in the VR layer: `vr.c:3715` holds `SDL_SCANCODE_LSHIFT` for
-  the grip.
-
-  **Latch it rather than making it momentary** (decided 2026-07-28). Pointing
-  at a shift key and a letter key at the same time is not possible with one
-  ray, so a held shift would have to be bracketed around each press. Latching
-  suits the mechanism better anyway: one `LSHIFT` down when the key is tapped,
-  one up when it is tapped again, and every letter in between arrives shifted
-  because the state is sampled per key at buffering time.
-
-  One wrinkle if it is to read as caps lock rather than as a stuck shift: a
-  latched `LSHIFT` shifts *everything*, so the number row would give `!"£`
-  rather than digits, which is wrong for typing an address. Caps lock
-  semantics means holding the latch as the keyboard's own flag and only
-  pushing `LSHIFT` for letter keys. Worth deciding deliberately, since the
-  address field is the reason the keyboard exists.
-- **`regKeysFocussed` (`Region.h:174`) is TRUE exactly while a text entry
-  holds key capture**, which is when the keyboard should appear.
+  `Region.c` reads the key and its shift state together with
+  `keyBufferedKeyGet(&bShift)`; `keyPressDown` records it with
+  `keyBufferAdd(key, keyIsHit(SHIFTKEY))` at press time. So a shifted glyph
+  pushes `LSHIFT` down, the key down and up, then `LSHIFT` up — all in one
+  batch, and the release afterwards is harmless because the buffer already
+  captured the state.
+- **CAPS latches, and applies to letters only.** One ray cannot point at
+  shift and a letter at once. A latch that pushed `LSHIFT` for everything
+  would turn the number row into `!"#`, and an address is digits and dots, so
+  the latch is the keyboard's own flag and the few shifted glyphs worth
+  having (`_`, `?`) carry their own shift in the key table.
+- **`regKeysFocussed` is not the trigger, though it looked like it.** It is
+  set correctly (`UIControls.c`), but it is a single global that says
+  *someone* has focus, not who, and the layout needs the focused entry's
+  rectangle: the keyboard sits along the bottom and has to move to the top
+  when that is where the entry is, which on the lobby it is.
 
 Beyond the letters, `uicTextEntryProcess` handles `ESCKEY`, `RETURNKEY` and
-`ENTERKEY`, `BACKSPACEKEY`, `DELETEKEY`, and `ARRLEFT`/`ARRRIGHT`, the last
-two jumping by word when `CONTROLKEY` is held. Those are the non-character
-keys worth having.
+`ENTERKEY`, `BACKSPACEKEY`, `DELETEKEY`, and `ARRLEFT`/`ARRRIGHT`. All are on
+the grid. Keys repeat while held, except the ones that commit or toggle —
+holding CAPS would otherwise flicker the latch and holding ENTER would submit
+the same address over and over.
 
-**Put it on the panel, not on a card.** A fourth wrist card would need a new
-swapchain, a new pose and new ray hit-testing. `vr.pointerX/pointerY` already
-holds the controller ray mapped onto the panel in logical UI pixels, and
-`vrPushMouseButton` fires clicks at exactly those coordinates (`vr.c:1493`).
-Draw the key grid as an overlay, hit-test against the pointer that is already
-computed, and push a scancode on trigger instead of a mouse click. Roughly a
-quarter of the code, reusing paths proven on device. The card system is there
-if a later reason to prefer it appears (`vr.card[]`, dispatch at
-`vr.c:2322`); it was considered and rejected on cost, not on principle.
+**In game it behaves like an open manager** (`keysOpen` in `vrUpdateInput`):
+the panel is submitted whatever the player toggled with Y, it owns any ray
+that crosses it, and the command wheel stands down so the left trigger can
+click keys. The escape menu's save-game name and the in-game chat both ask
+for text with a world up and the wheel owning the left trigger, and a
+keyboard you cannot see or click is worse than none.
+
+### The address field
+
+No address field exists in any of the game's screens, because a LAN never
+needed one, and the screen definitions live inside `Homeworld.big`, which
+belongs to the player and cannot be edited. So the VR layer draws its own,
+on the lobby (`LChannel_Chat`), in the gap the screen leaves in its
+right-hand button column between JOIN GAME (ends at y=192) and CHANGE COLORS
+(starts at y=377). It takes keys locally rather than pushing them at the
+engine, and commits through `lanAddRemote`; the host's game then appears in
+the list alongside the LAN ones.
+
+Front-end screens are laid out in a **640x480 box centred in the window**
+(`feResRepositionCentredX`), which is where those coordinates come from and
+what makes the side bands free real estate on a wide panel. The layout was
+checked against the real atom rectangles pulled out of the `.fib` at
+1032x552, 1024x768 and 640x480 — worth redoing rather than eyeballing if
+either the panel or the field moves.
 
 `MultiplayerHost` in the config stays as an override, since it is how the
-desktop and any automated test join without a headset. It must not be the
-route a player takes.
+desktop and any automated test join without a headset. The field seeds itself
+from it and writes back to it, so an address typed once survives the session.
 
-### After that
+## What to do next
 
 1. **Play a match to completion** and watch for a sync error. This is the
    last real unknown before LAN play is usable, and it is M5 in the plan:
    VR-issued orders, and particularly a drawn flight path, are the one
    feature that touches the command layer unusually.
 2. **Test internet play across a real WAN.** Nothing has crossed a router.
-   The host forwards TCP 10500 and UDP 10600.
-3. **Player name.** The headset joins as `unnamed_player` because `utyName`
-   falls back to its default. Prefilling it the way `gpSuggestSaveName` fills
-   a save name is the cheap fix; the keyboard is the real one.
+   The host forwards TCP 10500 and UDP 10600. Both ends must be on different
+   private ranges — see the transport section for why, and expect that to be
+   the first thing that bites.
+3. **Player name.** The headset joins as `unnamed_player` unless the player
+   types one, which they now can. Prefilling `utyName` the way
+   `gpSuggestSaveName` fills a save name would still save them the trouble.
 
 ## Known gaps
 

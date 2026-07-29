@@ -86,15 +86,49 @@ cutscenes.
   paths and respect `playPackets/universePause/mrDisabled` guards, so the
   tutorial and multiplayer wrappers behave identically.
 
+## Typing (src/SDL/vrkeys.c)
+
+Menus need text - a player name, a game name, chat, and the address of an
+internet host - and a headset has no keyboard. Both the key grid and the
+address field are drawn by the VR layer into the window framebuffer just
+before that frame is copied to the panel quad, and hit-tested against
+`vr.pointerX/pointerY`, which is already the controller ray mapped into
+logical UI pixels. No new swapchain, pose or hit test: a fourth wrist card
+would have needed all three for the same result.
+
+- **Up exactly while a text entry holds `RSF_KeyCapture`**, found by walking
+  the region tree from `regRootRegion` and matching on
+  `uicTextEntryProcess`. List windows take key focus too, so the process
+  function rather than the status bit is what decides.
+- **Scancodes only.** The engine derives the character itself, through
+  `SDL_GetKeyFromScancode` into the ASCII-indexed `uicKeyEntryTable`
+  (`UIControls.c`). Injecting letters would be fighting it.
+- **Shift is genuinely held.** `keyPressDown` records the shift state into
+  the key buffer at press time (`keyBufferAdd(key, keyIsHit(SHIFTKEY))`), so
+  a shifted glyph pushes `LSHIFT` down, the key, and `LSHIFT` up.
+- **CAPS latches and applies to letters only.** One ray cannot point at
+  shift and a letter at once. A latch that shifted everything would turn the
+  number row into `!"#`, and an address is digits and dots.
+- **It never covers what is being typed into.** The grid sits along the
+  bottom and moves to the top when the focused entry is down there, which is
+  where the lobby keeps its chat.
+- **The address field is the VR layer's own**, drawn in the gap the lobby
+  leaves in its right-hand button column. It takes keys locally rather than
+  pushing them at the engine, and commits through `lanAddRemote`. The screen
+  definitions live in `Homeworld.big`, which belongs to the player, so a
+  field the game does not have cannot be added where its own fields are.
+
 ## Files
 
 - `src/SDL/vrworld.c/.h` (new): ray transforms, picking, selection,
   orders, move plane, camera routers, overlays. Game-coupled; no OpenXR
   types.
+- `src/SDL/vrkeys.c/.h` (new): the on-panel keyboard and the join-by-address
+  field. Game-coupled; no OpenXR types.
 - `src/SDL/vr.c`: L/anchor capture per frame, X state + composition,
   grip pose actions, gesture decomposition, input state machine, wrist
   panel pose, overlay call in the eye pass.
-- `src/SDL/meson.build`: add vrworld.c.
+- `src/SDL/meson.build`: add vrworld.c, vrkeys.c.
 
 ## Verification (on Quest 3 via wireless adb)
 
