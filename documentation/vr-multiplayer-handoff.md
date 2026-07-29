@@ -358,28 +358,59 @@ buffer that no longer went back far enough.
    types one, which they now can. Prefilling `utyName` the way
    `gpSuggestSaveName` fills a save name would still save them the trouble.
 
-## Seen once, not chased
+## The sound mixer races the main thread
 
-A SIGSEGV on the SDL audio thread, 2026-07-29, starting a game shortly after
-backing out of the multiplayer screens:
+Seen once, 2026-07-29, starting a game shortly after backing out of the
+multiplayer screens. Diagnosed but not fixed, because one sighting and no
+reproduction is not enough to tell a fix from a coincidence.
 
 ```
 #04 isoundmixerprocess+732   libmain.so
 #05 soundfeedercb+240        libmain.so
-#06 libSDL2.so               (audio callback)
+#06 libSDL2.so               (audio callback thread)
 ```
 
-`code=2` is SEGV_ACCERR, so it is a bad write rather than a null read. The
-mixer runs on SDL's callback thread while everything else in this engine is
-single threaded, and the crash lands at the point a level load tears the
-sound system down and builds it again - which is the shape of a teardown race
-rather than anything about the level.
+`signal=11 code=2` is SEGV_ACCERR - a mapped page without the permission
+asked for, not a null dereference. Disassembling at that offset (the release
+build has symbols but no line numbers, so `llvm-nm` for the symbol address
+plus `llvm-objdump` at symbol+732) gives `ldrsw x9, [x11, #0x30]` where
+`x11 = base + i*stride`: a **read** of a per-stream field, in the speech loop
+near the top of `isoundmixerprocess`.
 
-Not a regression from the VR or multiplayer work: the native library was
-byte-identical to the one that had just played a saved game through. Recorded
-because it happened once with a backtrace in hand, and a second sighting is
-worth more than a first. Reproducing it probably means going in and out of the
-multiplayer screens a few times before starting a game.
+**The cause is that nothing synchronises the two threads at all.**
+`isoundmixerprocess` runs on SDL's audio callback thread; everything else in
+this engine is single threaded. There is no `SDL_LockAudioDevice` anywhere in
+`smixer.c`, `soundlow.c` or `sstream.c`, which is the thing SDL provides for
+exactly this and documents as required. `bSoundPaused`, `bSoundDeactivated`,
+`mixer` and `streamer` are plain globals - not volatile, not atomic - written
+by one thread and read by the other.
+
+The two teardown paths do not even agree with each other:
+
+- `soundclose()`, which is what `soundEventShutdown` calls, sets
+  `bSoundPaused = TRUE` and returns immediately. The audio thread keeps
+  running for several more buffers, so anything the caller then frees or
+  re-initialises - `pspeechstream` and the speech buffers are `memAlloc`ed in
+  `speechEventStartup` - goes away underneath it.
+- `soundrestore()` does wait, by spinning on
+  `mixer.status == SOUND_FREE`. On a non-volatile global, which the compiler
+  may hoist out of the loop.
+
+So the fix, when someone has a reproduction to test against, is
+`SDL_LockAudioDevice` around the teardown and re-init rather than flags, and
+`volatile` at minimum on anything the existing spin-wait depends on.
+
+Not a regression from the VR or multiplayer work: `smixer.c` is upstream
+engine code, nothing here added a thread, and the native library was
+byte-identical to the one that had just played a saved game through. VR does
+change the timing though - the loading bar drives `rndFlush`, and so a whole
+stereo frame, from inside the level load - so it may well be easier to hit
+here than on the desktop.
+
+To reproduce, go in and out of the multiplayer screens a few times and then
+start a game, with `adb logcat` running. The crash handler unwinds and prints
+the stack itself (`HWCRASH`), so a sighting is worth having even without a
+debugger attached.
 
 ## Known gaps
 
