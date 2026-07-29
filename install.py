@@ -483,17 +483,25 @@ def push_tree(adb, pairs, dest_dir):
 
 
 def migrate_old_data(adb):
-    """Move game data and saves over from the pre-rename package, once.
+    """Bring game data and saves over from the pre-rename package, once.
 
     Android keys the external data directory off the package name, so renaming
     the app orphans everything the player put in the old one - the .big file
-    off their disc, the soundtrack, the speech pack, and every save. Moving it
+    off their disc, the soundtrack, the speech pack, and every save. Doing it
     on the device costs seconds; making them find and copy it again costs most
     of a gigabyte over USB and a fair chance they conclude the build is broken.
 
-    A move, not a copy: leaving a second copy behind wastes the space and
-    leaves the old app playable and diverging. Only ever runs when the new
-    directory has nothing in it, so it cannot overwrite a working install.
+    Copy and re-permission rather than move, which is the part that is not
+    obvious and cost an evening to find. A rename also gives the app a new
+    Linux uid, and Android creates app data mode 0770 owned by the old one. A
+    move preserves that ownership exactly, so the new app is locked out of
+    files it now nominally owns: the game starts, finds its data, and shows an
+    empty load-game list. Copying as shell and opening the result up is the
+    same thing this script already does for pushed game data, and it is what
+    the app can actually read.
+
+    Only ever runs when the new directory has nothing in it, so it cannot
+    overwrite a working install.
     """
     if not dir_exists(adb, OLD_DST):
         return
@@ -503,38 +511,78 @@ def migrate_old_data(adb):
     if (adb.shell("ls %s 2>/dev/null" % DST).stdout or "").split():
         return                                  # new install already has data
 
-    title("Moving your data over")
+    title("Bringing your data over")
     info("This build uses a new package name, and Android keeps game data")
     info("per package. Yours is in the old one:")
     for n in listing:
         info("  %s" % n)
-    if not yes("Move it across?", True):
+    if not yes("Bring it across?", True):
         warn("Left where it is. The new app will start as the demo, and the")
         warn("files are still under %s" % OLD_DST)
         return
 
-    # The app makes and owns the new directory on first run; shell cannot
-    # create one it can traverse into. mv into it once it exists, and if it
-    # does not yet, say so rather than making an unusable folder.
     if not dir_exists(adb, DST):
         adb.shell("mkdir -p %s" % DST)
         adb.shell("chmod 2775 %s" % DATA)
         adb.shell("chmod 2775 %s" % DST)
 
-    cp = adb.shell("mv %s/* %s/ 2>&1" % (OLD_DST, DST))
-    leftover = (adb.shell("ls %s 2>/dev/null" % OLD_DST).stdout or "").split()
-    if leftover:
-        err("Some of it would not move:")
-        for n in leftover:
-            info("  %s" % n)
+    info("Copying (this takes a moment - it is most of a gigabyte)...")
+    cp = adb.shell("cp -r %s/. %s/ 2>&1" % (OLD_DST, DST))
+
+    # Owned by shell now, so these succeed; the point of them is that the app
+    # runs as a different uid and needs the world bits to read any of it. 2775
+    # on directories: the setgid bit carries ext_data_rw down into anything
+    # made inside later, exactly as for a pushed install.
+    adb.shell("find %s -type d -exec chmod 2775 {} + 2>/dev/null" % DST)
+    adb.shell("find %s -type f -exec chmod 664 {} + 2>/dev/null" % DST)
+
+    # Count files, not top-level names. A half-copied tree leaves the names in
+    # place - SavedGames exists, and is empty - so checking for those calls a
+    # hollow copy a success and then deletes the original. Nothing is removed
+    # until as many files arrived as set out.
+    def file_count(path):
+        out = (adb.shell("find %s -type f 2>/dev/null | wc -l" % path).stdout
+               or "").strip()
+        try:
+            return int(out.split()[-1])
+        except (ValueError, IndexError):
+            return -1
+
+    before, after = file_count(OLD_DST), file_count(DST)
+    if before < 0 or after < before:
+        err("Only %s of %s files came across." % (max(after, 0), max(before, 0)))
         info((cp.stdout or "").strip()[:200])
-        warn("Copy those across by hand, from")
+        warn("The old folder has been left alone, so nothing is lost. Copy it")
+        warn("by hand, from")
         warn("  %s" % OLD_DST)
         warn("to")
         warn("  %s" % DST)
         return
+
     adb.shell("rm -rf %s" % OLD_DATA)
-    ok("Moved, and the old folder is gone")
+    ok("Brought across, and the old folder is gone")
+
+    # And the old app with it, if it is still installed. Both carry the same
+    # label and the same version, so the library shows two entries called
+    # "Homeworld: Unbound" with nothing to tell them apart - and the old one
+    # now has no data at all, so picking it gets a game that dies looking for
+    # files this script just moved. Leaving that lying around is worse than
+    # leaving nothing.
+    installed = (adb.shell("pm list packages %s" % OLD_PKG).stdout or "")
+    if OLD_PKG not in installed:
+        return
+    info("")
+    info("The old app is still installed, with no data left in it, and shows")
+    info("in your library under the same name as the new one.")
+    if not yes("Remove the old app?", True):
+        warn("Left installed. It will not start - its data is in the new one.")
+        return
+    cp = adb.run("uninstall", OLD_PKG)
+    if "Success" in (cp.stdout + cp.stderr):
+        ok("Old app removed")
+    else:
+        warn("Could not remove it: %s" % (cp.stderr or cp.stdout).strip()[:120])
+        warn("Remove '%s' from the headset by hand." % OLD_PKG)
 
 
 def install(adb, apk, edition, assets):
