@@ -20,7 +20,7 @@
              engine with neither of those things done. -->
         <activity android:name="org.libsdl.app.SDLActivity" tools:node="remove" />
 
-        <activity android:name="org.gardensofkadesh.homeworld.HomeworldActivity"
+        <activity android:name="org.homeworldunbound.game.HomeworldActivity"
             android:label="@string/app_name"
             android:screenOrientation="landscape"
             android:alwaysRetainTaskState="true"

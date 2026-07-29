@@ -16,10 +16,12 @@
 The VR flavour ships under the name **Homeworld: Unbound** — that is the label
 you will see in the Quest library. The name lives in
 `app/src/vr/res/values/strings.xml`, so the flat Android build keeps the plain
-"Homeworld" label. The package id stays `org.gardensofkadesh.homeworld`
-deliberately: it is also the asset path under
-`/sdcard/Android/data/`, and changing it would orphan an existing install, its
-settings and its assets.
+"Homeworld" label. The package id is `org.homeworldunbound.game`, renamed at
+0.6 from `org.gardensofkadesh.homeworld` — the fork had stopped being a
+Gardens of Kadesh build in anything but ancestry. It is also the asset path
+under `/sdcard/Android/data/`, so the rename orphans an existing install, its
+settings and its assets; `install.py` moves the old directory across on the
+device so nobody has to copy their game data again.
 
 The Android port reuses the OpenGL ES 1.1 renderer (`-Dgles=true`).
 SDL's Java activity (`org.libsdl.app.SDLActivity`) loads the game as
@@ -97,11 +99,11 @@ demo](#running-the-full-game-instead-of-the-demo)).
 For the demo assets:
 
 ```sh
-DST=/sdcard/Android/data/org.gardensofkadesh.homeworld/files
+DST=/sdcard/Android/data/org.homeworldunbound.game/files
 adb shell mkdir -p $DST
 adb push subprojects/demo-assets-1.05/assets/. $DST/
 adb shell chmod 2775 $DST                   # only if you created it, see below
-adb shell am force-stop org.gardensofkadesh.homeworld
+adb shell am force-stop org.homeworldunbound.game
 ```
 
 (For the full game, build with `-Ddemo=false` and push the original
@@ -148,7 +150,7 @@ in the last one, which does not match the shipped `HW_Comp.vce`:
 
 ```sh
 SRC=".../steamapps/common/Homeworld/Homeworld1Classic/Data"
-DST=/sdcard/Android/data/org.gardensofkadesh.homeworld/files
+DST=/sdcard/Android/data/org.homeworldunbound.game/files
 adb push "$SRC/homeworld.big" $DST/Homeworld.big
 adb push "$SRC/HW_Music.wxd"  $DST/HW_Music.wxd
 adb push "$SRC/HW_Comp.vce"   $DST/HW_comp.vce
@@ -377,7 +379,7 @@ sequence itself (`missionSequence` in `SinglePlayer.c`, a compile-time array).
 None of that can be decided at runtime, so the VR flavour ships both builds and
 picks between them before SDL loads either.
 
-`app/src/vr/java/org/gardensofkadesh/homeworld/HomeworldActivity.java`
+`app/src/vr/java/org/homeworldunbound/game/HomeworldActivity.java`
 subclasses `SDLActivity` and, in `onCreate` before `super`:
 
 - looks for `Homeworld.big` in `getExternalFilesDir(null)`. Present means the
@@ -396,6 +398,6 @@ from a meson wrap, so a tree that has never fetched it will fail the VR build
 with a message saying to run `meson subprojects download demo-assets`.
 
 Because the launcher activity changed, the component to `am start` is
-`org.gardensofkadesh.homeworld/.HomeworldActivity`. The vr manifest removes the
+`org.homeworldunbound.game/.HomeworldActivity`. The vr manifest removes the
 `org.libsdl.app.SDLActivity` entry with `tools:node="remove"`, so that one no
 longer exists to start; the flat flavour is unaffected.

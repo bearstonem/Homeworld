@@ -13,9 +13,13 @@ were renamed:
   the multiplayer protocol version string, matched against other clients;
   renaming it would silently make this build unable to play with anything else.
 
-`applicationId` also stays `org.gardensofkadesh.homeworld`: it is the asset path
-under `/sdcard/Android/data/`, so changing it orphans the install, its settings
-and its assets. The meson project name (`homeworld`) is likewise internal.
+`applicationId` is `org.homeworldunbound.game`, renamed from
+`org.gardensofkadesh.homeworld` at 0.6. It is also the asset path under
+`/sdcard/Android/data/`, so a rename orphans an existing install, its settings
+and its assets — `install.py` moves the old directory across on the device
+rather than making anyone copy a gigabyte back over USB. Do not rename it
+again without doing the same. The meson project name (`homeworld`) is
+internal and unaffected.
 
 State as of commit `d3f4f50` on `main` (fork
 `github.com/bearstonem/Homeworld`, upstream `GardensOfKadesh/Homeworld`).
@@ -49,16 +53,16 @@ adb -s 192.168.1.92:44159 install -r \
 Then relaunch — **and wait for the old process to actually die first**:
 
 ```sh
-adb -s 192.168.1.92:44159 shell am force-stop org.gardensofkadesh.homeworld
+adb -s 192.168.1.92:44159 shell am force-stop org.homeworldunbound.game
 # confirm: pidof must come back empty before starting again
-adb -s 192.168.1.92:44159 shell pidof org.gardensofkadesh.homeworld
+adb -s 192.168.1.92:44159 shell pidof org.homeworldunbound.game
 adb -s 192.168.1.92:44159 logcat -c
 adb -s 192.168.1.92:44159 shell am start -n \
-   org.gardensofkadesh.homeworld/.HomeworldActivity
+   org.homeworldunbound.game/.HomeworldActivity
 ```
 
 **The launch component moved.** It was `org.libsdl.app.SDLActivity`; the VR
-flavour now launches `org.gardensofkadesh.homeworld.HomeworldActivity`, which
+flavour now launches `org.homeworldunbound.game.HomeworldActivity`, which
 subclasses it to unpack the demo assets and choose the library before SDL
 loads anything. The vr manifest removes the SDLActivity entry outright, so
 starting the old component fails with "Activity class does not exist".

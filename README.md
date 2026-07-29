@@ -157,7 +157,7 @@ data and copying it across. The same tree still builds the flat 2D Android app
 1.05 demo assets ride inside the VR APK and are unpacked on first run, so it is
 playable as installed. For the full sixteen-mission campaign, put your own
 Homeworld data files in
-`/sdcard/Android/data/org.gardensofkadesh.homeworld/files` — the next launch
+`/sdcard/Android/data/org.homeworldunbound.game/files` — the next launch
 picks the full engine, and clears the demo files that would otherwise shadow
 it. Settings, saves and screenshots are written to the same place.
 

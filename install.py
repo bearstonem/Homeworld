@@ -31,9 +31,17 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
-PKG = "org.gardensofkadesh.homeworld"
+PKG = "org.homeworldunbound.game"
 DATA = "/sdcard/Android/data/%s" % PKG
 DST = "%s/files" % DATA
+# Where 0.1 through 0.6 kept it. The package was renamed after the fork stopped
+# being a Gardens of Kadesh build in anything but ancestry, and Android hangs
+# the external data directory off the package name - so the game data, which is
+# most of a gigabyte and came off a disc, would otherwise have to be copied
+# again by hand. It gets moved instead. See migrate_old_data.
+OLD_PKG = "org.gardensofkadesh.homeworld"
+OLD_DATA = "/sdcard/Android/data/%s" % OLD_PKG
+OLD_DST = "%s/files" % OLD_DATA
 APK = REPO / "android/project/app/build/outputs/apk/vr/debug/app-vr-debug.apk"
 DIST = REPO / "dist"
 PREBUILT = DIST / "homeworld-unbound-vr.apk"
@@ -474,6 +482,61 @@ def push_tree(adb, pairs, dest_dir):
     return True
 
 
+def migrate_old_data(adb):
+    """Move game data and saves over from the pre-rename package, once.
+
+    Android keys the external data directory off the package name, so renaming
+    the app orphans everything the player put in the old one - the .big file
+    off their disc, the soundtrack, the speech pack, and every save. Moving it
+    on the device costs seconds; making them find and copy it again costs most
+    of a gigabyte over USB and a fair chance they conclude the build is broken.
+
+    A move, not a copy: leaving a second copy behind wastes the space and
+    leaves the old app playable and diverging. Only ever runs when the new
+    directory has nothing in it, so it cannot overwrite a working install.
+    """
+    if not dir_exists(adb, OLD_DST):
+        return
+    listing = (adb.shell("ls %s 2>/dev/null" % OLD_DST).stdout or "").split()
+    if not listing:
+        return
+    if (adb.shell("ls %s 2>/dev/null" % DST).stdout or "").split():
+        return                                  # new install already has data
+
+    title("Moving your data over")
+    info("This build uses a new package name, and Android keeps game data")
+    info("per package. Yours is in the old one:")
+    for n in listing:
+        info("  %s" % n)
+    if not yes("Move it across?", True):
+        warn("Left where it is. The new app will start as the demo, and the")
+        warn("files are still under %s" % OLD_DST)
+        return
+
+    # The app makes and owns the new directory on first run; shell cannot
+    # create one it can traverse into. mv into it once it exists, and if it
+    # does not yet, say so rather than making an unusable folder.
+    if not dir_exists(adb, DST):
+        adb.shell("mkdir -p %s" % DST)
+        adb.shell("chmod 2775 %s" % DATA)
+        adb.shell("chmod 2775 %s" % DST)
+
+    cp = adb.shell("mv %s/* %s/ 2>&1" % (OLD_DST, DST))
+    leftover = (adb.shell("ls %s 2>/dev/null" % OLD_DST).stdout or "").split()
+    if leftover:
+        err("Some of it would not move:")
+        for n in leftover:
+            info("  %s" % n)
+        info((cp.stdout or "").strip()[:200])
+        warn("Copy those across by hand, from")
+        warn("  %s" % OLD_DST)
+        warn("to")
+        warn("  %s" % DST)
+        return
+    adb.shell("rm -rf %s" % OLD_DATA)
+    ok("Moved, and the old folder is gone")
+
+
 def install(adb, apk, edition, assets):
     title("Installing")
     info("Installing the app...")
@@ -482,6 +545,9 @@ def install(adb, apk, edition, assets):
         err((cp.stderr or cp.stdout).strip())
         return False
     ok("App installed")
+
+    # Before anything looks at the new data directory to decide what is there.
+    migrate_old_data(adb)
 
     # The app makes its own data folder on first run and owns it. Install and
     # copy without ever starting the game and the folder is simply not there

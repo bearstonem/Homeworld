@@ -201,7 +201,7 @@ and the paths used during the session pointed into a temporary directory, so
 recreate them:
 
 ```sh
-D=/sdcard/Android/data/org.gardensofkadesh.homeworld/files
+D=/sdcard/Android/data/org.homeworldunbound.game/files
 adb -s <headset> pull $D/homeworld.big  build/Homeworld.big
 adb -s <headset> pull $D/HW_Music.wxd   build/HW_Music.wxd
 adb -s <headset> pull $D/HW_Comp.vce    build/HW_comp.vce

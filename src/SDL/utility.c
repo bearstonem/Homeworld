@@ -3572,6 +3572,32 @@ char* utyGameSystemsPreInit(void)
 
             fileHomeworldDataPathSet(dataPath);
         }
+        else
+        {
+            /* A path in the config was written by some previous run, and it
+               can be wrong now: it is absolute, and on Android it names the
+               package's own external directory, which moves the moment the
+               package is renamed. Believing a dead one is how the game came
+               to report Homeworld.big missing while sitting in the directory
+               that contains it - a fatal error naming a path the player has
+               never typed and cannot correct from inside the game.
+
+               The working directory is set by the platform layer to wherever
+               the game actually is, so it is the better answer whenever the
+               remembered one has gone. Rewritten on the next options save, so
+               this self-corrects once rather than every launch. */
+            struct stat pathStat;
+
+            if (stat(fileHomeworldDataPath, &pathStat) != 0
+                || !S_ISDIR(pathStat.st_mode))
+            {
+                getcwd(filePathTempBuffer, PATH_MAX);
+                dbgMessagef("HomeworldDataPath '%s' is not a directory any "
+                            "more; using '%s' instead",
+                            fileHomeworldDataPath, filePathTempBuffer);
+                fileHomeworldDataPathSet(filePathTempBuffer);
+            }
+        }
     }
     else
     {

@@ -1,4 +1,4 @@
-package org.gardensofkadesh.homeworld;
+package org.homeworldunbound.game;
 
 import android.content.Context;
 import android.content.res.AssetFileDescriptor;
