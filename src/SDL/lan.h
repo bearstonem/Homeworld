@@ -71,6 +71,13 @@ void   lanSendDiscovery(const void* data, uword length);
     until that client speaks, so any address we receive discovery from and do
     not already have is added. That is what lets a configured client reach a
     host which has configured nothing.
+
+    Everyone publishes the address their own machine has, so behind a router
+    both ends name each other by addresses that only mean something on the
+    other's LAN. Every routing decision therefore goes through lanRouteTo (see
+    lan.c), which resolves an unreachable address to the single named remote.
+    That makes internet play a two-player affair for now, and it cannot help
+    when both ends sit on the same private range.
 ----------------------------------------------------------------------------*/
 void   lanAddRemote(udword ip);
 bool32 lanHaveRemotes(void);

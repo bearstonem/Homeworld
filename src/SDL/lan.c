@@ -156,6 +156,37 @@ static LanPeer* lanFindPeer(udword ip)
     return NULL;
 }
 
+/* The address a peer calls itself is not always the address we reach it on.
+   Everyone publishes the address getifaddrs gave them, so a player behind a
+   router publishes a private one: the game's lobby structures, and therefore
+   every call into this file, name the other end by an address that means
+   nothing out here. The link itself is keyed by the address the socket really
+   uses - the one we dialled, or the one accept() reported.
+
+   With exactly one remote named, that remote is necessarily the other end of
+   the internet link, so an address we cannot otherwise reach resolves to it.
+   That is the same rule lanConnect already used to dial; without it here, the
+   connection came up and then every message on it was dropped for want of a
+   peer, which is what made internet play fail after appearing to work.
+
+   Ambiguous with several remotes named, so it is not attempted then: over the
+   internet this transport is a two-player one until the protocol carries the
+   sender's identity. Deliberately not guessed - see the note in lanConnect.
+
+   It cannot help when both ends sit on the same private range (two 192.168.1.x
+   networks, which is the common case for home routers): the peer's address
+   then looks local, is left alone, and reaches somebody else's machine or
+   nothing at all. Fixing that needs the peers to exchange who they are rather
+   than inferring it from addresses. */
+static udword lanRouteTo(udword ip)
+{
+    if (lanFindPeer(ip) == NULL && !lanAddressIsLocal(ip) && lanRemoteCount == 1)
+    {
+        return lanRemotes[0];
+    }
+    return ip;
+}
+
 static void lanDropPeerAt(sdword index, char const* why)
 {
     LanPeer* peer = &lanPeers[index];
@@ -214,7 +245,7 @@ static LanPeer* lanAddPeer(SOCKET sock, udword ip, bool32 connecting)
 
 bool32 lanPeerConnected(udword ip)
 {
-    LanPeer* peer = lanFindPeer(ip);
+    LanPeer* peer = lanFindPeer(lanRouteTo(ip));
 
     return peer != NULL && !peer->connecting;
 }
@@ -646,7 +677,7 @@ void lanSendTo(udword ip, ubyte messageType, const void* data, uword length)
     {
         return;
     }
-    peer = lanFindPeer(ip);
+    peer = lanFindPeer(lanRouteTo(ip));
     if (peer == NULL)
     {
         struct in_addr shown;
@@ -687,36 +718,27 @@ bool32 lanConnect(udword ip)
     {
         return FALSE;
     }
+    /* A game hosted behind a router advertises the host's address on its own
+       LAN, which is meaningless from out here: dialling 192.168.x.y would
+       reach nothing, or worse, somebody else's machine on our subnet. See
+       lanRouteTo, which every path that names a peer goes through. */
+    {
+        udword routed = lanRouteTo(ip);
+
+        if (routed != ip)
+        {
+            struct in_addr was, now;
+
+            was.s_addr = ip;
+            now.s_addr = routed;
+            dbgMessagef("lan: %s is not reachable from here, dialling the named "
+                        "remote %s instead", inet_ntoa(was), inet_ntoa(now));
+            ip = routed;
+        }
+    }
     if (lanFindPeer(ip) != NULL)
     {
         return TRUE;                    /* already linked or linking */
-    }
-
-    /* A game hosted behind a router advertises the host's address on its own
-       LAN, which is meaningless from out here: dialling 192.168.x.y would
-       reach nothing, or worse, somebody else's machine on our subnet. When
-       the advertised address is not one we can reach and exactly one remote
-       has been named, that remote is who the advertisement came from, so dial
-       it instead.
-
-       Ambiguous with several remotes named, so it is not attempted then: the
-       address is used as given and the connection simply fails, which is
-       honest. Deciding properly needs the transport to tell the lobby which
-       source an advertisement arrived from, and the lobby has nowhere to put
-       that today. */
-    if (!lanAddressIsLocal(ip) && lanRemoteCount == 1)
-    {
-        struct in_addr was, now;
-
-        was.s_addr = ip;
-        now.s_addr = lanRemotes[0];
-        dbgMessagef("lan: %s is not reachable from here, dialling the named "
-                    "remote %s instead", inet_ntoa(was), inet_ntoa(now));
-        ip = lanRemotes[0];
-        if (lanFindPeer(ip) != NULL)
-        {
-            return TRUE;
-        }
     }
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
