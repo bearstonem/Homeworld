@@ -33,7 +33,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-6b19a23059d002d11c4a763c548af34c  homeworld-unbound-vr.apk  98M
+e5e90705e8cfa24ece79c20d8999418c  homeworld-unbound-vr.apk  118M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -41,22 +41,20 @@ builds, neither of which is stripped.
 
 ## What changed since the last build
 
-- **One APK instead of two**, as above.
-- **B is the attack button.** Hold it and let go to attack what you are
-  pointing at, or pull the trigger during the hold and sweep to collect
-  several targets for a single order. The game's Escape menu moved to a Menu
-  wedge on the command wheel, which is where B used to reach it.
-- **Drawn flight paths are flown as curves.** The route is followed by one
-  destination sliding along it, kept far enough ahead of the fleet to be worth
-  full throttle, and the existing move order is steered rather than re-issued —
-  so there is no pivot, no engine restart and no flash at every waypoint. The
-  path stays drawn while it is flown, dimming behind the fleet.
-- **The hands hide during a mission briefing.** When a mission opens the
-  Sensors Manager to show you something, the beams and controller gizmos go
-  away until it finishes rather than swaying over it.
-- **The command wheel's top-level Sensors is now View**, since Sensors is an
-  entry on the page it opens.
-- **No more two-grip pinch.** It zoomed and orbited the hologram, both of
-  which the left stick, the right stick and the wheel's View page already do
-  with one hand. The grips now mean one thing each: add to selection on the
-  left, step through the fleet on the right.
+- **There is a keyboard.** It appears on the panel whenever anything in the
+  game is waiting for text — a player name, a game name, chat, a password, the
+  name a save is given — and you type on it by pointing and pulling the
+  trigger. It sits along the bottom, moves above the field when that is where
+  the field is, and stays out of the button column down the right so nothing
+  you might want to press disappears behind it.
+- **Multiplayer across the internet.** Both connection buttons now open the
+  same screens, and the lobby has a **Join by address** field on it: type the
+  host's address, press Add Host, and their game appears in the list beside
+  any on your own network. The host forwards TCP 10500 and UDP 10600; nobody
+  else configures anything.
+- **Playing over the internet actually works now.** Peers were naming each
+  other by addresses that only mean something on the other's own network, so a
+  connection would come up and then every message on it was quietly dropped.
+- **Two-player only over the internet**, and both ends have to be on different
+  home network ranges — if you are both on `192.168.1.x`, one of you needs to
+  change your router's range. LAN play is unaffected.
