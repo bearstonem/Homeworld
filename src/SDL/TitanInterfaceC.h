@@ -283,7 +283,10 @@ void titanRemoveGame(wchar_t *str);
 void titanCreateDirectory(char *str, char* desc);
 
 void titanSendLanBroadcast(const void* thePacket, unsigned short theLen);
-void titanReceivedLanBroadcastCB(const void* thePacket, unsigned short theLen);
+/* fromAddress is where the packet really came from, which is not what the
+   advertisement inside it claims when the sender is behind a router. The
+   pair is what lanAddAlias needs to route to that peer later. */
+void titanReceivedLanBroadcastCB(unsigned long fromAddress, const void* thePacket, unsigned short theLen);
 
 void titanSendPacketTo(Address *address, unsigned char titanMsgType,
                        const void* thePacket, unsigned short theLen);

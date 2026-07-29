@@ -82,6 +82,18 @@ void   lanSendDiscovery(const void* data, uword length);
 void   lanAddRemote(udword ip);
 bool32 lanHaveRemotes(void);
 
+/* Record that a peer which calls itself `published` is actually reachable at
+   `reachable`, so routing to it stops being a guess.
+
+   The guess - "with exactly one remote named, an unreachable address must be
+   that one" - is what held internet play to two players: with two remotes
+   there is no way to tell which of them a given private address belongs to.
+   Nothing needs guessing, because every advertisement carries the sender's own
+   idea of its address while the socket reports where it really came from. Only
+   the caller knows how to read the first out of the packet, so it hands both
+   down here. Cheap and idempotent: it is called once a second per peer. */
+void   lanAddAlias(udword published, udword reachable);
+
 /* Whether an address is one we could plausibly reach directly: on a local
    subnet, or a remote we already know. A game advertised from behind NAT
    carries its host's private address, which is meaningless to us. */

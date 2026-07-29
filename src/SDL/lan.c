@@ -123,6 +123,25 @@ static sdword   lanRemoteCount = 0;
    one we could actually dial. */
 static udword   lanMyNetmask = 0;
 
+/* What a peer calls itself, against where it can actually be reached.
+   Everybody publishes the address their own machine has, so behind a router
+   the lobby names peers by addresses that mean nothing here - and guessing
+   which one is which only works when there is exactly one candidate, which is
+   what limited internet play to two players.
+
+   No guessing is needed, because every discovery packet carries both halves:
+   the advertisement says who the sender is, and recvfrom says where it came
+   from. The lobby knows that packet's shape and hands the pair down through
+   lanAddAlias, once a second, for every peer that can reach us. */
+#define LAN_MAX_ALIASES 16
+typedef struct
+{
+    udword published;                   /* what the peer calls itself */
+    udword reachable;                   /* where its packets really come from */
+} LanAlias;
+static LanAlias lanAliases[LAN_MAX_ALIASES];
+static sdword   lanAliasCount = 0;
+
 /*=============================================================================
     Socket helpers
 =============================================================================*/
@@ -194,8 +213,28 @@ static LanPeer* lanFindPeer(udword ip)
    than inferring it from addresses. */
 static udword lanRouteTo(udword ip)
 {
-    if (lanFindPeer(ip) == NULL && !lanAddressIsLocal(ip) && lanRemoteCount == 1)
+    sdword i;
+
+    if (lanFindPeer(ip) != NULL)
     {
+        return ip;                      /* reachable under the name given */
+    }
+    /* Told, rather than guessed. Works with any number of peers, which the
+       fallback below cannot: with two remotes named there is no way to know
+       which of them an unreachable address belongs to. */
+    for (i = 0; i < lanAliasCount; i++)
+    {
+        if (lanAliases[i].published == ip)
+        {
+            return lanAliases[i].reachable;
+        }
+    }
+    if (!lanAddressIsLocal(ip) && lanRemoteCount == 1)
+    {
+        /* Nothing has been heard from this peer yet, but with exactly one
+           remote named there is only one thing it could be. Keeps a two
+           player game working during the gap before the first advertisement
+           arrives. */
         return lanRemotes[0].ip;
     }
     return ip;
@@ -316,6 +355,53 @@ static void lanAddRemoteAt(udword ip, uword port)
 void lanAddRemote(udword ip)
 {
     lanAddRemoteAt(ip, 0);
+}
+
+void lanAddAlias(udword published, udword reachable)
+{
+    struct in_addr shownPub, shownReach;
+    sdword i;
+
+    if (published == 0 || reachable == 0 || published == reachable
+        || published == lanMyAddress)
+    {
+        return;                         /* nothing to learn */
+    }
+    for (i = 0; i < lanAliasCount; i++)
+    {
+        if (lanAliases[i].published == published)
+        {
+            /* A peer that moved: a NAT rebound, a reconnection from a new
+               port, or the same player on a different network. Follow it,
+               since the old one is no longer where they are. */
+            if (lanAliases[i].reachable != reachable)
+            {
+                shownPub.s_addr = published;
+                dbgMessagef("lan: %s has moved", inet_ntoa(shownPub));
+                lanAliases[i].reachable = reachable;
+            }
+            return;
+        }
+    }
+    if (lanAliasCount >= LAN_MAX_ALIASES)
+    {
+        return;
+    }
+    lanAliases[lanAliasCount].published = published;
+    lanAliases[lanAliasCount].reachable = reachable;
+    lanAliasCount++;
+
+    shownPub.s_addr = published;
+    shownReach.s_addr = reachable;
+    /* inet_ntoa returns a static buffer, so the first has to be copied out
+       before the second call overwrites it. */
+    {
+        char pub[24];
+
+        strncpy(pub, inet_ntoa(shownPub), sizeof(pub) - 1);
+        pub[sizeof(pub) - 1] = '\0';
+        dbgMessagef("lan: %s is reachable at %s", pub, inet_ntoa(shownReach));
+    }
 }
 
 bool32 lanHaveRemotes(void)
@@ -661,7 +747,12 @@ static void lanServiceDiscovery(void)
            to see its own advertisement (titanSendLanBroadcast used to call
            the callback directly), so this is passed up rather than filtered:
            dropping it would remove the host's own game from its list. */
-        titanReceivedLanBroadcastCB(packet, (unsigned short)got);
+        /* The source address goes up with it: the advertisement says who the
+           sender calls itself and this says where it actually came from, and
+           only the lobby knows how to read the first out of the packet. That
+           pair is what lanAddAlias needs. */
+        titanReceivedLanBroadcastCB(from.sin_addr.s_addr, packet,
+                                    (unsigned short)got);
     }
 }
 

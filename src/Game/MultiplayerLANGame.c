@@ -7,6 +7,7 @@
 =============================================================================*/
 
 #include "MultiplayerLANGame.h"
+#include "lan.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2902,7 +2903,8 @@ void lgShutdown(void)
     Callbacks from the chatting system.:
 =============================================================================*/
 
-void titanReceivedLanBroadcastCB(const void* thePacket, unsigned short theLen)
+void titanReceivedLanBroadcastCB(unsigned long fromAddress, const void* thePacket,
+                                 unsigned short theLen)
 {
     if (gameIsRunning || startingGame)
     {
@@ -2910,6 +2912,18 @@ void titanReceivedLanBroadcastCB(const void* thePacket, unsigned short theLen)
     }
 
 #define lanAdvert ((LANAdvert *)thePacket)
+
+    /* Every advertisement says who its sender thinks it is, and the transport
+       says where it actually arrived from. Behind a router those differ, and
+       the pair is the only thing that lets the transport route to that peer
+       later without guessing - which is what held internet games to two
+       players. Learned here because this is the layer that knows the packet's
+       shape; harmless on a LAN, where the two are the same address and the
+       call does nothing. */
+    if (theLen >= sizeof(LANAdvertHeader))
+    {
+        lanAddAlias(lanAdvert->header.from.AddrPart.IP, (udword)fromAddress);
+    }
 
     LockQueue(&lgThreadTransfer);
 
