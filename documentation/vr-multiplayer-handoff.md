@@ -20,16 +20,29 @@ chat, a save game's name, all of them. It carries the join-by-address field
 too, since no such field exists in the game's own screens. See
 [Typing in VR](#typing-in-vr).
 
-**Internet play could not have worked as written, and now can.** Every peer
-publishes the address its own machine has, so behind a router both ends name
-each other by addresses that only mean something on the other's LAN.
-`lanConnect` already substituted the named remote when it dialled; nothing
-else did, so the link came up and then every message on it was dropped by
-`lanSendTo` for want of a peer at that address. `lanRouteTo` now applies that
-rule at every point that names a peer. Verified with the standalone harness
-(below), which fails on the old code and passes on the new. **Still never
-tested against a genuinely remote endpoint** — both machines here are on one
-subnet, so nothing has yet crossed a router.
+**Internet play works, across a real WAN.** Verified 2026-07-28: a Quest 3 on
+mobile data, behind carrier-grade NAT, joining a Linux desktop behind a home
+router with TCP 10500 and UDP 10600 forwarded to it. Both reached
+`Cap:I Am 0`/`Cap:I Am 1 in 2-player game` and `Cap:Transition to state
+normal`. Three separate bugs stood in the way and all three are fixed:
+
+1. **Nothing could be typed**, so there was no way to name a host from inside
+   a headset at all. See [Typing in VR](#typing-in-vr).
+2. **Peers were addressed by names the other end had never heard of.** Every
+   machine publishes the address it has locally, so behind a router both ends
+   name each other by addresses that only mean something on the other's LAN.
+   `lanConnect` already substituted the named remote when it dialled; nothing
+   else did, so the link came up and every message on it was dropped by
+   `lanSendTo` for want of a peer at that address. `lanRouteTo` now applies
+   that rule everywhere a peer is named.
+3. **Replies went to the wrong port**, and **the captain filed a joining
+   player under the wrong address.** Both below, because both are the sort of
+   thing that only shows up on a real connection.
+
+Everything short of a WAN passed while all three were broken, which is the
+point worth taking from it: a LAN is not a weak version of the internet, it is
+a different case, and the two addresses a LAN keeps equal are exactly the ones
+that break apart.
 
 **No sync error has been seen**, but nor has a game been played out. A match
 that has just loaded has not had the opportunity to desync. `SYNC_CHECK` is 1
@@ -149,6 +162,23 @@ did not compile, assumed a topology the game does not use).
   properly needs the peers to exchange who they are on connect rather than
   inferring it from addresses; there is no room in the frame header for it
   today and the lobby has nowhere to put it.
+- **A reply goes to the port the packet came from, not to `LAN_UDP_PORT`.** A
+  peer on mobile data is behind carrier-grade NAT, where thousands of
+  subscribers share one address and the source port therefore *cannot* be
+  preserved. Discovery used to keep only the address and answer on 10600; the
+  advertisement crossed the internet, was answered into a void, and no game
+  ever appeared. Remotes now carry the port they were heard on and follow it
+  when the carrier reassigns it. An address a player typed keeps 10600, since
+  that is what the host forwards, and is corrected the moment they answer.
+- **A peer is identified by the address it calls itself, not by the one our
+  socket reports.** The captain used to file a joining player under the
+  socket address — identical on a LAN, different behind NAT — so every player
+  got a lobby naming the joiner by an address the joiner had never heard of,
+  and `mgGameStartReceivedCB` called `dbgFatal` when it could not find itself
+  in the list. `PlayerJoinInfo` now carries the joiner's own address. Note
+  the two questions this separates: *who a peer is* is what it publishes,
+  *how to reach it* is what `lanRouteTo` works out. Conflating them is what
+  every one of these bugs had in common.
 
 There is a standalone harness for it. It covers startup, address discovery,
 accept, the routing rule above (both as a unit and end to end against a plain
@@ -287,17 +317,44 @@ either the panel or the field moves.
 desktop and any automated test join without a headset. The field seeds itself
 from it and writes back to it, so an address typed once survives the session.
 
+## Running a WAN test
+
+The host forwards **TCP 10500** and **UDP 10600** to its machine, and opens
+them locally if a firewall is running (`ufw allow 10500/tcp`,
+`ufw allow 10600/udp` — ufw being active was worth half an hour on its own).
+Nobody else configures anything: the joiner types the host's public address
+and the host learns the joiner from the first packet it sends.
+
+The two machines must be on genuinely different networks. Two boxes on one
+subnet do not test this even with forwarding in place, because the address
+each publishes is directly reachable and none of the substitution engages —
+and most routers do not hairpin, so aiming at the public address from inside
+fails for reasons that have nothing to do with the game. A phone hotspot is
+the cheapest second network.
+
+**Plug the headset in by USB before moving it off Wi-Fi.** Wireless adb dies
+with the network, the log buffer rolls in a couple of minutes, and the first
+crash of the session was lost that way — reconnecting afterwards found a
+buffer that no longer went back far enough.
+
 ## What to do next
 
-1. **Play a match to completion** and watch for a sync error. This is the
-   last real unknown before LAN play is usable, and it is M5 in the plan:
-   VR-issued orders, and particularly a drawn flight path, are the one
-   feature that touches the command layer unusually.
-2. **Test internet play across a real WAN.** Nothing has crossed a router.
-   The host forwards TCP 10500 and UDP 10600. Both ends must be on different
-   private ranges — see the transport section for why, and expect that to be
-   the first thing that bites.
-3. **Player name.** The headset joins as `unnamed_player` unless the player
+1. **Play a match to completion** and watch for a sync error. This is now the
+   last real unknown, and it is M5 in the plan: VR-issued orders, and
+   particularly a drawn flight path, are the one feature that touches the
+   command layer unusually.
+2. **Two players over the internet is the limit**, and both ends must be on
+   different private ranges. Lifting either needs peers to exchange identity
+   on connect. `PlayerJoinInfo` now carries an address, so the precedent for
+   putting identity in the payload rather than inferring it exists — the
+   in-game path would need the same treatment.
+3. **The address field writes `MultiplayerHost` back to the config**, so a
+   machine that has ever typed an address seeds a remote on every launch
+   after. That arms `lanRouteTo`'s single-remote substitution in games that
+   have nothing to do with the internet. Harmless as it stands, since a LAN
+   peer's address is local and is left alone, but it makes behaviour depend
+   on what was typed months ago and is worth scoping to the session.
+4. **Player name.** The headset joins as `unnamed_player` unless the player
    types one, which they now can. Prefilling `utyName` the way
    `gpSuggestSaveName` fills a save name would still save them the trouble.
 
