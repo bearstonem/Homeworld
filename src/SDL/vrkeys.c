@@ -70,6 +70,14 @@ extern udword uicTextEntryProcess(regionhandle reg, smemsize ID, udword event, u
 #define VRK_SCREEN_W        640
 #define VRK_SCREEN_H        480
 
+/* Every multiplayer screen keeps its buttons in a column starting at x=507:
+   CREATE GAME and JOIN GAME on the lobby, START GAME and LEAVE GAME in a
+   waiting room, and the address field, which was put in that column's spare
+   room deliberately. The grid stays out of it, so none of them disappears
+   behind the keys just because a chat box has focus. */
+#define VRK_CONTENT_X0      8
+#define VRK_CONTENT_X1      500
+
 /* The gap in the lobby's right-hand button column, between JOIN GAME (ends at
    y=192) and CHANGE COLORS (starts at y=377). Nothing of the game's is drawn
    here, so the address field costs the player none of the screen they had.
@@ -257,13 +265,9 @@ static void vrKeysLayout(regionhandle focused)
 {
     sdword const originX = feResRepositionCentredX(0);
     sdword const originY = feResRepositionCentredY(0);
-    sdword width = MAIN_WindowWidth * 2 / 3;
+    sdword width = VRK_CONTENT_X1 - VRK_CONTENT_X0;
     sdword unit, keyHeight, boardHeight, x0, y0, row;
     sdword keepClearFrom = 0, keepClearTo = 0;
-
-    if (width > 720) width = 720;
-    if (width < 420) width = 420;
-    if (width > MAIN_WindowWidth - 16) width = MAIN_WindowWidth - 16;
 
     /* Even, so the half-unit keys land on whole pixels and the rows stay
        flush with each other. Capped by height as well as width: the keyboard
@@ -284,7 +288,8 @@ static void vrKeysLayout(regionhandle focused)
     keyHeight = unit * VRK_KEY_NUM / VRK_KEY_DEN;
     boardHeight = keyHeight * VRK_ROWS;
 
-    x0 = originX + (VRK_SCREEN_W - width) / 2;
+    x0 = originX + VRK_CONTENT_X0
+       + (VRK_CONTENT_X1 - VRK_CONTENT_X0 - width) / 2;
     y0 = MAIN_WindowHeight - boardHeight - VRK_GAP;
 
     /* Never over whatever is being typed into. On the lobby the game's chat
@@ -294,15 +299,15 @@ static void vrKeysLayout(regionhandle focused)
        the one thing a player is in the lobby to read. Only the two rows the
        keyboard actually needs get covered, and it reads as belonging to the
        field it is attached to. */
-    if (focused != NULL)
-    {
-        keepClearFrom = focused->rect.y0;
-        keepClearTo = focused->rect.y1;
-    }
-    else if (vrk.addressFocus)
+    if (vrk.addressFocus)
     {
         keepClearFrom = originY + VRK_ADDR_Y0;
         keepClearTo = originY + VRK_ADDR_Y1;
+    }
+    else if (focused != NULL)
+    {
+        keepClearFrom = focused->rect.y0;
+        keepClearTo = focused->rect.y1;
     }
     if (keepClearTo > y0 - VRK_GAP)
     {
@@ -581,12 +586,13 @@ void vrKeysUpdate(bool32 pointerValid, sdword x, sdword y)
         vrk.address[VRK_ADDRESS_MAX] = '\0';
         vrk.addressLen = (sdword)strlen(vrk.address);
     }
-    /* The game taking key focus wins: the player just tapped one of its own
-       fields, and the keys have to follow the caret they can see. */
-    if (focused != NULL)
-    {
-        vrk.addressFocus = FALSE;
-    }
+    /* Our own field wins while it has focus, and the game's entry does not
+       take it back by itself. The lobby's chat box is created with
+       UICTE_NoLossOfFocus (lgChatTextEntry) and so holds key capture the
+       whole time that screen is up: deferring to whatever the region tree
+       says has focus meant the address field lost it again on the very next
+       frame, every frame, and could never be typed into at all. A press
+       somewhere else on the panel is what gives it up - see vrKeysPress. */
     vrk.boardUp = (focused != NULL) || vrk.addressFocus;
 
     if (!vrk.boardUp && !vrk.addressUp)
@@ -650,6 +656,12 @@ bool32 vrKeysPress(sdword x, sdword y)
     switch (hit)
     {
         case VRK_HIT_NONE:
+            /* Clicked past the overlay: whatever that was - one of the game's
+               own fields, a button, empty space - the address field is no
+               longer what is being typed into. This is the only thing that
+               gives it up, short of leaving the screen, because the game's
+               entry never asks for it back. */
+            vrk.addressFocus = FALSE;
             return FALSE;
         case VRK_HIT_FIELD:
             vrk.addressFocus = TRUE;
