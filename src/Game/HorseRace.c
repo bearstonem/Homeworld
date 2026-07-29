@@ -465,6 +465,11 @@ void hrChooseSinglePlayerBitmap(char* pFilenameBuffer)
     hrSinglePlayerPos.y1 = y + height;
 }
 
+/* Shipped with the port and unpacked beside the game data. Loaded through
+   stb_image like any screenshot, so the format only has to be something it
+   decodes. */
+#define HR_FallbackBitmap "loading.jpg"
+
 void hrChooseRandomBitmap(char *pFilenameBuffer)
 {
 #ifdef _WIN32
@@ -648,6 +653,23 @@ void hrChooseRandomBitmap(char *pFilenameBuffer)
 
     /*SetCurrentDirectory(CurDir);*/
     chdir(CurDir);
+
+    /* Neither source had anything to offer, which is the normal case rather
+       than an edge one: the retail and Remastered .big files carry no
+       ScreenShots/ShotList.script, and a player who has never taken a
+       screenshot has no user images either. Fall back to the port's own
+       image so a multiplayer game loads behind something.
+
+       Tested after the chdir above, or the lookup would resolve against the
+       screenshots directory this function borrows. */
+    if (pFilenameBuffer[0] == 0)
+    {
+        strcpy(pFilenameBuffer, HR_FallbackBitmap);
+        if (!fileExists(pFilenameBuffer, 0))
+        {
+            pFilenameBuffer[0] = 0;
+        }
+    }
 }
 
 typedef struct
@@ -756,7 +778,18 @@ void hrInitBackground(void)
 
     dbgAssertOrIgnore(strcasecmp(CurDir,NewDir) == 0);
 
-    if (fileExists(hrImageName, 0))
+    /* Both choosers leave the buffer empty when they find nothing, and an
+       empty name is not harmless: filePathPrepend turns it into the data
+       directory itself, fopen succeeds on a directory, so fileExists says yes
+       and fileSizeGet then reports -1. memAlloc(-1) is fatal, which is how
+       starting a multiplayer game killed the process.
+
+       Reachable because the Remastered and retail .big files carry no
+       ScreenShots/ShotList.script, and a fresh install has no user
+       screenshots either, so hrChooseRandomBitmap has nothing to offer. Only
+       multiplayer takes that path; the campaign uses
+       hrChooseSinglePlayerBitmap, which is why this has never been seen. */
+    if (hrImageName[0] != 0 && fileExists(hrImageName, 0))
     {
         uint32_t fileSize = fileLoadAlloc(hrImageName, (void**)&fileData, 0);
 

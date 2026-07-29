@@ -47,6 +47,14 @@ public class HomeworldActivity extends SDLActivity {
         { "Update.big",      "Update.big"      },
     };
 
+    /**
+     * Shipped by the port rather than by Relic, and wanted whichever campaign
+     * is being played, so it is unpacked on every run instead of only when
+     * the demo assets are. The multiplayer loading screen falls back to it
+     * because no .big carries ScreenShots/ShotList.script.
+     */
+    private static final String LOADING_IMAGE = "loading.jpg";
+
     /** What the full build opens, and so what "the player brought their own" means. */
     private static final String FULL_BIG = "Homeworld.big";
 
@@ -128,6 +136,8 @@ public class HomeworldActivity extends SDLActivity {
             return;
         }
         File big = findIgnoringCase(files, FULL_BIG);
+
+        unpackAsset(files, LOADING_IMAGE);
 
         fullGame = (big != null);
         if (fullGame) {
@@ -253,6 +263,32 @@ public class HomeworldActivity extends SDLActivity {
             }
             Log.i(TAG, "unpacked " + asset[1] + " (" + target.length() + " bytes in "
                        + (System.currentTimeMillis() - started) + " ms)");
+        }
+    }
+
+    /** Copy one bundled asset out if it is not already there and complete. */
+    private void unpackAsset(File files, String name) {
+        File target = new File(files, name);
+        long bundled = bundledLength(name);
+
+        if (bundled < 0 || (target.isFile() && target.length() == bundled)) {
+            return;
+        }
+        if (!files.isDirectory() && !files.mkdirs()) {
+            return;
+        }
+        try (InputStream in = getAssets().open(name);
+             OutputStream out = new FileOutputStream(target)) {
+            byte[] buffer = new byte[1 << 16];
+            int read;
+
+            while ((read = in.read(buffer)) > 0) {
+                out.write(buffer, 0, read);
+            }
+            Log.i(TAG, "unpacked " + name + " (" + target.length() + " bytes)");
+        } catch (IOException e) {
+            Log.e(TAG, "unpacking " + name + " failed", e);
+            target.delete();
         }
     }
 

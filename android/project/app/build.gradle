@@ -40,6 +40,10 @@ android {
         // the repository, which would be 65 MB of duplicated binaries in git.
         vr {
             assets.srcDirs += ['../../../subprojects/demo-assets-1.05/assets']
+            // The multiplayer loading screen. The game data carries no
+            // ScreenShots/ShotList.script, so without this the background
+            // would simply be absent.
+            assets.srcDirs += ['../../../dist/assets']
         }
     }
     androidResources {
