@@ -30,6 +30,7 @@
 
 #include "FEFlow.h"
 #include "FontReg.h"
+#include "HorseRace.h"
 #include "font.h"
 #include "Key.h"
 #include "lan.h"
@@ -565,10 +566,37 @@ static void vrKeysFire(sdword index)
 /*-----------------------------------------------------------------------------
     Frame
 ----------------------------------------------------------------------------*/
+/* The loading bar is up, so a level is being loaded - and the bar calls
+   rndFlush every time it advances, which drives vrFrame, which drives this.
+   Those frames run from inside the load, while the front end is being torn
+   down and trRegistryRefresh is rebuilding every texture and font. Walking
+   the region tree or making a font current on one of them reads things that
+   are being freed underneath. vrRenderEyes already refuses those frames for
+   exactly this reason; the keyboard has to as well.
+
+   It costs the chat box on the multiplayer loading screen, which is the one
+   text entry that lives during a load. Not typing for a few seconds is a
+   better outcome than a crash on the way into every game. */
+static bool32 vrKeysSuspended(void)
+{
+    return hrRunning;
+}
+
 void vrKeysUpdate(bool32 pointerValid, sdword x, sdword y)
 {
-    regionhandle focused = vrKeysFocusedEntry(&regRootRegion);
+    regionhandle focused;
     bool32 wasUp = vrk.boardUp;
+
+    if (vrKeysSuspended())
+    {
+        vrk.boardUp = FALSE;
+        vrk.addressUp = FALSE;
+        vrk.addressFocus = FALSE;
+        vrk.hover = VRK_HIT_NONE;
+        vrk.held = -1;
+        return;
+    }
+    focused = vrKeysFocusedEntry(&regRootRegion);
 
     vrk.addressUp = vrKeysOnLobbyScreen();
     if (!vrk.addressUp)
@@ -830,7 +858,8 @@ void vrKeysDraw(void)
     bool32 const wasPrimMode = primModeEnabled;
     fonthandle previousFont;
 
-    if (!vrKeysActive() || MAIN_WindowWidth <= 0 || MAIN_WindowHeight <= 0)
+    if (!vrKeysActive() || vrKeysSuspended()
+        || MAIN_WindowWidth <= 0 || MAIN_WindowHeight <= 0)
     {
         return;
     }
