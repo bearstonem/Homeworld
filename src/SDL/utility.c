@@ -219,6 +219,12 @@ filehandle utyLockFilehandle; // handle of autorun lock file
 
 // global string for the player name
 char utyName[MAX_PERSONAL_NAME_LEN]     = "";
+
+/* Dotted quad of a host to reach across the internet, where broadcast cannot
+   go. Empty for LAN play, which needs no such thing. Set from the config file
+   because there is no keyboard in VR; see documentation/vr-multiplayer-plan.md
+   on why typing is the part of multiplayer the headset makes hard. */
+char utyMultiplayerHost[64]             = "";
 char utyPassword[MAX_PERSONAL_NAME_LEN] = "";
 
 char levelfile[80];
@@ -761,6 +767,7 @@ scriptEntry utyOptionsList[] =
 
    // multiplayer
     {"PlayerName",                     scriptSetStringCB, &utyName},
+    {"MultiplayerHost",                scriptSetStringCB, &utyMultiplayerHost},
     {"PlayerPassword",                 scriptSetStringCB, &utyPassword},
     {"MultiPlayerLastMapID",           scriptSetUdwordCB, &spCurrentSelected},
     {"MultiPlayerGameFlags",           scriptSetUwordCB,  &tpGameCreated.flag},

@@ -60,6 +60,27 @@ udword lanLocalAddress(void);
 void   lanSendDiscovery(const void* data, uword length);
 
 /*-----------------------------------------------------------------------------
+    Remote peers, for play across the internet
+
+    Broadcast does not leave the subnet, so a remote peer has to be named. Once
+    named, it is sent the same advertisements a LAN peer would have picked up
+    off the broadcast, and it answers with its own. Nothing about the protocol
+    changes; only the set of addresses the packets go to.
+
+    Learning is symmetric on purpose. A host cannot know a remote client exists
+    until that client speaks, so any address we receive discovery from and do
+    not already have is added. That is what lets a configured client reach a
+    host which has configured nothing.
+----------------------------------------------------------------------------*/
+void   lanAddRemote(udword ip);
+bool32 lanHaveRemotes(void);
+
+/* Whether an address is one we could plausibly reach directly: on a local
+   subnet, or a remote we already know. A game advertised from behind NAT
+   carries its host's private address, which is meaningless to us. */
+bool32 lanAddressIsLocal(udword ip);
+
+/*-----------------------------------------------------------------------------
     Connections and messages
 
     lanSendTo() addresses a peer by IP whether or not a direct link exists.

@@ -7,6 +7,11 @@
  *==========================================================================*/
 #include "TitanInterfaceC.h"
 #include "lan.h"
+#include "utility.h"
+
+#ifndef _WIN32
+    #include <arpa/inet.h>
+#endif
 
 #include "Debug.h"
 
@@ -56,6 +61,26 @@ unsigned long titanStart(unsigned long isLan, unsigned long isIP)
 
 	myAddress.AddrPart.IP = lanLocalAddress();
 	myAddress.Port = LAN_TCP_PORT;
+
+	/* Internet play, such as it is: name the host and its advertisements
+	   reach us and ours reach it, over exactly the same protocol a LAN uses.
+	   The host needs LAN_TCP_PORT and LAN_UDP_PORT forwarded to it; nobody
+	   else needs to configure anything, because the host learns our address
+	   from the first packet we send. */
+	if (utyMultiplayerHost[0] != 0)
+	{
+		udword remote = inet_addr(utyMultiplayerHost);
+
+		if (remote == INADDR_NONE)
+		{
+			dbgMessagef("titanStart: MultiplayerHost '%s' is not a dotted quad, ignoring",
+			            utyMultiplayerHost);
+		}
+		else
+		{
+			lanAddRemote(remote);
+		}
+	}
 
 	/* Task.c gates titanPumpEngine on this, and nothing else ever set it, so
 	   without this line the transport is never serviced. */

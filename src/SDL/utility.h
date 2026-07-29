@@ -121,6 +121,8 @@ startupbit;
 //flag stating system has started properly
 extern sdword utySystemStarted;
 extern regionhandle ghMainRegion;
+
+extern char utyMultiplayerHost[64];
 extern sdword enableTextures;
 extern sdword enableSmoothing;
 extern sdword enableStipple;

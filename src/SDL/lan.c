@@ -98,6 +98,17 @@ static udword   lanMyAddress = 0;
 static LanPeer  lanPeers[LAN_MAX_PEERS];
 static sdword   lanPeerCount = 0;
 
+/* Addresses that discovery is unicast to as well as broadcast, so peers
+   beyond this subnet are reachable. Seeded from configuration and grown from
+   whoever sends us discovery. */
+#define LAN_MAX_REMOTES 8
+static udword   lanRemotes[LAN_MAX_REMOTES];
+static sdword   lanRemoteCount = 0;
+
+/* Our own address and netmask, for deciding whether an advertised address is
+   one we could actually dial. */
+static udword   lanMyNetmask = 0;
+
 /*=============================================================================
     Socket helpers
 =============================================================================*/
@@ -209,6 +220,60 @@ bool32 lanPeerConnected(udword ip)
 }
 
 /*=============================================================================
+    Remote peers
+=============================================================================*/
+
+void lanAddRemote(udword ip)
+{
+    struct in_addr shown;
+    sdword i;
+
+    if (ip == 0 || ip == lanMyAddress)
+    {
+        return;
+    }
+    for (i = 0; i < lanRemoteCount; i++)
+    {
+        if (lanRemotes[i] == ip)
+        {
+            return;
+        }
+    }
+    if (lanRemoteCount >= LAN_MAX_REMOTES)
+    {
+        return;
+    }
+    lanRemotes[lanRemoteCount++] = ip;
+    shown.s_addr = ip;
+    dbgMessagef("lan: remote peer %s added, discovery will be sent to it",
+                inet_ntoa(shown));
+}
+
+bool32 lanHaveRemotes(void)
+{
+    return lanRemoteCount > 0;
+}
+
+bool32 lanAddressIsLocal(udword ip)
+{
+    sdword i;
+
+    if (lanMyNetmask != 0
+        && (ip & lanMyNetmask) == (lanMyAddress & lanMyNetmask))
+    {
+        return TRUE;
+    }
+    for (i = 0; i < lanRemoteCount; i++)
+    {
+        if (lanRemotes[i] == ip)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/*=============================================================================
     Local address
 
     Picked from the interface list: the first address that is up, is not
@@ -249,6 +314,10 @@ static udword lanDiscoverLocalAddress(void)
         }
         in = (struct sockaddr_in*)entry->ifa_addr;
         found = in->sin_addr.s_addr;
+        if (entry->ifa_netmask != NULL)
+        {
+            lanMyNetmask = ((struct sockaddr_in*)entry->ifa_netmask)->sin_addr.s_addr;
+        }
         dbgMessagef("lan: local address %s on %s", inet_ntoa(in->sin_addr),
                     entry->ifa_name ? entry->ifa_name : "?");
         break;
@@ -429,6 +498,8 @@ void lanShutdown(void)
     }
     lanRunning = FALSE;
     lanMyAddress = 0;
+    lanMyNetmask = 0;
+    lanRemoteCount = 0;
 #ifdef _WIN32
     WSACleanup();
 #endif
@@ -442,6 +513,7 @@ void lanShutdown(void)
 void lanSendDiscovery(const void* data, uword length)
 {
     struct sockaddr_in addr;
+    sdword i;
 
     if (!lanRunning || length == 0)
     {
@@ -461,6 +533,15 @@ void lanSendDiscovery(const void* data, uword length)
             dbgMessagef("lan: discovery send failed (%s)", strerror(errno));
         }
     }
+
+    /* The same advertisement, addressed rather than broadcast, so it crosses
+       a router. */
+    for (i = 0; i < lanRemoteCount; i++)
+    {
+        addr.sin_addr.s_addr = lanRemotes[i];
+        sendto(lanUdpSock, (const char*)data, length, 0,
+               (struct sockaddr*)&addr, sizeof(addr));
+    }
 }
 
 static void lanServiceDiscovery(void)
@@ -479,6 +560,16 @@ static void lanServiceDiscovery(void)
         {
             return;
         }
+        /* Anyone off-subnet who reaches us has to be answered directly,
+           since our broadcast will never get back to them. This is what lets
+           a host that configured nothing still talk to a client that named
+           it. */
+        if (from.sin_addr.s_addr != lanMyAddress
+            && !lanAddressIsLocal(from.sin_addr.s_addr))
+        {
+            lanAddRemote(from.sin_addr.s_addr);
+        }
+
         /* Our own broadcast comes back to us. The lobby is written expecting
            to see its own advertisement (titanSendLanBroadcast used to call
            the callback directly), so this is passed up rather than filtered:
@@ -599,6 +690,33 @@ bool32 lanConnect(udword ip)
     if (lanFindPeer(ip) != NULL)
     {
         return TRUE;                    /* already linked or linking */
+    }
+
+    /* A game hosted behind a router advertises the host's address on its own
+       LAN, which is meaningless from out here: dialling 192.168.x.y would
+       reach nothing, or worse, somebody else's machine on our subnet. When
+       the advertised address is not one we can reach and exactly one remote
+       has been named, that remote is who the advertisement came from, so dial
+       it instead.
+
+       Ambiguous with several remotes named, so it is not attempted then: the
+       address is used as given and the connection simply fails, which is
+       honest. Deciding properly needs the transport to tell the lobby which
+       source an advertisement arrived from, and the lobby has nowhere to put
+       that today. */
+    if (!lanAddressIsLocal(ip) && lanRemoteCount == 1)
+    {
+        struct in_addr was, now;
+
+        was.s_addr = ip;
+        now.s_addr = lanRemotes[0];
+        dbgMessagef("lan: %s is not reachable from here, dialling the named "
+                    "remote %s instead", inet_ntoa(was), inet_ntoa(now));
+        ip = lanRemotes[0];
+        if (lanFindPeer(ip) != NULL)
+        {
+            return TRUE;
+        }
     }
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
