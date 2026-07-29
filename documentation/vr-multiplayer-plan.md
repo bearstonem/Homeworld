@@ -15,8 +15,9 @@ is the useful part of the finding: most of the work is testable as two
 processes on a Linux desktop, and the VR-specific layer is the last one, not
 the first.
 
-The recommended first step needs no networking at all. See
-[M0](#m0--make-start-game-work-with-no-networking).
+Neither LAN nor internet play works today, and no amount of front-end fixing
+changes that: the work is the transport. See
+[M1](#m1--srcsdllanc-validated-on-the-desktop).
 
 ## What is already here
 
@@ -76,14 +77,31 @@ also disagree about how to include SDL_net: `NetworkInterface.c:6` says
 ### And even fixed, no game could start
 
 `mgStartGame` → `mgReallyStartGame` → `if (titanReadyToStartGame(...))` at
-`MultiplayerGame.c:3925`. The stub returns 0
-(`src/SDL/TitanInterfaceC.c:100`), so `mgStartGameCB()` is never reached and
-the Start button does nothing at all. The original says what the LAN case
-should do (`TitanInterface.cpp:292`): set `GAME_STARTED`, call
-`InitPacketList()`, return true.
+`MultiplayerGame.c:3925`. The stub returns 0, so `mgStartGameCB()` is never
+reached and the Start button does nothing at all. The original says what the
+LAN case should do (`TitanInterface.cpp:292`): mark the game started and
+return true. Porting that needs an enum, and the obvious names are a trap:
+`Globals.h:41` already defines `GAME_STARTED` as `5` for the unrelated
+`startingGameState` machine, and an unprefixed enum constant in a header this
+widely included would be textually replaced by that macro. The C++ original
+was safe only because its enum was scoped inside the class.
 
-This is worth emphasising because it means **the Start button is broken for
-Skirmish too**, which needs no network whatsoever.
+`MG_StartGame` is bound on exactly one screen, **Captain_Wait**, which is the
+LAN and internet flow. Since `titanStart` fails before a player can ever reach
+that screen, this gate is currently unreachable and untestable; it is fixed
+here on the reference implementation's authority, not on a passing test.
+
+> **Skirmish does not go through any of this.** Verified on device
+> 2026-07-28: a skirmish started fresh from the menu logs no call to
+> `titanReadyToStartGame` at all. The SKIRMISH button binds to
+> `StartNewGame`, a `utyCallbacks` entry (`src/SDL/utility.c:451`) rather than
+> an `mgCallBack` one, and `utyNewGameStart` takes its `!multiPlayerGame`
+> branch: `numPlayers = 1 + tpGameCreated.numComputers` with
+> `ComputerPlayerEnabled[i] = TRUE`. Skirmish is a **single-player game with
+> AI opponents** that borrows the multiplayer screens as a configuration UI.
+> No lockstep, no captain, no sync checksums. It therefore proves nothing
+> about `CommandNetwork.c`, and an earlier draft of this plan was wrong to
+> propose it as the way to find out.
 
 ## Four decisions to take before writing code
 
@@ -131,10 +149,48 @@ Eight players is 28 TCP connections, which is nothing on a LAN, and a mesh
 makes `titanSendPacketTo(any peer)` and `titanBroadcastPacket` both correct
 without special cases.
 
-### LAN only, and same-ABI peers only, for a first version
+**Internet play pulls the other way, so the transport must do both.** A mesh
+needs every player reachable, which means every player port-forwards. A star
+needs only the captain reachable, which is the difference between one person
+configuring a router and eight. So the transport should expose "send to
+player N" and "broadcast" as *logical* operations and route them over
+whatever links exist: direct where there is one, relayed by the captain where
+there is not. LAN then runs as a mesh because it costs nothing, and internet
+runs as a star with one forwarded port.
 
-WON is gone; internet play needs a lobby or relay service and is out of scope.
-Keeping the `Address`-keyed API intact leaves the door open.
+One thing a star cannot do is survive losing the captain. Host migration is
+real in this engine — `TransferCaptaincyPacket` and the `titanAnyone*`
+variants exist precisely for the window where there is no captain to relay
+through (`CommandNetwork.c:2200`) — and if the captain was the only reachable
+peer, the survivors cannot elect a replacement. Losing the host therefore ends
+an internet game unless every player is reachable. That is a normal
+limitation to ship with, but it should be a decision rather than a surprise.
+
+### LAN first, internet second, and same-ABI peers throughout
+
+Both are wanted (stated 2026-07-28). They are mostly the *same* work: one
+transport carries both, and internet play is that transport plus a way to
+reach a peer that broadcast cannot find.
+
+The staging follows from what each adds:
+
+1. **LAN.** UDP broadcast discovers games, TCP carries the rest. Everything
+   in M1.
+2. **Internet, host-reachable.** The same transport, joined by typed address
+   instead of discovered, with the captain's TCP port forwarded. Broadcast
+   does not cross the internet, so the join-by-IP path stops being a
+   fallback and becomes the primary route. No new protocol.
+3. **Internet, both peers behind NAT.** The hard case, and the only one
+   needing infrastructure. WON solved it with routing servers, which is what
+   `titanBehindFirewall`, `userBehindFirewall` and the Choose_Server screens
+   are vestiges of. Options are a relay we host, or hole punching. Defer
+   until 1 and 2 work.
+
+Lockstep over the internet is not the obstacle it might sound like: the
+original shipped this exact scheme in 1999 over dial-up, and
+`CAPTAINSERVER_PERIOD` is 1/8s. Every player still runs at the pace of the
+slowest peer, so a distant player slows the whole game — that is inherent to
+the design and not something the transport can fix.
 
 Peer compatibility splits cleanly in two. **In-game packets are portable**:
 `HWPacketHeader` and every command body use fixed-width `uword` / `udword` /
@@ -172,21 +228,32 @@ fills an empty save-name field rather than asking a headset for typing.
 
 ## Milestones
 
-### M0 — Make Start Game work, with no networking
+### M0 — Done, and it answered less than intended
 
-Fix `titanReadyToStartGame` for the LAN and single-human cases to match
-`TitanInterface.cpp:292`, and decide what to do about
-`NEED_MIN_TWO_HUMAN_PLAYERS` (`MultiplayerGame.h:426`, currently `1`), which
-rejects a one-human Skirmish at `MultiplayerGame.c:3937`.
+`titanReadyToStartGame` now implements the LAN and single-human cases from
+`TitanInterface.cpp:292`, with `mGameCreationState` ported to C under
+`TITANGAME_*` names to clear the `GAME_STARTED` macro collision. Internet
+games still return 0, so they fail visibly rather than starting into a
+transport that cannot carry them. The same enum work also took
+`TitanInterfaceC.c` from 5 compile errors to 0 under `HW_ENABLE_NETWORK`,
+which was owed to M2.
 
-Then run Skirmish on the Quest.
+The intent was to use Skirmish as a no-network rehearsal of the multiplayer
+game path. **That premise was wrong**, for the reason recorded above: Skirmish
+never touches this code, and is a single-player game with AI opponents. It ran
+on device before any of these changes and still does.
 
-This is the highest value step by a wide margin. Skirmish walks the entire
-lobby-to-game-start path — connection method, scenario picker, options, player
-wait, and then the multiplayer *game* rules — without sending a single packet.
-It answers the question that sizes everything else: how much of the 1999
-multiplayer path still works in a 64-bit build that has never run it. It is
-also shippable on its own, as Skirmish against the AI in VR.
+What the device run did establish, which is not nothing: the multiplayer
+*screens* — connection method, scenario picker, basic and advanced options,
+CPU opponent count — are all reachable, legible and clickable on the VR panel,
+and the game they configure loads and plays. So M4's front-end concern is
+smaller than feared, and the remaining question there is text entry.
+
+What it did **not** establish is anything at all about `CommandNetwork.c`,
+the captain model, or the sync checksums. Nothing exercises those without a
+transport, so that question moves wholly into M1. `NEED_MIN_TWO_HUMAN_PLAYERS`
+was left alone: it guards `mgStartGame`, which only Captain_Wait reaches, so
+it is a LAN concern and not a Skirmish one.
 
 ### M1 — `src/SDL/lan.c`, validated on the desktop
 
