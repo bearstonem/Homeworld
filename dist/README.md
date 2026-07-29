@@ -33,11 +33,23 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-fe1cd200878202f372b166dcd8b3273d  homeworld-unbound-vr.apk  118M
+52354ebd738abc364353da89b9a69117  homeworld-unbound-vr.apk  108M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
 builds, neither of which is stripped.
+
+## The app has a new package name
+
+`org.gardensofkadesh.homeworld` became `org.homeworldunbound.game`. Android
+keys an app's data directory off that name, so to the headset this is a
+**different app**: it installs alongside the old one, and your game data and
+saves stay behind in the old directory.
+
+`install.py` handles it — it brings everything across on the device, sets the
+permissions the new app needs, and offers to remove the old app afterwards.
+Installing the APK on its own does not, and leaves you with two entries in
+your library under the same name, one of which has all your data.
 
 ## What changed since the last build
 
