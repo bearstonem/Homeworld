@@ -33,7 +33,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-e5e90705e8cfa24ece79c20d8999418c  homeworld-unbound-vr.apk  118M
+fe1cd200878202f372b166dcd8b3273d  homeworld-unbound-vr.apk  118M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -52,9 +52,15 @@ builds, neither of which is stripped.
   host's address, press Add Host, and their game appears in the list beside
   any on your own network. The host forwards TCP 10500 and UDP 10600; nobody
   else configures anything.
-- **Playing over the internet actually works now.** Peers were naming each
-  other by addresses that only mean something on the other's own network, so a
-  connection would come up and then every message on it was quietly dropped.
+- **Playing over the internet actually works now**, tested between a headset
+  on mobile data and a PC behind a home router. Three separate things were
+  broken and none of them showed up on a LAN: peers naming each other by
+  addresses only meaningful on their own network, replies going to the wrong
+  port through carrier NAT, and the host filing a joining player under an
+  address that player had never heard of — which killed the joiner the moment
+  the game started.
+- **The host forwards two ports** on their router: **TCP 10500** and **UDP
+  10600**. Whoever is joining forwards nothing.
 - **Two-player only over the internet**, and both ends have to be on different
   home network ranges — if you are both on `192.168.1.x`, one of you needs to
-  change your router's range. LAN play is unaffected.
+  change your router's range. LAN play is unaffected by all of this.
