@@ -9,6 +9,8 @@
 
 #include "FEReg.h"
 
+#include "File.h"
+
 #include <string.h>
 
 #include "Color.h"
@@ -527,6 +529,38 @@ void ferFlipBitmap90(udword *bitmap, sdword width)
     Return      :
 ----------------------------------------------------------------------------*/
 
+/*-----------------------------------------------------------------------------
+    Name        : ferPlaceholderLif
+    Description : A 1x1 fully transparent image, standing in for a texture the
+                  game data does not contain.
+
+                  Returning NULL instead is not an option: around 130 call
+                  sites take the result of ferTextureRegister and dereference
+                  it immediately, and not one of them checks. Substituting a
+                  valid image keeps every one of them working and draws
+                  nothing, which is what a missing decoration should look
+                  like.
+
+                  Allocated per element and as a single block, because that is
+                  the contract trLIFFileLoad documents for the images these
+                  replace: the header is freed and the pixels go with it.
+    Inputs      :
+    Outputs     :
+    Return      : a lifheader owned by the caller
+----------------------------------------------------------------------------*/
+static lifheader *ferPlaceholderLif(void)
+{
+    lifheader *lif = memAlloc(sizeof(lifheader) + 4, "fermissing", NonVolatile);
+
+    memset(lif, 0, sizeof(lifheader) + 4);
+    memcpy(lif->ident, "Willy 7", 8);
+    lif->width  = 1;
+    lif->height = 1;
+    lif->flags  = TRF_Alpha;
+    lif->data   = (ubyte *)(lif + 1);            //the four zero bytes above
+    return lif;
+}
+
 void ferMirrorBitmapVert(udword *bitmap, sdword width, sdword height)
 {
     udword i, j;
@@ -825,14 +859,32 @@ lifheader *ferTextureRegister(tex_holder holder, textype newtype, textype origty
     {
         element = memAlloc(sizeof(textureregistry), "fer", NonVolatile);
 
-        element->lif = trLIFFileLoad(tex_names[holder], NonVolatile);
-
-        ferMirrorBitmapVert((udword *)element->lif->data, element->lif->width, element->lif->height);
-
-        if (element->lif == NULL)
+        /* Absent from the game data is not a fatal condition. The retail and
+           Remastered .big files dropped Won_logo_small_fade.lif, which the
+           multiplayer screens still reference, and trLIFFileLoad does not
+           return for a missing file: fileSizeGet calls dbgFatalf. Joining a
+           LAN game died on a decorative logo because of it. */
+        if (!fileExists(tex_names[holder], 0))
         {
-            //error loading file
-            return NULL;
+            dbgMessagef("WARNING: front end texture '%s' is not in the game data, "
+                        "drawing nothing in its place", tex_names[holder]);
+            element->lif = ferPlaceholderLif();
+        }
+        else
+        {
+            element->lif = trLIFFileLoad(tex_names[holder], NonVolatile);
+
+            if (element->lif == NULL)
+            {
+                //error loading file
+                memFree(element);
+                return NULL;
+            }
+            /* After the NULL check, not before it. The original dereferenced
+               element->lif to mirror the bitmap and only tested it on the next
+               line, so the guard it already had was never reachable. */
+            ferMirrorBitmapVert((udword *)element->lif->data, element->lif->width,
+                                element->lif->height);
         }
         element->name        = holder;
         element->nUsageCount = 0;
@@ -942,17 +994,27 @@ lifheader *ferTextureRegisterSpecial(char *fileName, textype newtype, textype or
     {
         element = memAlloc(sizeof(textureregistry), "ferspecial", NonVolatile);
 
-        element->lif = trLIFFileLoad(fileName, NonVolatile);
-
-        if (newtype==decorative)
+        if (!fileExists(fileName, 0))
         {
-            ferMirrorBitmapVert((udword *)element->lif->data, element->lif->width, element->lif->height);
+            dbgMessagef("WARNING: front end texture '%s' is not in the game data, "
+                        "drawing nothing in its place", fileName);
+            element->lif = ferPlaceholderLif();
         }
-
-        if (element->lif == NULL)
+        else
         {
-            //error loading file
-            return NULL;
+            element->lif = trLIFFileLoad(fileName, NonVolatile);
+
+            if (element->lif == NULL)
+            {
+                //error loading file
+                memFree(element);
+                return NULL;
+            }
+            if (newtype == decorative)
+            {
+                ferMirrorBitmapVert((udword *)element->lif->data, element->lif->width,
+                                    element->lif->height);
+            }
         }
         element->name        = holder;
         memStrncpy(element->stringname, fileName, FER_MaxFileName);

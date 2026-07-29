@@ -1,7 +1,9 @@
 package org.gardensofkadesh.homeworld;
 
+import android.content.Context;
 import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.util.Log;
 
@@ -61,12 +63,53 @@ public class HomeworldActivity extends SDLActivity {
 
     private boolean fullGame = false;
 
+    /**
+     * Held for the lifetime of the activity so LAN games can be discovered.
+     *
+     * The Wi-Fi stack drops packets that are not addressed to this device,
+     * which is a sensible power saving default and fatal to a protocol whose
+     * whole discovery mechanism is a UDP broadcast. Without this the game
+     * hosts and joins perfectly well by typed address and simply never sees
+     * anybody advertise, which is a confusing way for it to fail.
+     */
+    private WifiManager.MulticastLock multicastLock;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // Before super: it is super.onCreate that calls getLibraries() and
         // loads the .so, so the decision has to already be made by then.
         prepareGameData();
+        acquireMulticastLock();
         super.onCreate(savedInstanceState);
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (multicastLock != null && multicastLock.isHeld()) {
+            multicastLock.release();
+        }
+        multicastLock = null;
+        super.onDestroy();
+    }
+
+    private void acquireMulticastLock() {
+        try {
+            WifiManager wifi =
+                (WifiManager)getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+
+            if (wifi == null) {
+                Log.w(TAG, "no WifiManager; LAN game discovery may not work");
+                return;
+            }
+            multicastLock = wifi.createMulticastLock("homeworld-lan");
+            multicastLock.setReferenceCounted(false);
+            multicastLock.acquire();
+            Log.i(TAG, "multicast lock acquired for LAN discovery");
+        } catch (Exception e) {
+            // Never worth failing to start the game over. Discovery degrades,
+            // joining by address still works.
+            Log.w(TAG, "could not acquire multicast lock", e);
+        }
     }
 
     @Override

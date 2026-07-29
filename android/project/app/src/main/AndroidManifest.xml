@@ -48,6 +48,17 @@
     <!-- Allow access to the vibrator -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Multiplayer. INTERNET is not optional: without it every socket() call
+         fails with EACCES, so the transport cannot even open its listener and
+         the LAN screen reports no network at all.
+         CHANGE_WIFI_MULTICAST_STATE and ACCESS_WIFI_STATE are for the
+         MulticastLock HomeworldActivity takes: the Wi-Fi stack drops packets
+         not addressed to this device to save power, which includes the
+         broadcast that advertises a game. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
     <!-- if you want to capture audio, uncomment this. -->
     <!-- <uses-permission android:name="android.permission.RECORD_AUDIO" /> -->
 
