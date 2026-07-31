@@ -2519,7 +2519,19 @@ bool32 bigOpenAllBigFiles(void)
                 dbgFatalf(DBG_Loc, "Unable to find required .big file: %s", bigFilePath);
             }
         }
-        
+        else
+        {
+            /* Take the case fileExists just worked out. It searches the
+               directory case-insensitively and writes the real spelling into
+               filePathTempBuffer, but the fopen below is a bare fopen and gets
+               whatever we hand it - so without this, a file that fileExists
+               has just found is then opened under the wrong name and fails.
+               It only stayed hidden because install.py renames on the way in;
+               data read where the player left it is spelled however Relic,
+               Sierra or the Remastered packaging spelled it. */
+            strcpy(bigFilePath, filePathTempBuffer);
+        }
+
         // can't fileOpen them because fileOpen wraps the .big archives themselves
         bigFilePrecedence[bigfile_i].filePtr = fopen(bigFilePath, "rb");
         

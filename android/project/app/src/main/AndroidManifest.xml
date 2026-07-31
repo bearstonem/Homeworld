@@ -48,6 +48,19 @@
     <!-- Allow access to the vibrator -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Find game data the player put somewhere they can reach.
+
+         Android 11 closed Android/data to file managers, so the app's own
+         directory - the only place it could read from - is exactly the one
+         place a standalone headset cannot write to. Without this the full
+         campaign needs a PC. Granted by hand from the app's settings, never
+         silently; the demo needs none of it and runs without it.
+
+         Requested rather than declared-and-assumed: this is a special access
+         permission, so isExternalStorageManager() is what actually decides,
+         and the code treats "not granted" as "play the demo". -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
     <!-- Multiplayer. INTERNET is not optional: without it every socket() call
          fails with EACCES, so the transport cannot even open its listener and
          the LAN screen reports no network at all.

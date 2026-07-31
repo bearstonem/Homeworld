@@ -197,6 +197,33 @@ Music comes from whichever `.wxd` is in place — `DL_Music.wxd` for the demo,
 > afterwards — a pushed `SavedGames/SinglePlayer` lands at `2775`, which reads
 > and loads perfectly and refuses every new save.
 
+### Standalone, with no PC at all
+
+Everything above needs a computer. That is not a preference — Android 11 closed
+`Android/data` to file managers and to the folder picker, so the directory the
+game reads from is exactly the one a headset on its own cannot write to. The
+full campaign was unreachable standalone.
+
+It no longer is. Put `homeworld.big`, `HW_Music.wxd` and `HW_Comp.vce` anywhere
+you can reach — **Downloads** is the obvious place, loose or in a folder of its
+own — and grant the app **All files access**. The game searches Downloads,
+Documents and the top of storage, plus one level below each, and reads the files
+where they lie. Nothing is copied and nothing is renamed, so no 600MB second
+copy appears and the files stay yours.
+
+The first launch that finds no game data asks for the permission once, and only
+once. To turn it on later it is under the app's entry in the headset settings,
+as *All files access* or *Manage all files*. The demo needs none of this.
+
+Saves, settings and screenshots still go to the app's own directory rather than
+next to the data (`/settingspath`, set by `HomeworldActivity`), so pointing the
+game at a folder you would rather nothing wrote to is fine.
+
+Any capitalisation works. `homeworld.big` and `Homeworld.big` both open — which
+they did not before: `bigOpenAllBigFiles` case-corrected the name to test for
+it and then opened the *uncorrected* one, a bug hidden all along by `install.py`
+renaming files on the way in.
+
 ## Meta Quest
 
 The Quest runs standard Android APKs as flat 2D panel apps: enable

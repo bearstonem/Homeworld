@@ -1,10 +1,18 @@
 package org.homeworldunbound.game;
 
 import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
+import android.net.Uri;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.Settings;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.util.Log;
 
 import java.io.File;
@@ -69,7 +77,34 @@ public class HomeworldActivity extends SDLActivity {
         FULL_BIG, "HW_Music.wxd", "HW_comp.vce",
     };
 
+    /**
+     * Where to look for game data the player put somewhere they can actually
+     * reach, relative to the top of shared storage. Searched in this order,
+     * and one level below each of them, which covers both "dropped in
+     * Downloads" and "dropped in Downloads/Homeworld".
+     *
+     * This exists because Android 11 closed Android/data to file managers.
+     * The app's own directory is the only place it could read from before,
+     * and it is precisely the one place a headset with no PC attached cannot
+     * write to - so the full campaign was unreachable standalone.
+     */
+    private static final String[] DATA_SEARCH_ROOTS = {
+        Environment.DIRECTORY_DOWNLOADS,
+        Environment.DIRECTORY_DOCUMENTS,
+        null,                                   //the top of shared storage
+    };
+
+    private static final String PREFS = "homeworld";
+    private static final String PREF_ASKED_FOR_FILES = "askedForAllFiles";
+
     private boolean fullGame = false;
+
+    /**
+     * The directory the engine will read game data from: the app's own by
+     * default, or wherever the player left their files. Settings and saves do
+     * not follow it - see getArguments.
+     */
+    private File dataDir;
 
     /**
      * Held for the lifetime of the activity so LAN games can be discovered.
@@ -135,13 +170,15 @@ public class HomeworldActivity extends SDLActivity {
             Log.e(TAG, "no external files directory; falling back to the demo build");
             return;
         }
+        dataDir = files;
+
         File big = findIgnoringCase(files, FULL_BIG);
 
-        unpackAsset(files, LOADING_IMAGE);
-
-        fullGame = (big != null);
-        if (fullGame) {
+        if (big != null) {
+            // Brought over by install.py or adb, into the app's own directory.
+            // Renaming is safe and worth doing here: we own these.
             Log.i(TAG, "found " + big.getName() + ": full campaign");
+            fullGame = true;
             for (String expected : FULL_FILES) {
                 File actual = findIgnoringCase(files, expected);
 
@@ -151,8 +188,137 @@ public class HomeworldActivity extends SDLActivity {
             }
             removeBundledDemoAssets(files);
         } else {
-            Log.i(TAG, "no " + FULL_BIG + ": demo campaign");
-            unpackDemoAssets(files);
+            File elsewhere = findDataInSharedStorage();
+
+            if (elsewhere != null) {
+                // Read where the player left it. Nothing is renamed and
+                // nothing is copied: these are the player's files, sitting in
+                // the player's folder, and a 600MB copy onto a headset is a
+                // poor way to start. The engine coped with the spelling as
+                // shipped once bigOpenAllBigFiles stopped opening the
+                // uncorrected name.
+                Log.i(TAG, "found " + FULL_BIG + " in " + elsewhere
+                           + ": full campaign, reading in place");
+                fullGame = true;
+                dataDir = elsewhere;
+                setDataPathForEngine(elsewhere);
+            } else {
+                Log.i(TAG, "no " + FULL_BIG + " anywhere reachable: demo campaign");
+                unpackDemoAssets(files);
+                requestAllFilesAccessOnce();
+            }
+        }
+
+        // Into whichever directory the engine will actually search, since
+        // that is the only one it will look in for this.
+        unpackAsset(dataDir, LOADING_IMAGE);
+    }
+
+    /**
+     * Settings, saves and screenshots stay in the app's own directory even
+     * when the data is read from somewhere else. It is guaranteed writable,
+     * it is where any existing install already keeps them, and it means
+     * pointing the game at a read-only folder still works.
+     *
+     * Without this the engine would put them beside the data: with no $HOME
+     * on Android, fileUserSettingsPath defaults to fileHomeworldDataPath.
+     */
+    @Override
+    protected String[] getArguments() {
+        File files = getExternalFilesDir(null);
+
+        if (files == null) {
+            return super.getArguments();
+        }
+        return new String[] { "/settingspath", files.getAbsolutePath() };
+    }
+
+    /**
+     * HW_Data is read by utyStartup and wins over everything else, including
+     * a stale absolute path remembered in the config. Set before super.onCreate
+     * so it is in place well before the engine starts.
+     */
+    private void setDataPathForEngine(File dir) {
+        try {
+            Os.setenv("HW_Data", dir.getAbsolutePath(), true);
+        } catch (ErrnoException e) {
+            // Then the engine looks in its own directory and finds the demo.
+            // Playable, just not what was asked for.
+            Log.e(TAG, "could not set HW_Data to " + dir, e);
+            fullGame = false;
+            dataDir = getExternalFilesDir(null);
+        }
+    }
+
+    /**
+     * Look for the player's own copy somewhere they can reach without a PC.
+     * Needs All files access; without it the directories below list as empty
+     * rather than failing, so the check is worth making explicitly.
+     */
+    private File findDataInSharedStorage() {
+        if (!hasAllFilesAccess()) {
+            return null;
+        }
+        for (String root : DATA_SEARCH_ROOTS) {
+            File dir = (root == null)
+                ? Environment.getExternalStorageDirectory()
+                : Environment.getExternalStoragePublicDirectory(root);
+
+            if (dir == null || !dir.isDirectory()) {
+                continue;
+            }
+            if (findIgnoringCase(dir, FULL_BIG) != null) {
+                return dir;
+            }
+            File[] entries = dir.listFiles();
+            if (entries == null) {
+                continue;
+            }
+            for (File sub : entries) {
+                if (sub.isDirectory() && findIgnoringCase(sub, FULL_BIG) != null) {
+                    return sub;
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean hasAllFilesAccess() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return true;                        //no scoped storage to get past
+        }
+        return Environment.isExternalStorageManager();
+    }
+
+    /**
+     * Ask once, ever, and only when there is no full game to play anyway.
+     *
+     * Someone happy with the demo should not be sent to a system settings
+     * screen every launch, and someone who installed through install.py never
+     * sees this at all because their data is already in place. Once asked, the
+     * answer stands: they can turn it on later from the app's settings, which
+     * is what the README says to do.
+     */
+    private void requestAllFilesAccessOnce() {
+        if (hasAllFilesAccess()) {
+            return;
+        }
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+
+        if (prefs.getBoolean(PREF_ASKED_FOR_FILES, false)) {
+            Log.i(TAG, "no file access and already asked once; staying on the demo");
+            return;
+        }
+        prefs.edit().putBoolean(PREF_ASKED_FOR_FILES, true).apply();
+        try {
+            Log.i(TAG, "asking for All files access so the full game can be found");
+            startActivity(new Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:" + getPackageName())));
+        } catch (Exception e) {
+            // Some runtimes do not present that screen. The demo still runs,
+            // and the permission can be granted from the app's settings.
+            Log.w(TAG, "could not open the All files access screen", e);
         }
     }
 
