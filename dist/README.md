@@ -1,6 +1,6 @@
 # Prebuilt APK
 
-Built from `0b7b815` plus the working tree, on 2026-07-30.
+Built from `6f62845` plus the working tree, on 2026-07-31.
 
 ## One APK, both campaigns
 
@@ -12,10 +12,11 @@ compile-time array. Installing the wrong one failed at startup with
 
 It still is compiled in — the APK just carries both builds and chooses at
 launch. `HomeworldActivity` looks for `Homeworld.big` in the app's data
-directory: present means the full game and `libmain.so`, absent means the demo
-and `libmainDemo.so`. The freely redistributable 1.05 demo assets ride inside
-the APK and are unpacked on first run, so it plays without anything being
-copied to the headset at all.
+directory and then, failing that, in Downloads, Documents and the top of
+shared storage: present means the full game and `libmain.so`, absent means the
+demo and `libmainDemo.so`. The freely redistributable 1.05 demo assets ride
+inside the APK and are unpacked on first run, so it plays without anything
+being copied to the headset at all.
 
 Switching either way is a matter of what is in that directory. Drop your own
 game data in and the next launch is the full campaign; the demo files that
@@ -33,7 +34,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-970995f343a7ff8cd1d0536d0947f3c4  homeworld-unbound-vr.apk  99M
+526602d6cfc42e73d10be8d81c05670f  homeworld-unbound-vr.apk  99M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -53,6 +54,14 @@ your library under the same name, one of which has all your data.
 
 ## What changed since the last build
 
+- **The full campaign no longer needs a computer.** Put your game files in
+  **Downloads** — loose or in a folder of their own — grant the app **All files
+  access**, and it reads them where they lie. Nothing is copied, so no second
+  600 MB appears on the headset, and the files stay somewhere the headset's own
+  file browser can reach. Android 11 closed the app's private folder to every
+  file manager on the device, which is why this used to need adb and a PC. Any
+  capitalisation works: `homeworld.big` and `Homeworld.big` both open, which
+  they did not before.
 - **The ships are sharp again.** Homeworld's surface textures are tiny — the
   Mothership's are 32x32 and 64x64 — and were drawn to be read at 1999
   resolutions. Smoothing them recovers no detail, because there is none to
