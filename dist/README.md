@@ -1,6 +1,6 @@
 # Prebuilt APK
 
-Built from `5a96765` plus the working tree, on 2026-07-27.
+Built from `0b7b815` plus the working tree, on 2026-07-30.
 
 ## One APK, both campaigns
 
@@ -33,7 +33,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-82138969996d0d8f792a78b91bcbf8c8  homeworld-unbound-vr.apk  99M
+970995f343a7ff8cd1d0536d0947f3c4  homeworld-unbound-vr.apk  99M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -53,6 +53,20 @@ your library under the same name, one of which has all your data.
 
 ## What changed since the last build
 
+- **The ships are sharp again.** Homeworld's surface textures are tiny — the
+  Mothership's are 32x32 and 64x64 — and were drawn to be read at 1999
+  resolutions. Smoothing them recovers no detail, because there is none to
+  recover, and a headset magnifies them far past anything their author had in
+  mind, so the blur was not subtle. Off by default now. Still a setting, under
+  Options, Video, Custom Effects, "Surface Filtering", so this changes what a
+  fresh install gets and nothing else.
+- **Saving works when your saves were copied on by hand.** A `SavedGames`
+  folder put on the headset with `adb push` or a file browser belongs to
+  whoever copied it, not to the game, and the game could read it but not add to
+  it. Old saves listed and loaded perfectly and every new save failed with
+  "error writing to file, check disk space", which pointed nowhere near the
+  real cause. `install.py` now sets those folders so the game can write to
+  them, and when it cannot, it says why in the log instead of failing silently.
 - **There is a keyboard.** It appears on the panel whenever anything in the
   game is waiting for text — a player name, a game name, chat, a password, the
   name a save is given — and you type on it by pointing and pulling the
