@@ -9,6 +9,7 @@
 #include "UnivUpdate.h"
 
 #include <math.h>
+#include <SDL2/SDL.h>       /* SDL_GetTicks, for the HWRATE measurement below */
 
 #include "AIPlayer.h"
 #include "AIShip.h"
@@ -7346,6 +7347,56 @@ bool32 univUpdate(real32 phystimeelapsed)
 
     universe.phystimeelapsed = phystimeelapsed;
     universe.totaltimeelapsed += phystimeelapsed;
+
+    /* How fast the simulation is actually stepping, once a second.
+
+       Single player free-runs this loop on a timer at UNIVERSE_UPDATE_RATE.
+       Multiplayer does not: `universeUpdateTask` only calls univUpdate when
+       `clWaitSyncPacket` returns a packet, twice per packet, and the captain
+       broadcasts at CAPTAINSERVER_PERIOD - 8Hz. So the multiplayer tick rate
+       is set by the network, and ships move in eight bursts a second while a
+       headset renders seventy-two frames. That is the choppiness reported
+       from a session on 2026-07-30.
+
+       `ratio` is the number that decides what to do about it. Simulated
+       seconds over real seconds: 1.0 means multiplayer is keeping up and only
+       the *smoothness* is wrong, which render interpolation fixes on its own.
+       Below 1.0 means the sync cadence is not delivering enough ticks to run
+       the clock at full rate, and the tick count per packet is the first
+       thing to fix. Reasoning could not separate those two, hence measuring.
+
+       One line a second, both modes, so single player is the control. */
+    {
+        static udword rateLastReport = 0;
+        static udword rateTicks      = 0;
+        static real32 rateLastSim    = 0.0f;
+        udword         now           = SDL_GetTicks();
+        udword         span;
+
+        rateTicks++;
+
+        if (rateLastReport == 0)
+        {
+            rateLastReport = now;
+            rateLastSim    = universe.totaltimeelapsed;
+        }
+        else if ((span = now - rateLastReport) >= 1000)
+        {
+            real32 realSecs = (real32)span / 1000.0f;
+            real32 simSecs  = universe.totaltimeelapsed - rateLastSim;
+
+            dbgMessagef("HWRATE %s ticks=%u/s expected=%d sim=%.3f real=%.3f ratio=%.3f",
+                        multiPlayerGame ? "mp" : "sp",
+                        (unsigned)((rateTicks * 1000) / span),
+                        (int)UNIVERSE_UPDATE_RATE,
+                        simSecs, realSecs,
+                        (realSecs > 0.0f) ? (simSecs / realSecs) : 0.0f);
+
+            rateLastReport = now;
+            rateLastSim    = universe.totaltimeelapsed;
+            rateTicks      = 0;
+        }
+    }
 
     if (universe.quittime != 0.0f)
     {
