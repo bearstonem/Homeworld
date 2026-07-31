@@ -105,12 +105,20 @@ rendering. The tell is a log with `pass=mono` frames and no
   there. The app creates them on first run through `getExternalFilesDir`. A
   directory made from adb instead comes out mode 2770 owned by `shell`, which
   the app cannot traverse into, so it starts, finds no `.big` and quits with
-  nothing in the log. `chmod 2775` opens it up and the game reads it fine
+  nothing in the log. `chmod 2777` opens it up and the game reads it fine
   despite not owning it (confirmed on device, saves and soundtrack included).
-  Use 2775 and not 775: the setgid bit is what carries `ext_data_rw` down to
+  Use 2777 and not 777: the setgid bit is what carries `ext_data_rw` down to
   the `SavedGames` folder the app makes in there later, and without it a
   subsequent `adb push` into those subdirectories fails with `remote fchown
   failed`. `install.py` does all of this.
+  **World-write, not the `2775` this used to say.** The group bits never reach
+  the game — `run-as` claims it is in `ext_data_rw` and `/proc/<pid>/status` of
+  the running process says otherwise (`3003 9997 20213 50213`) — so against a
+  `shell`-owned directory only the world bits apply. `2775` therefore means
+  read-only, which does not stop the game starting: it lists and loads every
+  existing save perfectly and refuses every new one with "error writing to
+  file, check disk space", because `r-x` traverses and reads a directory but
+  cannot add to it. That cost a full debugging session on 2026-07-30.
 - **Two coordinate spaces that do not match, and not by a uniform factor.**
   The framebuffer is 4128x2208 but `prim2d` and the font system draw in the
   game's logical UI resolution, **1024x768** — measured from the card
