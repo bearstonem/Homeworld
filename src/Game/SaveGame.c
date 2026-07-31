@@ -8,6 +8,7 @@
 
 #include "SaveGame.h"
 
+#include <errno.h>
 #include <string.h>
 
 #include "AIPlayer.h"
@@ -679,6 +680,13 @@ bool32 SaveGame(char *filename)
     savefile = fileOpen(filename, FF_WriteMode | FF_ReturnNULLOnFail | FF_UserSettingsPath);
     if (savefile == (filehandle)NULL)
     {
+        /* The player is told "error writing to file, check disk space", which
+           is rarely what happened. FF_ReturnNULLOnFail swallows the reason, so
+           say it once here: a save directory restored by `adb push` is owned by
+           shell and the game is neither its owner nor in its group, which reads
+           and loads perfectly and refuses every new save with EACCES. */
+        dbgMessagef("SaveGame: cannot open '%s' for writing: %s",
+                    filename, strerror(errno));
         return FALSE;
     }
     savefilestatus = 0;
@@ -749,6 +757,10 @@ bool32 SaveGame(char *filename)
 
     if (savefilestatus)
     {
+        /* A short fwrite somewhere in the middle. The partial file goes, so
+           afterwards there is nothing on disk to show this ever ran. */
+        dbgMessagef("SaveGame: write failed part-way through '%s', discarding",
+                    filename);
         fileDelete(filename);
         savefilestatus = 0;
         return FALSE;

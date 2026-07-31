@@ -122,11 +122,23 @@ a bad install:
   does not own quite happily. Running the game once before copying anything is
   the other way round the problem: the folder then exists, correctly owned,
   and no `chmod` is needed.
-- **Use `2775` rather than `775` on directories you create here.** The setgid
+- **Use `2777` rather than `777` on directories you create here.** The setgid
   bit is what makes anything created inside afterwards inherit the
   `ext_data_rw` group, and the game creates `SavedGames` in there itself.
   Clearing it also breaks later `adb push` into those subdirectories, which
   fails with `remote fchown failed: Operation not permitted`.
+- **World-*write*, not just world-read, on anything the game writes into.**
+  The group bits are a trap here. `run-as` reports the app in `ext_data_rw`,
+  and it is not: read `/proc/<pid>/status` of the running game and the groups
+  are `3003 9997 20213 50213`. Against a `shell`-owned directory the app is
+  neither owner nor group, so the world bits are the only ones that ever
+  apply. `2775` and `664` therefore mean read-only to the game. That fails in
+  a thoroughly misleading way — the game starts, the save screen lists every
+  existing save and loads them, and only *creating* a new one fails, with
+  "error writing to file, check disk space", because `r-x` is enough to
+  traverse and read a directory but not to add to it. `2777` on directories
+  and `666` on files under `files/`. Nothing is given away by that: Android
+  already fences `Android/data/<pkg>` off to this package and `shell`.
 - **Force-stop before relaunching.** A run that happened before the data
   landed leaves a process behind that has already given up looking for it.
   Starting from the library resumes that process and it dies immediately.
@@ -174,13 +186,16 @@ Music comes from whichever `.wxd` is in place — `DL_Music.wxd` for the demo,
 `HW_Music.wxd` for the full game. There is no separate soundtrack to install.
 
 > **Do not restore a backup of the data directory with `adb push` alone.** Push
-> writes files as the *shell* user (uid 2000, mode 644); the game runs as its
-> own uid and is only in the group, so it can read them but not write them.
+> writes files as the *shell* user (uid 2000, mode 644) and creates any missing
+> directory the same way; the game runs as its own uid and is in neither the
+> owner nor the group, so it can read them but not write them.
 > The four asset files above are read-only and so are fine, but `Homeworld.cfg`
 > and `SavedGames` are files the game creates and rewrites — restoring those
 > from a backup makes the game crash at startup, before it logs anything.
-> Push only the assets and let the game create the rest; to restore saves,
-> `chmod 666` them afterwards.
+> Push only the assets and let the game create the rest. To restore saves,
+> `chmod 666` them **and `chmod 2777` the directories holding them**
+> afterwards — a pushed `SavedGames/SinglePlayer` lands at `2775`, which reads
+> and loads perfectly and refuses every new save.
 
 ## Meta Quest
 

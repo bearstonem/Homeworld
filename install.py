@@ -523,18 +523,26 @@ def migrate_old_data(adb):
 
     if not dir_exists(adb, DST):
         adb.shell("mkdir -p %s" % DST)
-        adb.shell("chmod 2775 %s" % DATA)
-        adb.shell("chmod 2775 %s" % DST)
+        adb.shell("chmod 2777 %s" % DATA)
+        adb.shell("chmod 2777 %s" % DST)
 
     info("Copying (this takes a moment - it is most of a gigabyte)...")
     cp = adb.shell("cp -r %s/. %s/ 2>&1" % (OLD_DST, DST))
 
     # Owned by shell now, so these succeed; the point of them is that the app
-    # runs as a different uid and needs the world bits to read any of it. 2775
-    # on directories: the setgid bit carries ext_data_rw down into anything
-    # made inside later, exactly as for a pushed install.
-    adb.shell("find %s -type d -exec chmod 2775 {} + 2>/dev/null" % DST)
-    adb.shell("find %s -type f -exec chmod 664 {} + 2>/dev/null" % DST)
+    # runs as a different uid and needs the world bits to reach any of it. The
+    # group bits are no help: the running process is in 3003/9997/20213/50213
+    # and *not* in ext_data_rw, whatever `run-as` claims, so only the world
+    # bits ever apply. 2775/664 therefore grants read and nothing else, and the
+    # game must write here - saves, Homeworld.cfg, screenshots. Anything short
+    # of world-write and a new save game fails with "error writing to file",
+    # while loading keeps working, because r-x is enough to traverse and read.
+    # Nothing is lost by opening it up: Android already fences
+    # Android/data/<pkg> off to this package and shell.
+    # 2777 on directories: the setgid bit carries ext_data_rw down into
+    # anything made inside later, exactly as for a pushed install.
+    adb.shell("find %s -type d -exec chmod 2777 {} + 2>/dev/null" % DST)
+    adb.shell("find %s -type f -exec chmod 666 {} + 2>/dev/null" % DST)
 
     # Count files, not top-level names. A half-copied tree leaves the names in
     # place - SavedGames exists, and is empty - so checking for those calls a
@@ -621,12 +629,16 @@ def install(adb, apk, edition, assets):
         pairs = [(assets[src], dst) for src, dst in FULL_FILES]
         if not push_tree(adb, pairs, DST):
             return False
-        # 2775, not 775: the setgid bit is what makes anything created inside
+        # 2777, not 777: the setgid bit is what makes anything created inside
         # later inherit the ext_data_rw group, and the app makes SavedGames in
         # here itself. Dropping it also breaks `adb push` into those
         # subdirectories afterwards, which fails with "remote fchown failed".
+        # World-write, not 2775: a directory made from here is owned by shell
+        # and the app is in neither the owner nor the group, so the world bits
+        # are the only ones it ever gets. Read-only bits let it start and load
+        # but not create a save.
         for d in fresh:
-            adb.shell("chmod 2775 %s" % d)
+            adb.shell("chmod 2777 %s" % d)
         ok("Game data copied")
     else:
         # Nothing to copy: the APK carries the demo assets and unpacks them on
