@@ -216,8 +216,13 @@ once. To turn it on later it is under the app's entry in the headset settings,
 as *All files access* or *Manage all files*. The demo needs none of this.
 
 Saves, settings and screenshots still go to the app's own directory rather than
-next to the data (`/settingspath`, set by `HomeworldActivity`), so pointing the
-game at a folder you would rather nothing wrote to is fine.
+next to the data (`/settingspath`, set by `HomeworldActivity`).
+
+One 135KB file, `loading.jpg`, *is* written beside your data — it is the
+multiplayer loading screen, it ships in the APK rather than in any `.big`, and
+the engine only looks for it along the data path. If the folder cannot be
+written to, unpacking it fails quietly and the game runs without it. So the
+folder does not have to be writable, but it will be written to once if it is.
 
 Any capitalisation works. `homeworld.big` and `Homeworld.big` both open — which
 they did not before: `bigOpenAllBigFiles` case-corrected the name to test for
