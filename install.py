@@ -42,6 +42,13 @@ DST = "%s/files" % DATA
 OLD_PKG = "org.gardensofkadesh.homeworld"
 OLD_DATA = "/sdcard/Android/data/%s" % OLD_PKG
 OLD_DST = "%s/files" % OLD_DATA
+
+# Somewhere the player can reach from the headset itself. Android 11 closed
+# Android/data to file managers and to the folder picker, so data put in DST
+# can only ever be managed from a computer. Data here can be added to, backed
+# up or removed with the headset's own file browser, and it survives
+# uninstalling the app. The game finds it through All files access.
+SHARED_DST = "/sdcard/Download/Homeworld"
 APK = REPO / "android/project/app/build/outputs/apk/vr/debug/app-vr-debug.apk"
 DIST = REPO / "dist"
 PREBUILT = DIST / "homeworld-unbound-vr.apk"
@@ -482,6 +489,75 @@ def push_tree(adb, pairs, dest_dir):
     return True
 
 
+def choose_data_location(adb):
+    """Where the full game's data should live. Returns DST or SHARED_DST."""
+    title("Where should your game data go?")
+    info("Downloads is reachable from the headset itself - its own file")
+    info("browser can see it, you can add or replace files without a computer,")
+    info("and it survives uninstalling the app. The app's private folder is")
+    info("invisible to every file manager on the device, because Android 11")
+    info("closed it; it can only ever be managed from here.")
+    print()
+    info("Either way the game reads the files where they are. Saves and")
+    info("settings always stay in the app's own folder.")
+    print()
+    choice = ask("Put the data where?",
+                 [("s", "Downloads - manageable from the headset (recommended)"),
+                  ("p", "The app's private folder - the old layout")], "s")
+    return SHARED_DST if choice == "s" else DST
+
+
+def install_full_shared(adb, assets):
+    """Copy the full game to shared storage and let the app read it there."""
+    adb.shell("mkdir -p %s" % SHARED_DST)
+
+    # A copy in the app's own folder wins: HomeworldActivity looks there first
+    # and only searches shared storage when it finds nothing. Leaving one there
+    # would mean copying a gigabyte that never gets read.
+    stale = adb.shell("ls %s 2>/dev/null" % DST).stdout or ""
+    shadowing = [n for n in STALE_FOR_DEMO if n in stale]
+    if shadowing:
+        warn("Game data is also in the app's private folder:")
+        for n in shadowing:
+            info("  %s" % n)
+        warn("The app reads that in preference, so the new copy would be")
+        warn("ignored. It has to go.")
+        if not yes("Remove it?", True):
+            err("Left in place; nothing copied.")
+            return False
+        adb.shell("cd %s && rm -f %s" % (DST, " ".join(STALE_FOR_DEMO)))
+        ok("Removed")
+
+    # Demo assets shadow a full install wherever the full install lives, since
+    # both are searched along the same path once HW_Data points here.
+    adb.shell("cd %s && rm -f %s" % (SHARED_DST, " ".join(STALE_FOR_FULL)))
+
+    title("Copying game data")
+    info("To %s" % SHARED_DST)
+    pairs = [(assets[src], dst) for src, dst in FULL_FILES]
+    if not push_tree(adb, pairs, SHARED_DST):
+        return False
+    ok("Game data copied")
+
+    # Shared storage is FUSE-backed and synthesises ownership, so the mode
+    # games needed under Android/data do not apply. What does apply is the
+    # permission: without it the app cannot see any of this and quietly plays
+    # the demo instead. Granting it here saves a trip into the headset's
+    # settings, and appops is the same switch that screen sets.
+    title("Granting file access")
+    cp = adb.shell("appops set %s MANAGE_EXTERNAL_STORAGE allow" % PKG)
+    granted = (adb.shell("appops get %s MANAGE_EXTERNAL_STORAGE" % PKG).stdout
+               or "")
+    if "allow" in granted:
+        ok("All files access granted")
+    else:
+        warn("Could not grant it from here (%s)"
+             % ((cp.stderr or cp.stdout or "no reason given").strip()))
+        warn("Turn on All files access for Homeworld: Unbound in the")
+        warn("headset's app settings, or the app will play the demo.")
+    return True
+
+
 def migrate_old_data(adb):
     """Bring game data and saves over from the pre-rename package, once.
 
@@ -616,6 +692,11 @@ def install(adb, apk, edition, assets):
     fresh = []
 
     if edition == "f":
+        where = choose_data_location(adb)
+
+        if where == SHARED_DST:
+            return install_full_shared(adb, assets)
+
         fresh = [d for d in (DATA, DST) if not dir_exists(adb, d)]
         if fresh:
             adb.shell("mkdir -p %s" % DST)
