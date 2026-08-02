@@ -802,8 +802,7 @@ bool32 vrWorldCommand(vrworldcommand cmd, sdword arg)
                The manager still exists and still runs for mission briefings,
                which KAS opens directly through kasfOpenSensors. */
             vrWorldCloseManagers();
-            vrw.sensorsOverlay ^= TRUE;
-            SDL_Log("VR: sensor overlay %s", vrw.sensorsOverlay ? "on" : "off");
+            vrWorldToggleSensors();
             break;
         case VRW_CMD_UNDO:       udLatestThingUndo();            break;
 
@@ -2850,16 +2849,17 @@ bool32 vrWorldToggleSensors(void)
     {
         return smSensorsActive;                             //mid-transition
     }
+    /* A briefing can leave the engine's own manager up. Close it gracefully,
+       the way the screen's own Close button does - it plays the zoom back to
+       the fleet rather than cutting out - and treat that as the toggle. */
     if (smSensorsActive)
     {
-        /* the graceful path, as the screen's own Close button uses - it plays
-           the zoom-in back to the fleet rather than cutting straight out */
         smSensorsClose(NULL, NULL);
         return FALSE;
     }
-    vrWorldCloseManagers();                                 //mutually exclusive
-    smSensorsBegin(NULL, NULL);
-    return smSensorsActive;
+    vrw.sensorsOverlay ^= TRUE;
+    SDL_Log("VR: sensor overlay %s", vrw.sensorsOverlay ? "on" : "off");
+    return vrw.sensorsOverlay;
 }
 
 void vrWorldSensorsOrbit(real32 deltaYaw, real32 deltaPitch)
