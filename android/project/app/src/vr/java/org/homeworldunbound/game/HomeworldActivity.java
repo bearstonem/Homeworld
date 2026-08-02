@@ -221,8 +221,32 @@ public class HomeworldActivity extends SDLActivity {
 
     private static final long RELAUNCH_DELAY_MS = 400;
 
+    /**
+     * Demo is running and the player has never been asked about file access.
+     * Acted on when they quit, not while they play - see onDestroy.
+     */
+    private boolean askOnTheWayOut = false;
+
     @Override
     protected void onDestroy() {
+        /* Ask for All files access on the way out.
+         *
+         * The request opens a system Settings panel, and a panel takes focus
+         * that Quest does not reliably hand back. Asked from onCreate that
+         * hung the app before it drew anything; asked from onResume the game
+         * ran but could not be interacted with. There is no good moment to
+         * take focus away from a running VR game - so do it when there is no
+         * longer a running VR game to take it from.
+         *
+         * isFinishing tells a real quit from being set aside for the Meta
+         * home, which must not trigger this every time somebody glances at
+         * their library. The campaign-change restart never gets here: it
+         * exits the process outright before super.onCreate.
+         */
+        if (askOnTheWayOut && isFinishing()) {
+            askOnTheWayOut = false;
+            requestAllFilesAccessOnce();
+        }
         if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
         }
@@ -316,9 +340,7 @@ public class HomeworldActivity extends SDLActivity {
                    game gets it from install.py, which grants it over adb, or
                    by hand in the headset's own settings - and the release
                    notes say so. */
-                Log.i(TAG, "demo campaign; All files access not requested "
-                         + "(grant it in headset settings, or run install.py, "
-                         + "to play a copy of the game you own)");
+                askOnTheWayOut = true;
             }
         }
 
