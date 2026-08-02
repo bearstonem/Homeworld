@@ -215,6 +215,12 @@ struct blob *vrWorldSensorsHoverBlob(void);
    mission briefings, which KAS opens directly. */
 bool32 vrWorldSensorsOverlayActive(void);
 
+/* Radius in game units that the sensor view has to span for the navigation
+   disc and every visible blob to fit, and how much of the room to fit it
+   into. The OpenXR layer owns vr.worldScale, so it does the division. */
+real32 vrWorldSensorsSpan(void);
+real32 vrWorldSensorsViewMetres(void);
+
 /* Cycle the camera focus through the player's fleet (+1 next / -1 prev) */
 void vrWorldFocusCycle(sdword step);
 

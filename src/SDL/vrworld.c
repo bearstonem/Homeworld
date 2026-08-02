@@ -31,6 +31,8 @@
 #include "LaunchMgr.h"
 #include "ResearchGUI.h"
 #include "Sensors.h"
+#include "SoundEvent.h"
+#include "SoundEventDefs.h"
 #include "CommandDefs.h"
 #include "CommandLayer.h"
 #include "Formation.h"
@@ -114,6 +116,12 @@ extern bool32 gameIsRunning;                                //Globals.c
 /* Sensor blob shells in the hologram. Dimmer than the map's, because there
    they sit on a black screen and here they are drawn over a lit battle. */
 #define VRW_SENSOR_BLOB_COLOR colRGB(90, 120, 220)
+#define VRW_SENSOR_GLOW_ALPHA    110    /* additive, so this goes a long way */
+#define VRW_SENSOR_GLOW_SEGMENTS 20
+/* How much of the room the battlespace is scaled into when the sensor view
+   comes up. Slightly less than arm's reach across, so the whole thing can be
+   seen at once and still be leaned into. */
+#define VRW_SENSOR_VIEW_METRES   1.6f
 
 typedef struct {
     bool32  valid;
@@ -2858,8 +2866,69 @@ bool32 vrWorldToggleSensors(void)
         return FALSE;
     }
     vrw.sensorsOverlay ^= TRUE;
+    /* The map's own sounds. Pulling back to the sensor view is a moment in
+       Homeworld and the audio is most of why - the SFX duck away, the intro
+       sting plays over the zoom, and the sound of space comes back when the
+       fleet does. */
+    if (vrw.sensorsOverlay)
+    {
+        soundEventStopSFX(0.5f);
+        soundEvent(NULL, UI_SensorsIntro);
+    }
+    else
+    {
+        soundEvent(NULL, UI_SensorsExit);
+        soundEvent(NULL, UI_SoundOfSpace);
+    }
     SDL_Log("VR: sensor overlay %s", vrw.sensorsOverlay ? "on" : "off");
     return vrw.sensorsOverlay;
+}
+
+/*-----------------------------------------------------------------------------
+    Name        : vrWorldSensorsSpan
+    Description : How wide the sensor view needs to be, in game units, for
+                  everything worth seeing to fit.
+
+                  The navigation disc is a fixed ring, so that is the floor;
+                  blobs outside it push it wider. Returned as a radius about
+                  the hologram's anchor, which is the game camera's lookat.
+    Inputs      : void
+    Outputs     :
+    Return      : radius in game units, always positive
+----------------------------------------------------------------------------*/
+real32 vrWorldSensorsSpan(void)
+{
+    Node* node;
+    real32 span = (smZoomMin + smZoomMax) / 2.0f * smWorldPlaneDistanceFactor;
+    sdword sensorLevel = universe.curPlayerPtr != NULL
+                       ? universe.curPlayerPtr->sensorLevel : 0;
+    vector const* look = &mrCamera->lookatpoint;
+
+    for (node = universe.collBlobList.head; node != NULL; node = node->next)
+    {
+        blob* thisBlob = (blob*)listGetStructOfNode(node);
+        vector d;
+        real32 reach;
+
+        if (!((thisBlob->flags & (BTF_Explored | BTF_ProbeDroid))
+              || (sensorLevel == 2
+                  && bitTest(thisBlob->flags, BTF_UncloakedEnemies))))
+        {
+            continue;
+        }
+        vecSub(d, thisBlob->centre, *look);
+        reach = fsqrt(vecMagnitudeSquared(d)) + thisBlob->radius;
+        if (reach > span)
+        {
+            span = reach;
+        }
+    }
+    return span > 1.0f ? span : 1.0f;
+}
+
+real32 vrWorldSensorsViewMetres(void)
+{
+    return VRW_SENSOR_VIEW_METRES;
 }
 
 void vrWorldSensorsOrbit(real32 deltaYaw, real32 deltaPitch)
@@ -2992,6 +3061,67 @@ void vrWorldDrawOverlays(void)
         blob const* hovered = vrWorldSensorsHoverBlob();
         Node* node;
         sdword sensorLevel = universe.curPlayerPtr->sensorLevel;
+        vector planeCentre;
+        vector camRight, camUp;
+        real32 const* vm = (real32 const*)&rndCameraMatrix;
+
+        /* Camera basis for the region glow, taken from this eye's own view
+           matrix rather than the game camera: a billboard built from the
+           mono camera would sit at a different depth in each eye and read as
+           a smear rather than a sphere. Rows of the rotation part are the
+           camera's world axes. */
+        camRight.x = vm[0]; camRight.y = vm[4]; camRight.z = vm[8];
+        camUp.x    = vm[1]; camUp.y    = vm[5]; camUp.z    = vm[9];
+
+        /* The navigation disc, at the world plane the map uses. Its ring is a
+           fixed radius, so this is the same frame of reference for direction
+           and distance the map has always drawn - only now the player can
+           walk around it. */
+        planeCentre.x = planeCentre.y = planeCentre.z = 0.0f;
+        smWorldPlaneDraw(&planeCentre, TRUE, smWorldPlaneColor);
+
+        /* Regions first, then shells over them: the glow is additive and
+           would wash the wireframe out if it went on top. */
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        for (node = universe.collBlobList.head; node != NULL; node = node->next)
+        {
+            blob* thisBlob = (blob*)listGetStructOfNode(node);
+            color c;
+            sdword seg;
+
+            if (!((thisBlob->flags & (BTF_Explored | BTF_ProbeDroid))
+                  || (sensorLevel == 2
+                      && bitTest(thisBlob->flags, BTF_UncloakedEnemies))))
+            {
+                continue;
+            }
+            c = (thisBlob == hovered) ? colWhite : VRW_SENSOR_BLOB_COLOR;
+
+            /* Camera-facing disc, bright at the centre and transparent at the
+               rim, which is what the map's filled blob reads as. A real
+               translucent sphere would be the honest shape, but it costs a
+               shell per blob per eye for something the eye reads as a haze
+               either way. */
+            glBegin(GL_TRIANGLE_FAN);
+            glColor4ub(colRed(c), colGreen(c), colBlue(c), VRW_SENSOR_GLOW_ALPHA);
+            glVertex3fv((GLfloat const*)&thisBlob->centre);
+            for (seg = 0; seg <= VRW_SENSOR_GLOW_SEGMENTS; seg++)
+            {
+                real32 a = (real32)seg * (2.0f * PI) / (real32)VRW_SENSOR_GLOW_SEGMENTS;
+                real32 ca = (real32)cos((double)a) * thisBlob->radius;
+                real32 sa = (real32)sin((double)a) * thisBlob->radius;
+                vector rim;
+
+                rim.x = thisBlob->centre.x + camRight.x * ca + camUp.x * sa;
+                rim.y = thisBlob->centre.y + camRight.y * ca + camUp.y * sa;
+                rim.z = thisBlob->centre.z + camRight.z * ca + camUp.z * sa;
+                glColor4ub(colRed(c), colGreen(c), colBlue(c), 0);
+                glVertex3fv((GLfloat const*)&rim);
+            }
+            glEnd();
+        }
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         for (node = universe.collBlobList.head; node != NULL; node = node->next)
         {

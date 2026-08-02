@@ -282,6 +282,8 @@ typedef struct {
     bool32       wheelSubOpened;    /* dwell already opened a submenu */
     XrTime       wheelRepeatAt;     /* next fire time for a repeating wedge */
     real32       worldScale;        /* game units per metre, runtime */
+    real32       scaleBeforeSensors;/* restored when the sensor view closes */
+    bool32       prevSensorsOverlay;
     vrmanagerstate managerState;
     udword       managerFrames;     /* frames since the manager opened */
     udword       managerPendingFrames; /* consecutive frames not presentable */
@@ -2987,6 +2989,37 @@ static void vrUpdateInput(XrTime time)
                     (int)(lx * lx + ly * ly > 0.04f));
         }
         traversing = grip[VR_HAND_RIGHT] && !managerActive;
+
+        /* Pull the hologram back to the whole battlespace when the sensor
+           view comes up, and put it back afterwards. Watched as a state
+           change rather than done at the toggle, so both the wheel and the
+           stick click get it without either having to know about scale.
+
+           The clamp is deliberately bypassed: VR_WORLD_SCALE_MAX exists to
+           stop the battle being shrunk past the point of being playable, and
+           the sensor view is the one case where seeing all of it at once is
+           the entire point. */
+        if (vr.worldInteractive
+            && vrWorldSensorsOverlayActive() != vr.prevSensorsOverlay)
+        {
+            vr.prevSensorsOverlay = vrWorldSensorsOverlayActive();
+            if (vr.prevSensorsOverlay)
+            {
+                real32 metres = vrWorldSensorsViewMetres();
+
+                vr.scaleBeforeSensors = vr.worldScale;
+                vr.worldScale = vrWorldSensorsSpan() / (metres * 0.5f);
+                SDL_Log("VR: sensor view scale %.0f -> %.0f units/m (span %.0f)",
+                        vr.scaleBeforeSensors, vr.worldScale,
+                        vrWorldSensorsSpan());
+            }
+            else if (vr.scaleBeforeSensors > 0.0f)
+            {
+                SDL_Log("VR: sensor view scale restored to %.0f units/m",
+                        vr.scaleBeforeSensors);
+                vr.worldScale = vr.scaleBeforeSensors;
+            }
+        }
 
         /* The Sensors Manager is a 3D strategic map, not a flat screen, and
            it is where long-range moves and hyperspace are issued - so it has

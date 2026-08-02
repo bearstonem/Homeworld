@@ -238,6 +238,13 @@ extern sdword  smFuzzyBlobs;
    map's own camera, or an eye pass with the sensor overlay up. */
 void smBlobSphereDraw(blob *thisBlob, color c, sdword ringStep, sdword nSegments);
 
+/* The map's navigation disc - ring, radial ticks and graduated spokes. All
+   primLine3 and primCircleOutlineZ in world space already, so it draws under
+   an eye pass as readily as under the map's own camera. The ring radius is
+   fixed at (smZoomMin + smZoomMax) / 2 * smWorldPlaneDistanceFactor; only
+   the tick level of detail reads smCamera. */
+void smWorldPlaneDraw(vector *centre, bool32 bDrawSpokes, color c);
+
 extern sdword smBlobSpheres;
 extern sdword smBlobSphereRingStep;
 extern real32 smBlobSphereBright;
@@ -248,6 +255,7 @@ extern bool32 smFocusOnMothershipOnClose;
 extern bool32 smCentreWorldPlane;
 
 extern color smWorldPlaneColor;
+extern real32 smWorldPlaneDistanceFactor;   //sets the navigation disc's ring radius
 extern real32 smMovementWorldPlaneDim;
 extern color smCurrentWorldPlaneColor;
 extern sdword smTickTextIndex;
