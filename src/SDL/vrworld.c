@@ -3218,8 +3218,12 @@ void vrWorldDrawOverlays(void)
         vector camRight, camUp;
         real32 const* vm = (real32 const*)&rndCameraMatrix;
         toicon* icon;
-        real32 span = vrWorldSensorsSpan();
-        real32 glyphSize = span * VRW_SENSOR_GLYPH_FRAC;
+        /* Sized off the camera range, not off vrWorldSensorsSpan(). Span is
+           a max over live blob positions, so it moves every frame as ships
+           do and as blobs re-form - which made every glyph and selection
+           ring breathe. Distance is what apparent size actually depends on,
+           and the player owns it, so it holds still. */
+        real32 glyphSize = vrw.sensorDistance * VRW_SENSOR_GLYPH_FRAC;
         /* The manual's legend calls selected ships flashing green. The
            normal selection rings are drawn at hull radius, which at this
            camera distance is well under a pixel - which is why selection
