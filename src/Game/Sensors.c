@@ -1252,6 +1252,13 @@ renderDerelictAsDot:
             vecCrossProduct(camUp, right, forward);
             vecNormalize(&camUp);
 
+            /* An overlay icon marks a ship and must never be hidden by it.
+               The 2D path got that for free - primModeSet2 turns the depth
+               test off - and moving the icons into the 3D section quietly
+               took it away, leaving them to z-fight with the mesh they sit
+               on and disappear behind blob shells. */
+            glDisable(GL_DEPTH_TEST);
+
             for (index = 0; index < nShipTOs; index++)
             {
                 icon = toClassIcon[shipTO[index].shipClass];
@@ -1285,6 +1292,7 @@ renderDerelictAsDot:
                 }
                 glEnd();
             }
+            glEnable(GL_DEPTH_TEST);
         }
 
         primModeSet2();

@@ -195,6 +195,20 @@ bool32 vrWorldToggleSensors(void);
 void vrWorldSensorsOrbit(real32 deltaYaw, real32 deltaPitch);
 void vrWorldSensorsZoom(real32 ratio);
 
+/* The blob under either hand's ray while the map is up, or NULL. Picking on
+   the map goes through the blobs rather than universe.RenderList - see
+   vrwSensorsPick - because the blob is the map's unit of interest, and the
+   main view is not even rendering to hold ships to point at.
+
+   NOTE: until the map has a world-space presentation of its own, the ray
+   reaching this has been transformed through the main view's camera, which a
+   full-screen manager freezes. The picker is correct; what it is pointed at
+   is not meaningful yet. See documentation/vr-sensors-manager-design.md.
+
+   struct blob rather than the typedef, to keep Blobs.h out of this header. */
+struct blob;
+struct blob *vrWorldSensorsHoverBlob(void);
+
 /* Cycle the camera focus through the player's fleet (+1 next / -1 prev) */
 void vrWorldFocusCycle(sdword step);
 

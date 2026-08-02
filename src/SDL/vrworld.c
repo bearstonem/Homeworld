@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "Alliance.h"
+#include "Blobs.h"
 #include "Camera.h"
 #include "CameraCommand.h"
 #include "ConsMgr.h"
@@ -117,6 +118,11 @@ typedef struct {
     SpaceObjRotImpTarg *hover;      /* object under this ray, if any */
     real32  hoverT;                 /* ray parameter of the hover hit */
     real32  limitT;                 /* draw clip (panel hit), 0 = none */
+    /* Sensors map only. The map's unit of interest is the blob, not the
+       ship: from outside one there is nothing else to point at, and the
+       ships within are what the blob resolves into once the hand is inside
+       it. hover carries the ship in that second case, as everywhere else. */
+    blob   *hoverBlob;
     vrworldintent intent;
 } vrwray;
 
@@ -1011,6 +1017,171 @@ static SpaceObjRotImpTarg* vrwPick(vrwray const* ray, bool32 selectableOnly,
     return best;
 }
 
+/*-----------------------------------------------------------------------------
+    Name        : vrwSensorsPick
+    Description : Ray against the sensors map: blobs first, then the ships
+                  inside whichever blob was hit.
+
+                  The map is not the render list. Its objects are the
+                  collision blobs, most of which the player cannot see into,
+                  and a blob is a sphere already - so unlike vrwPick there is
+                  no hull to inflate and no aim assist to apply. Blobs are
+                  thousands of units across; the beam either enters one or it
+                  does not.
+
+                  Second tier: once the ray is inside the winning blob, the
+                  ships in it are what the player means. That is the whole
+                  reason the desktop map has a band box and a click - one
+                  picks the region, the other picks what is in it.
+    Inputs      : ray - a ray already in game-world space
+                  outShip - filled with the ship under the ray inside the
+                      chosen blob, or NULL when the ray is outside it
+                  hitT - ray parameter of the surface hit, for the drawn beam
+    Outputs     :
+    Return      : the blob under the ray, or NULL
+----------------------------------------------------------------------------*/
+static blob* vrwSensorsPick(vrwray const* ray, SpaceObjRotImpTarg** outShip,
+                            real32* hitT)
+{
+    Node* node;
+    blob* best = NULL;
+    real32 bestAngle = REALlyBig;
+    real32 bestT = REALlyBig;
+    real32 bestSurface = 0.0f;
+    bool32 bestInside = FALSE;
+    sdword sensorLevel = universe.curPlayerPtr->sensorLevel;
+
+    if (outShip != NULL)
+    {
+        *outShip = NULL;
+    }
+
+    for (node = universe.collBlobList.head; node != NULL; node = node->next)
+    {
+        blob* thisBlob = (blob*)listGetStructOfNode(node);
+        vector toBlob;
+        real32 tCentre, distSqr, discr, root, angle, surface;
+        bool32 inside, better;
+
+        /* Exactly what smBlobsDraw draws a shell for. Pointing at a blob
+           that is not on the map would select through the fog. */
+        if (!((thisBlob->flags & (BTF_Explored | BTF_ProbeDroid))
+              || (sensorLevel == 2
+                  && bitTest(thisBlob->flags, BTF_UncloakedEnemies))))
+        {
+            continue;
+        }
+
+        vecSub(toBlob, thisBlob->centre, ray->origin);
+        distSqr = vecMagnitudeSquared(toBlob);
+        inside = (distSqr <= thisBlob->radius * thisBlob->radius);
+        tCentre = vecDotProduct(toBlob, ray->dir);
+        if (tCentre < 0.0f && !inside)
+        {
+            continue;                                       //behind the hand
+        }
+
+        distSqr -= tCentre * tCentre;
+        discr = thisBlob->radius * thisBlob->radius - distSqr;
+        if (discr < 0.0f)
+        {
+            continue;
+        }
+        root = fsqrt(discr);
+        surface = tCentre - root;
+        if (surface < 0.0f)
+        {
+            surface = tCentre + root;                       //hand is within
+        }
+
+        angle = fsqrt(distSqr > 0.0f ? distSqr : 0.0f)
+              / (tCentre > 1.0f ? tCentre : 1.0f);
+
+        /* A blob the hand is standing in beats every blob it merely points
+           through, however well aimed. Otherwise walking into a sphere would
+           hand the pick to whatever lay beyond it. */
+        better = (inside && !bestInside)
+              || (inside == bestInside
+                  && (angle < bestAngle - VRW_PICK_TIE_ANGLE
+                      || (angle < bestAngle + VRW_PICK_TIE_ANGLE
+                          && tCentre < bestT)));
+        if (better)
+        {
+            bestAngle = angle;
+            bestT = tCentre;
+            best = thisBlob;
+            bestSurface = surface;
+            bestInside = inside;
+        }
+    }
+
+    if (best == NULL)
+    {
+        return NULL;
+    }
+    if (hitT != NULL)
+    {
+        *hitT = bestSurface;
+    }
+
+    /* Second tier. Only from inside: a blob seen from across the map is a
+       region, and resolving it to one of the ships stacked along the line of
+       sight would be a guess the player cannot see well enough to correct. */
+    if (bestInside && outShip != NULL && best->blobObjects != NULL)
+    {
+        SpaceObjRotImpTarg* bestShip = NULL;
+        real32 shipAngle = REALlyBig;
+        real32 shipT = REALlyBig;
+        sdword index;
+
+        for (index = 0; index < best->blobObjects->numSpaceObjs; index++)
+        {
+            SpaceObj* obj = best->blobObjects->SpaceObjPtr[index];
+            SpaceObjRotImpTarg* targ = (SpaceObjRotImpTarg*)obj;
+            vector toObj;
+            real32 radius, tc, dSqr, ang;
+
+            if (obj->objtype != OBJ_ShipType && obj->objtype != OBJ_AsteroidType
+                && obj->objtype != OBJ_DustType && obj->objtype != OBJ_GasType
+                && obj->objtype != OBJ_DerelictType)
+            {
+                continue;
+            }
+            if (obj->flags & (SOF_Dead | SOF_Hide))
+            {
+                continue;
+            }
+
+            vecSub(toObj, targ->collInfo.collPosition, ray->origin);
+            tc = vecDotProduct(toObj, ray->dir);
+            if (tc < 0.0f)
+            {
+                continue;
+            }
+            /* The map draws ships as points, so there is no hull on screen
+               to aim at and the pick has to be a cone about the beam. */
+            radius = vrwHullRadius(targ);
+            radius += tc * VRW_PICK_CONE_TAN;
+            dSqr = vecMagnitudeSquared(toObj) - tc * tc;
+            if (radius * radius - dSqr < 0.0f)
+            {
+                continue;
+            }
+            ang = fsqrt(dSqr > 0.0f ? dSqr : 0.0f) / (tc > 1.0f ? tc : 1.0f);
+            if (ang < shipAngle - VRW_PICK_TIE_ANGLE
+                || (ang < shipAngle + VRW_PICK_TIE_ANGLE && tc < shipT))
+            {
+                shipAngle = ang;
+                shipT = tc;
+                bestShip = targ;
+            }
+        }
+        *outShip = bestShip;
+    }
+
+    return best;
+}
+
 /* Remember where the brush has been, so the overlay can show the region
    actually swept rather than only which objects it happened to catch. Shared
    by both sweeps - selecting ships and picking attack targets use the same
@@ -1157,6 +1328,7 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
        invalid ray draws nothing, picks nothing, and so pulses nothing. */
     ray->valid = valid && vrw.worldValid && !vrWorldSensorsBriefing();
     ray->hover = NULL;
+    ray->hoverBlob = NULL;
     ray->limitT = 0.0f;
     if (!ray->valid)
     {
@@ -1170,7 +1342,21 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
     vrw.dbgLocalDir[hand].z = dir[2];
     vrwLocalToWorld(origin, &ray->origin);
     vrwLocalDirToWorld(dir, &ray->dir);
-    ray->hover = vrwPick(ray, FALSE, oldHover, &ray->hoverT);
+    if (vrWorldSensorsActive())
+    {
+        /* The map has its own contents. Picking the render list here would
+           aim at ships drawn nowhere the player is looking - the main view
+           is not even rendering while a manager holds it down. */
+        ray->hoverBlob = vrwSensorsPick(ray, &ray->hover, &ray->hoverT);
+        if (ray->hoverBlob == NULL)
+        {
+            ray->hoverT = 0.0f;
+        }
+    }
+    else
+    {
+        ray->hover = vrwPick(ray, FALSE, oldHover, &ray->hoverT);
+    }
     if (hand == 1 && vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
     {
         vector backCam, backLocal, backCamDir, backLocalDir;
@@ -1240,7 +1426,30 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
 
 bool32 vrWorldHandHasTarget(sdword hand)
 {
-    return vrw.ray[hand].valid && vrw.ray[hand].hover != NULL;
+    /* A blob counts. On the sensors map it is often the only thing there is
+       to point at, and without it the beam would draw to infinity and the
+       haptic tick would never fire over a sphere the size of a battle.
+       Outside the map hoverBlob is always NULL, so nothing else changes. */
+    return vrw.ray[hand].valid
+        && (vrw.ray[hand].hover != NULL || vrw.ray[hand].hoverBlob != NULL);
+}
+
+blob* vrWorldSensorsHoverBlob(void)
+{
+    sdword hand;
+
+    if (!vrWorldSensorsActive())
+    {
+        return NULL;
+    }
+    for (hand = 0; hand < VRW_HAND_COUNT; hand++)
+    {
+        if (vrw.ray[hand].valid && vrw.ray[hand].hoverBlob != NULL)
+        {
+            return vrw.ray[hand].hoverBlob;
+        }
+    }
+    return NULL;
 }
 
 bool32 vrWorldHandHasSelectable(sdword hand)
