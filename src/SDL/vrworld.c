@@ -160,6 +160,7 @@ static struct {
     bool32  worldValid;
     bool32  sensorsOverlay;         /* sensor representation in the hologram */
     real32  sensorDistance;         /* the sensor view owns the camera range */
+    vector  sensorLookat;           /* ...and where it is aimed */
     real32  camDistanceBefore;      /* main camera, restored on the way out */
     real32  camNearBefore;
     real32  camFarBefore;
@@ -349,10 +350,19 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
 
         /* vrw.sensorDistance rather than the span, so the player's own zoom
            survives being re-asserted. Holding the computed span here instead
-           would have quietly undone every stick input. */
+           would have quietly undone every stick input.
+
+           The lookat is held too. Delegating it to ccFocus meant the focus
+           stack recomputed a distance from the selection's bounding box
+           every tick, which pulled the view back in as fast as the stick
+           could push it out - zooming in appeared to work only because it
+           was pulling the same way. */
         actual->distance = remember->distance = vrw.sensorDistance;
+        actual->lookatpoint = remember->lookatpoint = vrw.sensorLookat;
         actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
         actual->clipPlaneFar = remember->clipPlaneFar = SM_ClipFar;
+        cameraSetEyePosition(actual);
+        cameraSetEyePosition(remember);
     }
     /* Never sample rndCameraMatrix directly here - see the file header. The
        captured matrix goes stale while a manager holds the main view down,
@@ -2940,6 +2950,11 @@ bool32 vrWorldToggleSensors(void)
         vrw.camNearBefore = actual->clipPlaneNear;
         vrw.camFarBefore = actual->clipPlaneFar;
         vrw.sensorDistance = want;
+        vrw.sensorLookat = actual->lookatpoint;
+        /* Nothing else may drive the camera while the view owns it. A focus
+           command left running would recompute both the lookat and the
+           distance from its bounding box every tick and win the argument. */
+        ccCancelFocus(&universe.mainCameraCommand);
 
         actual->distance = remember->distance = want;
         actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
@@ -3070,7 +3085,8 @@ void vrWorldSensorsZoom(real32 ratio)
            which the per-frame hold then replaces with ours. */
         if (ratio < 1.0f && selSelected.numShips > 0)
         {
-            ccFocus(&universe.mainCameraCommand, (FocusCommand*)&selSelected);
+            selCentrePointCompute();
+            vrw.sensorLookat = selCentrePoint;
         }
         return;
     }
