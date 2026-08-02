@@ -756,6 +756,11 @@ static bool32 vrwGroupRecall(sdword group)
     selSelectHotKeyGroup(&selHotKeyGroup[group]);
     selHotKeyNumbersSet(group);
     ioUpdateShipTotals();
+    /* Same pair the desktop plays on a recall: the click acknowledges the
+       press, the callout names the group. Assigning one already spoke; only
+       selecting one was silent. */
+    soundEvent(NULL, UI_Click);
+    speechEvent(selHotKeyGroup[group].ShipPtr[0], COMM_AssGrp_Select, group);
     return TRUE;
 }
 
@@ -2131,11 +2136,14 @@ bool32 vrWorldMoveCommit(void)
         clWrapMove(&universe.mainCommandLayer, (SelectCommand*)&selSelected,
                    selCentrePoint, vrw.moveDestination);
         tutGameMessage("Game_MoveIssued");
-        /* The move chimes, as the pie plate does on the desktop. In a headset
-           this matters more than it does there: the destination is often
-           behind you or across the room, so the sound is frequently the only
-           confirmation the order was taken at all. */
-        soundEvent(NULL, UI_MoveChimes);
+        /* The pilots acknowledge, as they do on the desktop path. NOT
+           UI_MoveChimes, which is the movement GUI's proximity click while
+           a destination is being placed rather than a confirmation that one
+           was taken - a plausible-looking wrong answer. In a headset this
+           matters more than on a monitor: the destination is often behind
+           you or across the room, so the callback is frequently the only
+           sign the order landed. */
+        speechEvent(selSelected.ShipPtr[0], COMM_Move, 0);
         return TRUE;
     }
     return FALSE;
