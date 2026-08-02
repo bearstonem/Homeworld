@@ -1,6 +1,6 @@
 # Prebuilt APK
 
-Built from `6f62845` plus the working tree, on 2026-07-31.
+Built from `9e853f5` plus the working tree, on 2026-08-02.
 
 ## One APK, both campaigns
 
@@ -34,7 +34,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-526602d6cfc42e73d10be8d81c05670f  homeworld-unbound-vr.apk  99M
+aeb6ca8db694872319512fed8586c163  homeworld-unbound-vr.apk  99M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -53,6 +53,24 @@ Installing the APK on its own does not, and leaves you with two entries in
 your library under the same name, one of which has all your data.
 
 ## What changed since the last build
+
+- **The Sensors Manager is a place now, not a screen.** It used to be the map
+  drawn flat on the panel at your wrist, which is the one screen in Homeworld
+  where that costs something: it was never a screen to begin with, it is a 3D
+  scene with its own camera, and it is where the game expects long-range
+  movement and hyperspace to be issued. Opening it now pulls the whole
+  battlespace into the room around you — the navigation disc under your feet,
+  sensor coverage as spheres you can lean into, your fleet as points and class
+  glyphs inside them. You can select, give orders, draw flight paths and zoom
+  in on what you picked without ever leaving it, and closing it puts you back
+  at whatever you were looking at.
+- **Dragging on the panel never worked.** Press and drag anywhere on the wrist
+  panel and the pointer froze where you pressed until you let go. It took out
+  band-box selection, the map's own Pan control and the ship view. The cause
+  was that the game asks the mouse for movement rather than position once a
+  drag starts, and a headset has no mouse to ask.
+
+## Older changes
 
 - **The full campaign no longer needs a computer.** Put your game files in
   **Downloads** — loose or in a folder of their own — grant the app **All files
