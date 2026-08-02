@@ -49,6 +49,7 @@
 #include "Select.h"
 #include "ShipSelect.h"
 #include "SpaceObj.h"
+#include "Tactical.h"
 #include "Tactics.h"
 #include "TradeMgr.h"
 #include "Tutor.h"
@@ -130,6 +131,12 @@ extern bool32 gameIsRunning;                                //Globals.c
 #define VRW_SENSOR_ALLY_COLOR    colRGB(230, 220, 70)
 #define VRW_SENSOR_ENEMY_COLOR   colRGB(235, 60, 55)
 #define VRW_SENSOR_SHIP_POINT    4.0f
+#define VRW_SENSOR_SEL_COLOR     colRGB(120, 255, 140)
+#define VRW_SENSOR_SEL_RING      1.9f    /* multiples of a class glyph */
+#define VRW_SENSOR_FLASH_PERIOD  0.28f   /* seconds per half cycle */
+/* Class glyph size as a fraction of the view span, so it holds its apparent
+   size however far the camera has been pulled back. */
+#define VRW_SENSOR_GLYPH_FRAC    0.010f
 
 typedef struct {
     bool32  valid;
@@ -3156,6 +3163,15 @@ void vrWorldDrawOverlays(void)
         vector planeCentre;
         vector camRight, camUp;
         real32 const* vm = (real32 const*)&rndCameraMatrix;
+        toicon* icon;
+        real32 span = vrWorldSensorsSpan();
+        real32 glyphSize = span * VRW_SENSOR_GLYPH_FRAC;
+        /* The manual's legend calls selected ships flashing green. The
+           normal selection rings are drawn at hull radius, which at this
+           camera distance is well under a pixel - which is why selection
+           looked as though it vanished the moment it was made. */
+        bool32 flashOn = (((sdword)(universe.totaltimeelapsed
+                                    / VRW_SENSOR_FLASH_PERIOD)) & 1) == 0;
 
         /* Camera basis for the region glow, taken from this eye's own view
            matrix rather than the game camera: a billboard built from the
@@ -3215,6 +3231,30 @@ void vrWorldDrawOverlays(void)
         }
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
+        /* Selection, drawn last so it sits over the fleet. A ring at glyph
+           scale rather than at the ship's hull, because the point of the
+           marker is to be findable in a view of the whole battlespace. */
+        if (flashOn)
+        {
+            sdword si;
+
+            for (si = 0; si < selSelected.numShips; si++)
+            {
+                Ship* sel = selSelected.ShipPtr[si];
+
+                if (sel == NULL || (((SpaceObj*)sel)->flags & SOF_Dead))
+                {
+                    continue;
+                }
+                primCircleOutline3(&sel->posinfo.position,
+                                   glyphSize * VRW_SENSOR_SEL_RING, 12, 0,
+                                   VRW_SENSOR_SEL_COLOR, Z_AXIS);
+                primPointSize3(&sel->posinfo.position,
+                               VRW_SENSOR_SHIP_POINT * 1.8f,
+                               VRW_SENSOR_SEL_COLOR);
+            }
+        }
+
         for (node = universe.collBlobList.head; node != NULL; node = node->next)
         {
             blob* thisBlob = (blob*)listGetStructOfNode(node);
@@ -3259,8 +3299,7 @@ void vrWorldDrawOverlays(void)
                     }
                     if (ship->playerowner == universe.curPlayerPtr)
                     {
-                        pc = bitTest(ship->flags, SOF_Selected)
-                           ? colWhite : VRW_SENSOR_OWN_COLOR;
+                        pc = VRW_SENSOR_OWN_COLOR;
                     }
                     else if (allianceIsShipAlly(ship, universe.curPlayerPtr))
                     {
@@ -3272,6 +3311,39 @@ void vrWorldDrawOverlays(void)
                     }
                     primPointSize3(&obj->posinfo.position,
                                    VRW_SENSOR_SHIP_POINT, pc);
+
+                    /* Class glyph, as the map's tactical overlay draws it -
+                       billboarded, and sized off the view span so it holds
+                       the same apparent size however far back the camera
+                       has been pulled.
+
+                       loc[].y carries a 4:3 term baked in by toVertexAdd
+                       for the 2D path's benefit; a billboard must not
+                       carry it again. Same correction as Sensors.c. */
+                    icon = toClassIcon[ship->staticinfo->shipclass];
+                    if (icon != NULL && icon->nPoints > 1)
+                    {
+                        sdword ip;
+
+                        glBegin(GL_LINE_LOOP);
+                        for (ip = icon->nPoints - 1; ip >= 0; ip--)
+                        {
+                            real32 gx = icon->loc[ip].x * glyphSize;
+                            real32 gy = icon->loc[ip].y * glyphSize
+                                      * SM_IconAspectUndo;
+                            vector gv;
+
+                            gv.x = obj->posinfo.position.x
+                                 + camRight.x * gx + camUp.x * gy;
+                            gv.y = obj->posinfo.position.y
+                                 + camRight.y * gx + camUp.y * gy;
+                            gv.z = obj->posinfo.position.z
+                                 + camRight.z * gx + camUp.z * gy;
+                            glColor3ub(colRed(pc), colGreen(pc), colBlue(pc));
+                            glVertex3fv((GLfloat const*)&gv);
+                        }
+                        glEnd();
+                    }
                 }
             }
         }
