@@ -739,6 +739,11 @@ static bool32 vrwGroupStore(sdword group)
     selSelectionCopy((MaxAnySelection*)&selHotKeyGroup[group],
                      (MaxAnySelection*)&selSelected);
     selHotKeyNumbersSet(group);
+    /* The fleet says it has been grouped, as it does on the desktop. There
+       is no visible confirmation anywhere for this - the wheel has already
+       closed - so without it the assignment happens in silence and there is
+       nothing at all to tell you it took. */
+    speechEvent(selHotKeyGroup[group].ShipPtr[0], COMM_AssGrp_Select, group);
     return TRUE;
 }
 
@@ -2126,6 +2131,11 @@ bool32 vrWorldMoveCommit(void)
         clWrapMove(&universe.mainCommandLayer, (SelectCommand*)&selSelected,
                    selCentrePoint, vrw.moveDestination);
         tutGameMessage("Game_MoveIssued");
+        /* The move chimes, as the pie plate does on the desktop. In a headset
+           this matters more than it does there: the destination is often
+           behind you or across the room, so the sound is frequently the only
+           confirmation the order was taken at all. */
+        soundEvent(NULL, UI_MoveChimes);
         return TRUE;
     }
     return FALSE;
