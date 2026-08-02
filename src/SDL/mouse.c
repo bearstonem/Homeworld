@@ -521,7 +521,16 @@ void mouseClipToRect(rectangle *rect)
         mouseClipRect = *rect;
         SDL_GetRelativeMouseState(&x, &y); // prime the next poll to start at 0,0
     }
+#ifdef HW_ENABLE_VR
+    /* Relative mode exists to stop a desktop cursor escaping the window.
+       There is no OS cursor to confine on a headset, and turning it on costs
+       the one mechanism the controller has for positioning: SDL ignores
+       SDL_WarpMouseInWindow while relative mode is set. mousePoll reads the
+       absolute position and applies mouseClipRect itself. */
+    (void)x; (void)y;
+#else
     SDL_SetRelativeMouseMode(SDL_TRUE);
+#endif
 }
 
 
@@ -1847,6 +1856,28 @@ void mousePoll(void)
     mouseCursorYPosition = mousePoint.y - clientRect.y0;
     */
 
+#ifdef HW_ENABLE_VR
+    if (mouseClip)
+    {
+        /* There is no physical mouse on a headset. The clipped path below
+           accumulates SDL_GetRelativeMouseState deltas, which are therefore
+           always (0,0), so the cursor freezes wherever it was when the clip
+           engaged - and mouseClipToRect is called on RPE_PressLeft, i.e. at
+           the start of every drag. The sensors map's band box came out
+           zero-area for exactly this reason: no rectangle drawn, nothing
+           selected, and the same for the map's PAN button and ShipView.
+
+           The controller drives the cursor by warping it, so read the
+           absolute position as the unclipped path does and then apply the
+           clip rect to that. Clipping semantics are kept; only the source of
+           the position changes. */
+        SDL_GetMouseState(&mouseCursorXPosition, &mouseCursorYPosition);
+        mouseCursorXPosition = (sdword)((real32)mouseCursorXPosition * (real32)MAIN_WindowWidth / (real32)MAIN_WindowWidthActual);
+        mouseCursorYPosition = (sdword)((real32)mouseCursorYPosition * (real32)MAIN_WindowHeight / (real32)MAIN_WindowHeightActual);
+        mouseClipPointToRect(&mouseCursorXPosition, &mouseCursorYPosition, &mouseClipRect);
+        mousePositionSet(mouseCursorXPosition, mouseCursorYPosition);
+    }
+#else
     if (mouseClip)
     {
         SDL_GetRelativeMouseState(&tmpX, &tmpY);
@@ -1855,6 +1886,7 @@ void mousePoll(void)
         mouseClipPointToRect(&mouseCursorXPosition, &mouseCursorYPosition, &mouseClipRect);
         mousePositionSet(mouseCursorXPosition, mouseCursorYPosition);
     }
+#endif
     else
     {
         SDL_GetMouseState(&mouseCursorXPosition, &mouseCursorYPosition);

@@ -1495,6 +1495,12 @@ static void vrPushMouseButton(ubyte button, bool32 down)
     event.button.x = vr.pointerX;
     event.button.y = vr.pointerY;
     SDL_PushEvent(&event);
+    /* One choke point for every synthesized mouse button, so a press that
+       never reaches a region can be told from one that was never sent. */
+    SDL_Log("VRCLICK button=%u %s at (%d,%d) manager=%s",
+            (unsigned)button, down ? "down" : "up",
+            (int)vr.pointerX, (int)vr.pointerY,
+            vr.worldInteractive ? vrWorldManagerName() : "n/a");
 }
 
 static void vrPushKey(SDL_Keycode sym, SDL_Scancode scancode, bool32 down)
