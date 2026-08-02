@@ -122,6 +122,9 @@ extern bool32 gameIsRunning;                                //Globals.c
    comes up. Slightly less than arm's reach across, so the whole thing can be
    seen at once and still be leaned into. */
 #define VRW_SENSOR_VIEW_METRES   1.6f
+/* Camera distance as a multiple of the span. Above 1 so the far edge is
+   inside the view rather than exactly on it. */
+#define VRW_SENSOR_CAM_FACTOR    1.8f
 
 typedef struct {
     bool32  valid;
@@ -141,6 +144,9 @@ typedef struct {
 static struct {
     bool32  worldValid;
     bool32  sensorsOverlay;         /* sensor representation in the hologram */
+    real32  camDistanceBefore;      /* main camera, restored on the way out */
+    real32  camNearBefore;
+    real32  camFarBefore;
     real32  scale;                  /* metres -> game units */
     real32  gameCam[16];            /* pure mono main-view camera matrix */
     bool32  gameCamValid;
@@ -2872,6 +2878,34 @@ bool32 vrWorldToggleSensors(void)
        fleet does. */
     if (vrw.sensorsOverlay)
     {
+        /* Framing is the game camera's, not the hologram scale's. The eye
+           view and the anchor model both carry vr.worldScale and it cancels
+           out of the composition - that is what makes the near and far
+           planes stay valid at any scale - so worldScale sets stereo
+           separation and how big the world feels to move your head in, and
+           changes nothing about how much of it is on screen. Pulling back to
+           the whole battlespace means moving the camera.
+
+           And moving it is not enough on its own: the main view's far plane
+           is set for a battle, so everything past it is simply absent. That
+           is correct in the game and wrong here, where seeing the far side
+           of the map is the point. The manager gives its own camera
+           SM_ClipNear and SM_ClipFar for exactly this reason; borrow them. */
+        Camera* actual = vrwActualCamera();
+        Camera* remember = vrwRememberCamera();
+        real32 want = vrWorldSensorsSpan() * VRW_SENSOR_CAM_FACTOR;
+
+        vrw.camDistanceBefore = actual->distance;
+        vrw.camNearBefore = actual->clipPlaneNear;
+        vrw.camFarBefore = actual->clipPlaneFar;
+
+        actual->distance = remember->distance = want;
+        actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
+        actual->clipPlaneFar = remember->clipPlaneFar = SM_ClipFar;
+        vrwCameraTouched(CAM_USER_MOVED | CAM_USER_ZOOMED);
+        SDL_Log("VR: sensor view camera %.0f -> %.0f, far %.0f -> %.0f",
+                vrw.camDistanceBefore, want, vrw.camFarBefore, (real32)SM_ClipFar);
+
         soundEventStopSFX(0.5f);
         soundEvent(NULL, UI_SensorsIntro);
     }
@@ -2882,6 +2916,16 @@ bool32 vrWorldToggleSensors(void)
            there - and having pulled back to pick something out, coming down
            anywhere else would throw away the only thing the trip was for.
            Falls back to whatever the ray was on when nothing is selected. */
+        if (vrw.camDistanceBefore > 0.0f)
+        {
+            Camera* actual = vrwActualCamera();
+            Camera* remember = vrwRememberCamera();
+
+            actual->distance = remember->distance = vrw.camDistanceBefore;
+            actual->clipPlaneNear = remember->clipPlaneNear = vrw.camNearBefore;
+            actual->clipPlaneFar = remember->clipPlaneFar = vrw.camFarBefore;
+            vrwCameraTouched(CAM_USER_MOVED | CAM_USER_ZOOMED);
+        }
         if (selSelected.numShips > 0)
         {
             vrWorldCameraFocusSelection();
