@@ -132,24 +132,32 @@ public class HomeworldActivity extends SDLActivity {
         // loads the .so, so the decision has to already be made by then.
         prepareGameData();
 
-        // The demo/full choice is compiled into the engine, so it is fixed for
-        // the life of a process the moment a library is loaded. The data that
-        // decides it is not: a player runs the demo, copies their game into
-        // Downloads, and comes back. Android warm-starts the existing process,
-        // prepareGameData now says full campaign, and the already-loaded
-        // libmainDemo.so goes looking for HomeworldDL.big in Downloads and
-        // dies with "Unable to find required .big file" - leaving the headset
-        // in the compositor with nothing to draw. Launching a second time gets
-        // a fresh process and works, which is what made it look like a
-        // first-launch quirk rather than a crash.
+        // The engine cannot run twice in one process, and Android warm-starts
+        // processes freely - so quit the game, launch it again, and SDL_main
+        // runs a second time over globals the first run left behind. It dies
+        // in different places depending on how far it got:
         //
-        // There is no way to unload a library, so the only correct answer is
-        // not to run in this process. Exit before super.onCreate touches the
-        // wrong one; the next launch starts clean and picks the right engine.
-        if (loadedFullGame != null && loadedFullGame.booleanValue() != fullGame) {
-            Log.i(TAG, "campaign changed (was " + (loadedFullGame ? "full" : "demo")
-                     + ", now " + (fullGame ? "full" : "demo")
-                     + ") - restarting so the right engine is loaded");
+        //   Fatal error - fileSizeGet: can't find file '.../files//SoundFX/
+        //   UIEvents.lut'
+        //
+        // note the doubled slash, a path prepend applied twice. The campaign
+        // changing between runs is one way to notice this and not the cause;
+        // that one died earlier still, on the wrong engine looking for the
+        // other campaign's .big file. Both are the same thing: state from a
+        // finished run left in a process that then starts another.
+        //
+        // Neither a loaded library nor the engine's globals can be undone, so
+        // the only correct answer is not to run here at all. Exit before
+        // super.onCreate reaches the native side; the relaunch below brings
+        // the player back into a clean process.
+        //
+        // A second launch always worked precisely because the failure killed
+        // the process that was wrong, which is what made this read as a
+        // first-launch quirk for so long.
+        if (loadedFullGame != null) {
+            Log.i(TAG, "engine already ran in this process (was "
+                     + (loadedFullGame ? "full" : "demo") + ", now "
+                     + (fullGame ? "full" : "demo") + ") - restarting");
             scheduleRelaunch();
             finishAffinity();
             System.exit(0);
