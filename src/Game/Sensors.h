@@ -173,7 +173,12 @@
    VR eye passes need and what gives even the flat map a depth cue it never
    had. See documentation/vr-sensors-manager-design.md. */
 #define SM_BlobSphereRingStep       60          //degrees between great circles
-#define SM_BlobSphereDim            0.55f       //shell brightness against the disc
+/* Fraction of the way from the disc's colour to white. The disc carries the
+   information - height above the world plane, depth, team - and the shell is
+   structure, so it is brightened and desaturated against it rather than
+   tinted. Not a colMultiplyClamped factor: that one clamps at 1.0 and can
+   only darken, which left no headroom at all. */
+#define SM_BlobSphereBright         0.35f
 
 #define SM_FOWBlobUpdateTime        0.75        //how long the FOW sub-blobs last
 
@@ -220,7 +225,8 @@ extern sdword  smFuzzyBlobs;
 
 extern sdword smBlobSpheres;
 extern sdword smBlobSphereRingStep;
-extern real32 smBlobSphereDim;
+extern real32 smBlobSphereBright;
+extern sdword smWorldSpaceIcons;
 
 extern sdword smTacticalOverlay;
 extern bool32 smFocusOnMothershipOnClose;

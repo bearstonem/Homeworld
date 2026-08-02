@@ -376,7 +376,15 @@ sdword smBlobSpheres            = TRUE;
 sdword smBlobSpheres            = FALSE;
 #endif
 sdword smBlobSphereRingStep     = SM_BlobSphereRingStep;
-real32 smBlobSphereDim          = SM_BlobSphereDim;
+real32 smBlobSphereBright       = SM_BlobSphereBright;
+/* Tactical overlay icons as world-space billboards rather than screen decals.
+   Same gate as the shells and for the same reason: it changes nothing a mono
+   screen can show, and everything a stereo pair can. */
+#ifdef HW_ENABLE_VR
+sdword smWorldSpaceIcons        = TRUE;
+#else
+sdword smWorldSpaceIcons        = FALSE;
+#endif
 //for selections
 real32 smSelectedFlashSpeed     = SM_SelectedFlashSpeed;
 real32 smFocusScalar            = SM_FocusScalar;
@@ -465,7 +473,8 @@ scriptEntry smTweaks[] =
     makeEntry(smBlobUpdateRate      , scriptSetSdwordCB),
     makeEntry(smBlobSpheres         , scriptSetSdwordCB),
     makeEntry(smBlobSphereRingStep  , scriptSetSdwordCB),
-    makeEntry(smBlobSphereDim       , scriptSetReal32CB),
+    makeEntry(smBlobSphereBright    , scriptSetReal32CB),
+    makeEntry(smWorldSpaceIcons     , scriptSetSdwordCB),
     makeEntry(smSelectedFlashSpeed  , scriptSetReal32CB),
     makeEntry(smFocusScalar         , scriptSetReal32CB),
     makeEntry(smFocusRadius         , scriptSetReal32CB),
@@ -848,6 +857,14 @@ void smBlobDrawClear(Camera *camera, blob *thisBlob, hmatrix *modelView, hmatrix
     {
         real32 x, y;
         real32 radius;
+        /* World position and collision radius, for drawing the icon as a
+           billboard instead of a screen-space line loop. Together with the
+           projected radius above these invert the projection exactly: the
+           world size that lands on a wanted NDC size is
+           collRadius * wantedNDC / radius, with no need to know what
+           sensors.script set smTORadius to. */
+        vector pos;
+        real32 collRadius;
         color c;
         ShipClass shipClass;
     }
@@ -902,6 +919,8 @@ void smBlobDrawClear(Camera *camera, blob *thisBlob, hmatrix *modelView, hmatrix
                             shipTO[nShipTOs].x = ((Ship *)obj)->collInfo.selCircleX;
                             shipTO[nShipTOs].y = ((Ship *)obj)->collInfo.selCircleY;
                             shipTO[nShipTOs].radius = ((Ship *)obj)->collInfo.selCircleRadius;
+                            shipTO[nShipTOs].pos = obj->posinfo.position;
+                            shipTO[nShipTOs].collRadius = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
                             shipTO[nShipTOs].c = colRGB(colRed(c)/TO_IconColorFade, colGreen(c)/TO_IconColorFade, colBlue(c)/TO_IconColorFade);
                             shipTO[nShipTOs].shipClass = ((Ship *)obj)->staticinfo->shipclass;
                             nShipTOs++;
@@ -1011,6 +1030,8 @@ justRenderAsDot:
                                 shipTO[nShipTOs].x = ((Ship *)obj)->collInfo.selCircleX;
                                 shipTO[nShipTOs].y = ((Ship *)obj)->collInfo.selCircleY;
                                 shipTO[nShipTOs].radius = ((Ship *)obj)->collInfo.selCircleRadius;
+                                shipTO[nShipTOs].pos = obj->posinfo.position;
+                                shipTO[nShipTOs].collRadius = obj->staticinfo->staticheader.staticCollInfo.collspheresize;
                                 shipTO[nShipTOs].c = colRGB(colRed(c)/TO_IconColorFade, colGreen(c)/TO_IconColorFade, colBlue(c)/TO_IconColorFade);
                                 shipTO[nShipTOs].shipClass = ((Ship *)obj)->staticinfo->shipclass;
                                 nShipTOs++;
@@ -1205,13 +1226,74 @@ renderDerelictAsDot:
         color col;
         real32 radius;
 
+        /* Tactical overlay icons as billboards, before the 2D mode is set,
+           because they are geometry now rather than screen decals. A screen
+           decal has no position to be seen from, so in a stereo pass it would
+           sit at the same pixel in both eyes and read as pinned to the
+           inside of the player's face. See
+           documentation/vr-sensors-manager-design.md. */
+        if (smWorldSpaceIcons && nShipTOs > 0)
+        {
+            vector forward, right, camUp, worldUp = {0.0f, 0.0f, 1.0f};
+            real32 worldRadius;
+
+            /* Screen-aligned basis. Homeworld's up is +Z, and the sensors
+               camera's declination never quite reaches the pole, but a
+               degenerate cross product here would produce NaN vertices
+               rather than a wrong-looking icon, so it is worth the guard. */
+            vecSub(forward, camera->lookatpoint, camera->eyeposition);
+            vecNormalize(&forward);
+            vecCrossProduct(right, forward, worldUp);
+            if (vecMagnitudeSquared(right) < 1.0e-6f)
+            {
+                right.x = 1.0f; right.y = 0.0f; right.z = 0.0f;
+            }
+            vecNormalize(&right);
+            vecCrossProduct(camUp, right, forward);
+            vecNormalize(&camUp);
+
+            for (index = 0; index < nShipTOs; index++)
+            {
+                icon = toClassIcon[shipTO[index].shipClass];
+                toClassUsed[shipTO[index].shipClass][0] = TRUE;
+
+                if (shipTO[index].radius <= 0.0f)
+                {
+                    continue;
+                }
+                /* The wanted size is still expressed in NDC, because
+                   smTORadius is, and sensors.script owns that value. Scaling
+                   the ship's own collision radius by the ratio of wanted to
+                   actual projected size inverts the projection exactly, at
+                   this object's distance, without reading the matrices. */
+                radius = max(shipTO[index].radius, smTORadius);
+                worldRadius = shipTO[index].collRadius * radius / shipTO[index].radius;
+                col = shipTO[index].c;
+
+                glBegin(GL_LINE_LOOP);
+                for (i = icon->nPoints - 1; i >= 0; i--)
+                {
+                    vector v = shipTO[index].pos;
+                    real32 ix = icon->loc[i].x * worldRadius;
+                    real32 iy = icon->loc[i].y * worldRadius;
+
+                    v.x += right.x * ix + camUp.x * iy;
+                    v.y += right.y * ix + camUp.y * iy;
+                    v.z += right.z * ix + camUp.z * iy;
+                    glColor3ub(colRed(col), colGreen(col), colBlue(col));
+                    glVertex3fv((GLfloat *)&v);
+                }
+                glEnd();
+            }
+        }
+
         primModeSet2();
         for (blurry = smBlurryArray; smBlurryIndex > 0; smBlurryIndex--, blurry++)
         {
             primBlurryPoint22(blurry->x, blurry->y, blurry->c);
         }
 
-        for (index = 0; index < nShipTOs; index++)
+        for (index = 0; !smWorldSpaceIcons && index < nShipTOs; index++)
         {
             icon = toClassIcon[shipTO[index].shipClass];
             toClassUsed[shipTO[index].shipClass][0] = TRUE;
@@ -1939,7 +2021,7 @@ blob *smBlobsDraw(Camera *camera, LinkedList *list, hmatrix *modelView, hmatrix 
                    that list without bound - it is a linear walk, and nothing
                    ever frees it. */
                 smBlobSphereDraw(thisBlob,
-                                 colMultiplyClamped(thisBlob->lastColor, smBlobSphereDim),
+                                 colBlend(colWhite, thisBlob->lastColor, smBlobSphereBright),
                                  smBlobSphereRingStep,
                                  pieCircleSegmentsCompute(thisBlob->screenRadius));
                 nShells++;
