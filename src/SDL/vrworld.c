@@ -822,6 +822,10 @@ bool32 vrWorldCommand(vrworldcommand cmd, sdword arg)
             {
                 return FALSE;
             }
+            /* The desktop clicks before ordering this and says nothing
+               else; halt genuinely is silent there too, so VR matches by
+               doing nothing for it. */
+            soundEvent(NULL, UI_Click);
             clWrapSetKamikaze(&universe.mainCommandLayer,
                               (SelectCommand*)&capable);
             break;
@@ -3698,6 +3702,12 @@ void vrWorldDrawOverlays(void)
         vector shadow = vrw.moveDestination;
         real32 ring = selAverageSize > 0.0f ? selAverageSize : 100.0f;
 
+        /* Recompute where the fleet is, every frame. selCentrePoint is a
+           global that only moves when somebody calls this, and the last
+           caller was whatever began the order - so a selection that is under
+           way leaves the line trailing back to where it set off from, drawn
+           to a point in empty space the ships have long since passed. */
+        selCentrePointCompute();
         shadow.z = selCentrePoint.z;
         primCircleOutline3(&shadow, ring * 2.0f, 32, 0, moveColor, Z_AXIS);
         primLine3(&shadow, &vrw.moveDestination, moveColor);
