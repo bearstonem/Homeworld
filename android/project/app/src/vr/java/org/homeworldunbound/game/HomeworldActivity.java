@@ -229,6 +229,12 @@ public class HomeworldActivity extends SDLActivity {
 
     private static final long RELAUNCH_DELAY_MS = 400;
 
+    /**
+     * Demo is running and the player has never been asked about file access.
+     * Acted on when they quit, not while they play - see onDestroy.
+     */
+    private boolean askOnTheWayOut = false;
+
     @Override
     protected void onDestroy() {
         /* Ask for All files access on the way out.
@@ -247,6 +253,10 @@ public class HomeworldActivity extends SDLActivity {
          */
         boolean quitting = isFinishing();
 
+        if (askOnTheWayOut && quitting) {
+            askOnTheWayOut = false;
+            requestAllFilesAccessOnce();
+        }
         if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
         }
@@ -358,18 +368,7 @@ public class HomeworldActivity extends SDLActivity {
                    game gets it from install.py, which grants it over adb, or
                    by hand in the headset's own settings - and the release
                    notes say so. */
-                /* Asked here, before the engine starts, so a player who owns
-                   the game is told how to reach it at the moment it matters
-                   rather than on the way out.
-
-                   This placement hung the app once: the Settings panel takes
-                   focus, SDL will not start the game thread without it, and
-                   focus did not come back. That was on a build where a warm
-                   process also broke the engine outright, so the two failures
-                   were not separable - retrying it now that quitting exits
-                   the process. If it hangs again the panel really is the
-                   cause and this moves back to onDestroy. */
-                requestAllFilesAccessOnce();
+                askOnTheWayOut = true;
             }
         }
 
