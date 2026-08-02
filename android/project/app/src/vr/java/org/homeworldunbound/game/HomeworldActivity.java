@@ -196,8 +196,12 @@ public class HomeworldActivity extends SDLActivity {
             }
             /* Long enough that this process is gone before the new one asks
                for a library, short enough not to read as a hang. */
-            alarms.set(AlarmManager.RTC,
-                       System.currentTimeMillis() + RELAUNCH_DELAY_MS, pending);
+            /* setExact, not set: set has been inexact since API 19 and is
+               batched with whatever else the system has pending, which turned
+               a 400ms request into nearly seven seconds - long enough to read
+               as the hang this is supposed to remove. */
+            alarms.setExact(AlarmManager.RTC,
+                            System.currentTimeMillis() + RELAUNCH_DELAY_MS, pending);
             Log.i(TAG, "relaunch scheduled in " + RELAUNCH_DELAY_MS + " ms");
         } catch (Exception e) {
             // Never let the restart path be the thing that breaks a launch:
