@@ -251,7 +251,9 @@ public class HomeworldActivity extends SDLActivity {
          * their library. The campaign-change restart never gets here: it
          * exits the process outright before super.onCreate.
          */
-        if (askOnTheWayOut && isFinishing()) {
+        boolean quitting = isFinishing();
+
+        if (askOnTheWayOut && quitting) {
             askOnTheWayOut = false;
             requestAllFilesAccessOnce();
         }
@@ -260,6 +262,24 @@ public class HomeworldActivity extends SDLActivity {
         }
         multicastLock = null;
         super.onDestroy();
+
+        /* Take the process with us.
+         *
+         * The engine cannot run twice in one process and Android reuses
+         * processes freely, so the next launch would start SDL_main over
+         * globals this run left behind and die. Detecting that afterwards and
+         * relaunching was tried and cannot be relied on: it needs an alarm to
+         * outlive the exit, exact alarms require a permission a game should
+         * not ask for, and the inexact ones are batched - observed firing
+         * after 6.7 seconds once and never at all the next time.
+         *
+         * Leaving nothing to reuse needs no scheduling and cannot be deferred.
+         * The next launch is always cold, which is the only state the engine
+         * starts correctly from. */
+        if (quitting) {
+            Log.i(TAG, "quitting - exiting the process so the next launch is clean");
+            System.exit(0);
+        }
     }
 
     private void acquireMulticastLock() {
