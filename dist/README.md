@@ -1,6 +1,6 @@
 # Prebuilt APK
 
-Built from `213fa04` plus the working tree, on 2026-08-02.
+Built from `c4c3efa` plus the working tree, on 2026-08-02.
 
 ## One APK, both campaigns
 
@@ -34,7 +34,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-266d6d7083916f4ffac07a4af3628c7e  homeworld-unbound-vr.apk  99M
+14a99d013dc3cab22448801dc2f8f8fc  homeworld-unbound-vr.apk  99M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -53,6 +53,22 @@ Installing the APK on its own does not, and leaves you with two entries in
 your library under the same name, one of which has all your data.
 
 ## What changed since the last build
+
+- **Orders make a sound again.** The VR paths call `clWrap*` directly rather
+  than going through the right-click menu callbacks, deliberately - `mrKeyPress`
+  runs everything through `kbCheckBindings` and an unbound key vanishes without
+  a word - and the feedback the mouse paths pick up on the way was lost with it.
+  Moves get the pilots acknowledging, recalling a hotkey group clicks and names
+  it, kamikaze clicks. Halt stays silent because the desktop is silent there
+  too. `UI_MoveChimes` looked like the move confirmation and is not: it is the
+  movement GUI's proximity click while a destination is being placed.
+- **The move line starts where the fleet is.** It ran back to wherever the
+  ships had been when the order began, which for a fleet already under way is
+  a point in empty space. `selCentrePoint` is a global that only moves when
+  something recomputes it, and nothing was.
+- **The controls card knows about the sensor view.** It still described it as a
+  screen to open, which is what every other entry on that card is and exactly
+  the wrong idea.
 
 - **The engine cannot run twice in one process, and Android reuses processes.**
   Quit the game and launch it again and the second run started `SDL_main` over

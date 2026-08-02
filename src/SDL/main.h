@@ -43,7 +43,7 @@ void mainCrashHandlerKeep(void);
 /* The VR port's own version, shown next to the engine's. Bump this with the
    release tag (unbound-0.N); minorBuildVersion below tracks the engine this
    is built on and moves with upstream instead. */
-#define HW_UNBOUND_VERSION          "0.13"
+#define HW_UNBOUND_VERSION          "0.14"
 #else
 #define HW_WINDOW_TITLE             "HomeworldSDL"
 #endif
