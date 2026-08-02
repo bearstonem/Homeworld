@@ -166,6 +166,15 @@
 
 #define SM_BlobRadiusMax            5.0f
 
+/* Blob shells. The map's spheres have always been drawn as flat discs -
+   primCircleSolid2 at a projected centre - which is all a mono screen can
+   show, though the manual has called them spheres since 1999. Drawn instead
+   as great circles they are real geometry in world space, which is what the
+   VR eye passes need and what gives even the flat map a depth cue it never
+   had. See documentation/vr-sensors-manager-design.md. */
+#define SM_BlobSphereRingStep       60          //degrees between great circles
+#define SM_BlobSphereDim            0.55f       //shell brightness against the disc
+
 #define SM_FOWBlobUpdateTime        0.75        //how long the FOW sub-blobs last
 
 /*=============================================================================
@@ -208,6 +217,10 @@ extern real32 smUniverseSizeZ;
 extern real32 smClosestDistance;
 
 extern sdword  smFuzzyBlobs;
+
+extern sdword smBlobSpheres;
+extern sdword smBlobSphereRingStep;
+extern real32 smBlobSphereDim;
 
 extern sdword smTacticalOverlay;
 extern bool32 smFocusOnMothershipOnClose;

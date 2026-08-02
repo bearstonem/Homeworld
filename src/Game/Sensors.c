@@ -74,6 +74,11 @@
 //falko's fault...not mine..long story
 void toFieldSphereDraw(ShipPtr ship,real32 radius, real32 scale, color passedColour);
 
+/* Defined below smBlobsDraw but called from inside it. The build sets
+   -Wno-implicit-function-declaration, so without this the call would compile
+   silently against a guessed signature. */
+void smBlobSphereDraw(blob *thisBlob, color c, sdword ringStep, sdword nSegments);
+
 void (*smHoldLeft)(void);
 void (*smHoldRight)(void);
 
@@ -361,6 +366,17 @@ GLboolean smBigPoints;
 sdword smBlobUpdateRate         = SM_BlobUpdateRate;
 real32 smClosestMargin          = SM_ClosestMargin;
 real32 smFarthestMargin         = SM_FarthestMargin;
+/* Shells are drawn on top of the discs rather than instead of them: on a flat
+   panel the disc still carries the soft volume read and both of the
+   brightness gradients, and dropping it is a decision for when the per-eye
+   pass exists. Off outside VR, so the desktop map is unchanged. */
+#ifdef HW_ENABLE_VR
+sdword smBlobSpheres            = TRUE;
+#else
+sdword smBlobSpheres            = FALSE;
+#endif
+sdword smBlobSphereRingStep     = SM_BlobSphereRingStep;
+real32 smBlobSphereDim          = SM_BlobSphereDim;
 //for selections
 real32 smSelectedFlashSpeed     = SM_SelectedFlashSpeed;
 real32 smFocusScalar            = SM_FocusScalar;
@@ -447,6 +463,9 @@ scriptEntry smTweaks[] =
 {
     //sensors manager tweaks
     makeEntry(smBlobUpdateRate      , scriptSetSdwordCB),
+    makeEntry(smBlobSpheres         , scriptSetSdwordCB),
+    makeEntry(smBlobSphereRingStep  , scriptSetSdwordCB),
+    makeEntry(smBlobSphereDim       , scriptSetReal32CB),
     makeEntry(smSelectedFlashSpeed  , scriptSetReal32CB),
     makeEntry(smFocusScalar         , scriptSetReal32CB),
     makeEntry(smFocusRadius         , scriptSetReal32CB),
@@ -1888,6 +1907,59 @@ blob *smBlobsDraw(Camera *camera, LinkedList *list, hmatrix *modelView, hmatrix 
     primModeClear2();
     rndLightingEnable(FALSE);
     rndTextureEnable(FALSE);
+
+    /* Blob shells. Drawn here, in the 3D section, because the mode has just
+       been cleared - putting them in the 2D pass above would mean a
+       primModeClear2/primModeSet2 pair per blob. The visibility test is the
+       one the discs use, and lastColor is what that pass left behind, so the
+       height and depth gradients carry over rather than being recomputed.
+
+       No SM_BlobRadiusMax cull: that guard stops a solid disc washing out the
+       screen once the camera is close enough for one to fill it, and a shell
+       has no such problem. It is also exactly the blob the player is standing
+       inside, which is the one worth keeping. */
+    if (smBlobSpheres)
+    {
+        static sdword shellReportFrame = 0;
+        sdword nShells = 0;
+
+        for (blobIndex = 0; blobIndex < smNumberBlobsSorted; blobIndex++)
+        {
+            thisBlob = smBlobSortList[blobIndex];
+            if (thisBlob->screenRadius <= 0.0f)
+            {
+                continue;                                   //behind the camera
+            }
+            if ((thisBlob->flags & (BTF_Explored | BTF_ProbeDroid)) ||
+                (sensorLevel == 2 && bitTest(thisBlob->flags, BTF_UncloakedEnemies)))
+            {
+                /* pieCircleSegmentsCompute returns one of seven values, which
+                   keeps the unit-circle cache inside primCircleOutline3 to
+                   seven per axis. Deriving a segment count freely would grow
+                   that list without bound - it is a linear walk, and nothing
+                   ever frees it. */
+                smBlobSphereDraw(thisBlob,
+                                 colMultiplyClamped(thisBlob->lastColor, smBlobSphereDim),
+                                 smBlobSphereRingStep,
+                                 pieCircleSegmentsCompute(thisBlob->screenRadius));
+                nShells++;
+            }
+        }
+
+        /* Each circle is one draw call under the GLES immediate-mode shim in
+           glinc.h, and each shell is several circles, per eye. Nobody knows
+           what that costs until it is on a headset with a real fleet in
+           front of it, so report the counts rather than guess at them. */
+        if ((shellReportFrame++ % 120) == 0)
+        {
+            dbgMessagef("SMSHELL blobs=%d shells=%d step=%d calls/eye=%d",
+                        (int)smNumberBlobsSorted, (int)nShells,
+                        (int)smBlobSphereRingStep,
+                        (int)(nShells * (2 * (180 / max(smBlobSphereRingStep, 1))
+                                         - (((90 % max(smBlobSphereRingStep, 1)) == 0) ? 1 : 0))));
+        }
+    }
+
     //draw the world plane
     //!!! always where the camera is pointing !!!
     if (smCentreWorldPlane)
@@ -2292,42 +2364,72 @@ void smSensorsCloseForGood(void)
     btgSetColourMultiplier(1.0f);                           //make sure we always come out of the SM with the BTG in good order
 }
 
-void smBlobSphereDraw(blob *closestBlob)
-{
-    udword angle = 0;
+/*-----------------------------------------------------------------------------
+    Name        : smBlobSphereDraw
+    Description : Draw a blob as a wireframe globe in world space.
 
+                  Relic's, generalised. It was written for the single blob
+                  under the movement cursor and hard-coded what that needed -
+                  always white, always ten circles, always eight segments.
+                  Every explored blob is now drawn as one too, which needs a
+                  colour, a coarser shell and a segment count that falls off
+                  with apparent size.
+    Inputs      : thisBlob - the blob to draw
+                  c - colour
+                  ringStep - degrees between great circles. 40 gives Relic's
+                      ten, 90 gives four.
+                  nSegments - polygons per circle
+    Outputs     : geometry, in whatever space the modelview currently holds
+    Return      : void
+----------------------------------------------------------------------------*/
+void smBlobSphereDraw(blob *thisBlob, color c, sdword ringStep, sdword nSegments)
+{
+    sdword angle;
+    bool32 skipDuplicate;
     vector origin = {0.0, 0.0, 0.0};
     hmatrix rotmat;
-    while(angle < 180)
+
+    if (ringStep < 1)
+    {
+        ringStep = 180;                                     //one circle per family
+    }
+
+    /* An X_AXIS circle turned 90 degrees about Z and a Z_AXIS circle turned
+       90 degrees about X are the same great circle - both end up normal to
+       Y - so one of the two is a wasted draw call whenever the step divides
+       90. Relic's 40 never lands on it; a round number like 90 or 30 does,
+       and those are exactly what anyone tuning this would try first. */
+    skipDuplicate = ((90 % ringStep) == 0);
+
+    for (angle = 0; angle < 180; angle += ringStep)
     {
         hmatMakeRotAboutZ(&rotmat,cos(DEG_TO_RAD(angle)),sin(DEG_TO_RAD(angle)));
-         hmatPutVectIntoHMatrixCol4(closestBlob->centre, rotmat);
+        hmatPutVectIntoHMatrixCol4(thisBlob->centre, rotmat);
 
         glPushMatrix();
         glMultMatrixf((GLfloat *)&rotmat);
 
-        primCircleOutline3(&origin, closestBlob->radius, 8, 0, colWhite, X_AXIS);
+        primCircleOutline3(&origin, thisBlob->radius, nSegments, 0, c, X_AXIS);
 
         glPopMatrix();
-        angle+=40;
     }
 
-    angle = 0;
-    while(angle < 180)
-     {
-         hmatMakeRotAboutX(&rotmat,cos(DEG_TO_RAD(angle)),sin(DEG_TO_RAD(angle)));
-         hmatPutVectIntoHMatrixCol4(closestBlob->centre, rotmat);
+    for (angle = 0; angle < 180; angle += ringStep)
+    {
+        if (skipDuplicate && angle == 90)
+        {
+            continue;
+        }
+        hmatMakeRotAboutX(&rotmat,cos(DEG_TO_RAD(angle)),sin(DEG_TO_RAD(angle)));
+        hmatPutVectIntoHMatrixCol4(thisBlob->centre, rotmat);
 
-         glPushMatrix();
-         glMultMatrixf((GLfloat *)&rotmat);
+        glPushMatrix();
+        glMultMatrixf((GLfloat *)&rotmat);
 
-         primCircleOutline3(&origin, closestBlob->radius, 8, 0, colWhite, Z_AXIS);
+        primCircleOutline3(&origin, thisBlob->radius, nSegments, 0, c, Z_AXIS);
 
-         glPopMatrix();
-         angle+=40;
-     }
-
-
+        glPopMatrix();
+    }
 }
 
 /*-----------------------------------------------------------------------------
@@ -2425,7 +2527,7 @@ void smAllBlobsPiePlateDraw(real32 distance)
             tempreal = fsqrt(vecMagnitudeSquared(tempvec));
             if(tempreal < probeBlob->radius)
             {
-                smBlobSphereDraw(closestBlob);
+                smBlobSphereDraw(closestBlob, colWhite, 40, 8);  //as it always was
             }
             else
             {
