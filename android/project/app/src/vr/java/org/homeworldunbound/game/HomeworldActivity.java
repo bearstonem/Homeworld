@@ -212,31 +212,6 @@ public class HomeworldActivity extends SDLActivity {
 
     private static final long RELAUNCH_DELAY_MS = 400;
 
-    /** Set when the demo is being run and the player might own the game. */
-    private boolean wantAllFilesAccess = false;
-
-    /**
-     * Ask for All files access only once the game is up and drawing.
-     *
-     * Asking from onCreate hung every genuinely fresh install. The request
-     * opens a system Settings panel, that panel takes focus, and SDL will not
-     * start the game thread until the activity has both a surface and focus -
-     * so the game never ran, never drew, and the headset sat on its loading
-     * environment. Nothing came back even after the permission was granted,
-     * because focus never returned to an app that had never presented a frame.
-     *
-     * From onResume the game is already running and drawing, so losing focus
-     * to the panel is an ordinary, visible, recoverable thing.
-     */
-    @Override
-    protected void onResume() {
-        super.onResume();
-        if (wantAllFilesAccess) {
-            wantAllFilesAccess = false;
-            requestAllFilesAccessOnce();
-        }
-    }
-
     @Override
     protected void onDestroy() {
         if (multicastLock != null && multicastLock.isHeld()) {
@@ -316,10 +291,25 @@ public class HomeworldActivity extends SDLActivity {
             } else {
                 Log.i(TAG, "no " + FULL_BIG + " anywhere reachable: demo campaign");
                 unpackDemoAssets(files);
-                // Deliberately not asking for the permission here - see
-                // onResume. Asking from onCreate hangs the app before it has
-                // drawn a single frame.
-                wantAllFilesAccess = true;
+                /* Deliberately not asking for All files access at all.
+
+                   The request opens a system Settings panel. From onCreate
+                   that hung the app outright: the panel takes focus, SDL will
+                   not start the game thread without focus, and focus never
+                   returned to something that had never drawn a frame. Moving
+                   it to onResume fixed the hang - the game runs and draws -
+                   but the panel still takes focus and Quest does not reliably
+                   give it back, so the game was left drawing and unable to be
+                   interacted with. A prompt that costs the player the use of
+                   the game is worse than no prompt.
+
+                   The demo does not need the permission. Someone who owns the
+                   game gets it from install.py, which grants it over adb, or
+                   by hand in the headset's own settings - and the release
+                   notes say so. */
+                Log.i(TAG, "demo campaign; All files access not requested "
+                         + "(grant it in headset settings, or run install.py, "
+                         + "to play a copy of the game you own)");
             }
         }
 
