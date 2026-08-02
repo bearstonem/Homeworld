@@ -1,6 +1,8 @@
 # The Sensors Manager in VR
 
-A proposal, written 2026-08-01 against `bd947ab`. Nothing here is in progress.
+Written 2026-08-01 against `bd947ab` as a proposal. Items 1-3 landed on
+2026-08-02; see "Progress" at the end for what was built, what it cost, and
+what the work turned up. Items 4-6 are not started.
 
 The Sensors Manager currently rides the left wrist as a 46cm quad, like every
 other full-screen manager. That is the correct conservative port and it works.
@@ -171,11 +173,13 @@ into it. Mostly falls out of the existing grip handling.
 
 ## Work, in order
 
-1. `smBlobsDraw` — a 3D shell primitive in place of `primCircleSolid2`, with the
-   existing 2D path kept behind the panel branch.
-2. Tactical overlay icons — billboard `primLineLoopStart2` into world space.
-3. A `vrWorldSensorsRay` picker: ray-vs-blob, then ray-vs-ship within the hit
-   blob. Mirrors the existing hover path in `vrWorldSetRay`.
+1. **Done.** `smBlobsDraw` — a 3D shell primitive in place of
+   `primCircleSolid2`, with the existing 2D path kept behind the panel branch.
+2. **Done.** Tactical overlay icons — billboard `primLineLoopStart2` into world
+   space.
+3. **Done, unverified.** A `vrWorldSensorsRay` picker: ray-vs-blob, then
+   ray-vs-ship within the hit blob. Mirrors the existing hover path in
+   `vrWorldSetRay`.
 4. Un-gate the world verbs when `vrWorldSensorsActive()`. The `!managerActive`
    tests at `vr.c:3130,3234,3279,3290,3394,3768` need to mean "not a *panel*
    manager" rather than "not any manager".
@@ -215,6 +219,98 @@ close that cannot be lost.
   simulation state is touched and no packet changes. Given how much of the
   port's fragility lives in networking, that is worth stating plainly — this is
   a large feature that cannot desync anything.
+
+## Progress, 2026-08-02
+
+Items 1-3, on device against a first-mission fleet.
+
+**Cost is not the constraint.** `SMSHELL` reports blob count, shells drawn and
+draw calls per eye every 120 frames: `blobs=6 shells=3 step=60 calls/eye=18`,
+steady. Eighteen calls is noise, so the ring step stays at 60 and there is room
+to make the shells denser rather than thinner. That is a small fleet; the line
+is still there to read on a big one.
+
+**Relic had already written the sphere.** `smBlobSphereDraw` existed — a
+ten-circle globe, hard-coded white, drawn for the one blob under the movement
+cursor. It was generalised to take a colour, a ring step and a segment count
+rather than adding a second sphere beside it, and the movement-cursor call
+passes the values it always used. It also settles the aesthetic question:
+a wireframe globe is what Relic thought a blob looked like, they just never
+drew more than one at a time.
+
+Two things constrain retuning it:
+
+- The segment count must come from `pieCircleSegmentsCompute`, which returns
+  one of seven values. `primCircleOutline3` caches a unit circle per
+  (slice count, axis) in a linear list that is never freed, so a freely derived
+  count grows that list without bound and lengthens the walk on every call.
+- A ring step that divides 90 draws one circle twice: an `X_AXIS` circle turned
+  90° about Z and a `Z_AXIS` circle turned 90° about X are the same great
+  circle. Relic's 40 never lands there; 90, 45 and 30 all do. The duplicate is
+  skipped explicitly so this cannot be reintroduced by retuning.
+
+**Three defects, all found by looking at the thing.** Worth recording because
+only the first announced itself:
+
+- `colMultiplyClamped` clamps its factor at 1.0 and then computes
+  `(c * 255) >> 8`, so it can only darken — at the top of its range it still
+  takes half a percent off. It is not a brightness control. Blending toward
+  white is.
+- Moving the overlay icons out of `primModeSet2` took away the depth-test-off
+  that the 2D path had been giving them for free, so they z-fought the mesh
+  they mark and vanished behind blob shells. An overlay is an overlay.
+- `toVertexAdd` bakes a 4:3 term into every icon vertex's y
+  (`TO_VertexScanFactorY`) that x does not get, because the 2D path writes NDC
+  directly and NDC y and x do not cover the same number of pixels. A billboard
+  needs none of it: equal offsets along the camera's right and up project to
+  equal pixel distances, since the projection's own `P11/P00` is that ratio.
+  Carried through, it stretched every icon vertically by a third. Undoing it
+  also makes the glyphs correct at any aspect, which the 2D path is not.
+
+The last two hid behind class glyphs that are legitimately tall and narrow;
+neither was visible in a screenshot, and both fell out of checking the
+arithmetic against what the old path did.
+
+**The picker is written and cannot yet be verified.** `vrwSensorsPick` walks
+`universe.collBlobList` with the same visibility test the shells use, has no
+aim assist (a blob is already a sphere thousands of units across), and prefers
+a blob the hand is standing in over any it merely points through. Ships resolve
+only from inside a blob — from across the map a blob is a region, and picking
+one of the ships stacked along the line of sight would be a guess the player
+cannot see well enough to correct.
+
+What it cannot do yet is mean anything. The ray reaching it has been
+transformed through the main view's camera, and a full-screen manager freezes
+that camera — `vrWorldGameCameraAge()` goes non-zero precisely because the mono
+pass stops. Item 5 is what gives the map a presentation with its own camera,
+and until then the picker aims through a stale transform at geometry that only
+exists on a wrist panel.
+
+**Open: does panel selection on the map work at all?** Reported on device as
+"no way to select the blobs or ships". The code path looks complete from both
+ends — `vr.c` presses the left button on a panel hit, keeps warping the pointer
+to the tracked hand for as long as the gesture is locked, and releases; and
+`smViewportProcess` turns that into `smSelectHold` for a band box and
+`selSelectionClick` / `selRectDragAnybodyAnywhere` on release. A click does not
+close the map.
+
+The map's own FE buttons definitely do work: the tactical overlay has been
+toggled from the panel. So this is about the viewport region
+(`smViewportRegion`, `SM_ViewportFilter`) rather than about panel input in
+general. One suspect is `mouseClipToRect(&smViewRectangle)` on `RPE_PressLeft`
+against `SDL_WarpMouseInWindow` running every frame from the VR side.
+
+Worth ten minutes before item 4 only to rule out the viewport region receiving
+no input at all — because the map's *own* controls live there too, and unlike
+selection those cannot be replaced by world verbs. If it is only selection,
+leave it: items 4 and 5 replace panel selection with the picker and the ray,
+and any fix here is thrown away.
+
+**The desktop build cannot catch errors in `vrworld.c`.** The whole file is
+inside `HW_ENABLE_VR`, so on desktop it compiles to nothing: a missing
+`Blobs.h` passed `ninja -C build` clean and failed both Quest builds. Any
+change to a VR-only file has to be built for the Quest before it means
+anything, which is a concrete argument for item 4 of the improvement backlog.
 
 ## Sources
 
