@@ -1,6 +1,6 @@
 # Prebuilt APK
 
-Built from `9e853f5` plus the working tree, on 2026-08-02.
+Built from `9dbde51` plus the working tree, on 2026-08-02.
 
 ## One APK, both campaigns
 
@@ -34,7 +34,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-71e3062ff0303944e02192b2b3a24280  homeworld-unbound-vr.apk  108M
+6c5fa493ca6b9d47891e74166f0d0112  homeworld-unbound-vr.apk  99M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -53,6 +53,13 @@ Installing the APK on its own does not, and leaves you with two entries in
 your library under the same name, one of which has all your data.
 
 ## What changed since the last build
+
+- **Adding your game data after playing the demo no longer needs two launches.**
+  The first one appeared to hang in the headset and was in fact dying: the
+  demo/full choice is compiled into the engine and fixed once a process has
+  loaded one, so a warm restart ran the demo engine against full-game data and
+  gave up looking for a file that was not there. It exits and reloads properly
+  now instead.
 
 - **The Sensors Manager is a place now, not a screen.** It used to be the map
   drawn flat on the panel at your wrist, which is the one screen in Homeworld
