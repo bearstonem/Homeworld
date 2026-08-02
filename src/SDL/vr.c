@@ -1789,8 +1789,22 @@ static void vrCardDrawControls(vrcard const* card)
         {"Trigger twice",        "all of that type"},
         {"Sweep empty space",    "select a group"},
         {"Push stick up/down",   "zoom in and out"},
-        {"Click stick",          "open Sensors"},
+        {"Click stick",          "sensor view on/off"},
         {"Grip + stick sideways","step through fleet"},
+        {"",                     NULL},
+        /* The sensor view is a mode, not a screen, and nothing else on this
+           card is. Without saying so the obvious guess is that it is another
+           panel to be dismissed before playing - when in fact every order
+           still works inside it, which is the whole point of it. */
+        {"SENSOR VIEW",          NULL},
+        {"Right click stick",    "enter and leave"},
+        {"pulls back to",        "the whole battle"},
+        {"blue spheres are",     "what you can see"},
+        {"green, yellow, red",   "yours, ally, enemy"},
+        {"point at a sphere",    "it lights up"},
+        {"every order still works", "in here"},
+        {"Push stick up/down",   "in on your selection"},
+        {"leaving takes you",    "to what you picked"},
         {"",                     NULL},
         {"HOLD B TO ATTACK",     NULL},
         {"aim, then let go",     "attack that ship"},
