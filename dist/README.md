@@ -1,6 +1,6 @@
 # Prebuilt APK
 
-Built from `9dbde51` plus the working tree, on 2026-08-02.
+Built from `213fa04` plus the working tree, on 2026-08-02.
 
 ## One APK, both campaigns
 
@@ -34,7 +34,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-6c5fa493ca6b9d47891e74166f0d0112  homeworld-unbound-vr.apk  99M
+266d6d7083916f4ffac07a4af3628c7e  homeworld-unbound-vr.apk  99M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -53,6 +53,22 @@ Installing the APK on its own does not, and leaves you with two entries in
 your library under the same name, one of which has all your data.
 
 ## What changed since the last build
+
+- **The engine cannot run twice in one process, and Android reuses processes.**
+  Quit the game and launch it again and the second run started `SDL_main` over
+  globals the first had left behind, then died - a doubled path separator in
+  `files//SoundFX/UIEvents.lut` being one of the ways. A third launch worked,
+  because the crash had cleared the process out. The game now exits its process
+  on quit, so every launch is cold, which is the only state the engine starts
+  from correctly. This had been broken in every release and was hidden by the
+  crash tidying up after itself.
+- **A genuinely fresh install hung on its first launch.** Asking for All files
+  access from `onCreate` opens a system Settings panel; the panel takes focus,
+  SDL will not start the game thread without focus, and focus never returned to
+  something that had never drawn a frame. Granting the permission did not
+  release it. The request now happens when the player quits, by which point
+  there is no running game to take focus from. Every earlier test inherited a
+  uid-level grant from a previous install and so never saw the panel at all.
 
 - **Adding your game data after playing the demo no longer needs two launches.**
   The first one appeared to hang in the headset and was in fact dying: the
