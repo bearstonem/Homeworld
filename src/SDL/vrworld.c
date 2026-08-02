@@ -2877,6 +2877,26 @@ bool32 vrWorldToggleSensors(void)
     }
     else
     {
+        /* Leave the view where the player was working. The map has always
+           behaved this way - clicking a blob closes it and takes the camera
+           there - and having pulled back to pick something out, coming down
+           anywhere else would throw away the only thing the trip was for.
+           Falls back to whatever the ray was on when nothing is selected. */
+        if (selSelected.numShips > 0)
+        {
+            vrWorldCameraFocusSelection();
+        }
+        else
+        {
+            blob* hovered = vrWorldSensorsHoverBlob();
+
+            if (hovered != NULL && hovered->blobShips != NULL
+                && hovered->blobShips->numShips > 0)
+            {
+                ccFocus(&universe.mainCameraCommand,
+                        (FocusCommand*)hovered->blobShips);
+            }
+        }
         soundEvent(NULL, UI_SensorsExit);
         soundEvent(NULL, UI_SoundOfSpace);
     }
