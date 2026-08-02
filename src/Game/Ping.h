@@ -106,6 +106,11 @@ ping;
     Data:
 =============================================================================*/
 extern SpaceObj *pingDyingObject;               //object that is dying and must be evaluated
+/* pingListDraw is screen-space - selCircleComputeGeneral into primGLToScreen -
+   so it cannot be used from a stereo eye pass, where a screen decal lands on
+   the same pixel in both eyes. The VR sensor view walks the list itself and
+   draws each ping as world geometry. */
+extern LinkedList pingList;                     //list of pings
 
 /*=============================================================================
     Functions:

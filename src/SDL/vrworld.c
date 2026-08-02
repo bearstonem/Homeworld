@@ -43,6 +43,7 @@
 #include "InfoOverlay.h"
 #include "Matrix.h"
 #include "ObjTypes.h"
+#include "Ping.h"
 #include "prim2d.h"
 #include "prim3d.h"
 #include "render.h"
@@ -140,6 +141,8 @@ extern bool32 gameIsRunning;                                //Globals.c
 /* Camera range in the sensor view, as multiples of the span */
 #define VRW_SENSOR_ZOOM_MIN      0.06f
 #define VRW_SENSOR_ZOOM_MAX      3.0f
+#define VRW_SENSOR_PING_MIN      2.2f    /* multiples of a class glyph */
+#define VRW_SENSOR_PING_PULSE    1.35f
 
 typedef struct {
     bool32  valid;
@@ -3292,6 +3295,66 @@ void vrWorldDrawOverlays(void)
             glEnd();
         }
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        /* Pings. These are how the game points at things - the objectives
+           the first mission tells you to destroy, where a battle has broken
+           out, what a Proximity Sensor has found. The map draws them and the
+           overlay did not, so mission targets simply were not on it.
+
+           Drawn here rather than by pingListDraw because that projects to
+           screen coordinates, which in a stereo pass puts the marker at the
+           same pixel in both eyes. Ring in the camera-facing plane, at the
+           ping's own colour and size, following its owner when it has one. */
+        {
+            Node* pnode;
+
+            for (pnode = pingList.head; pnode != NULL; pnode = pnode->next)
+            {
+                ping* thisPing = (ping*)listGetStructOfNode(pnode);
+                vector centre = thisPing->centre;
+                real32 r = max(thisPing->size, thisPing->minSize);
+                sdword seg;
+
+                if (thisPing->owner != NULL)
+                {
+                    if (thisPing->owner->flags & SOF_Dead)
+                    {
+                        continue;
+                    }
+                    centre = thisPing->owner->posinfo.position;
+                }
+                /* Never smaller than a class glyph. A ping sized in metres
+                   against a battlespace measured in tens of thousands would
+                   otherwise be a point nobody could find, which is the exact
+                   failure being fixed. */
+                if (r < glyphSize * VRW_SENSOR_PING_MIN)
+                {
+                    r = glyphSize * VRW_SENSOR_PING_MIN;
+                }
+                if (flashOn)
+                {
+                    r *= VRW_SENSOR_PING_PULSE;
+                }
+
+                glBegin(GL_LINE_LOOP);
+                for (seg = 0; seg < VRW_SENSOR_GLOW_SEGMENTS; seg++)
+                {
+                    real32 a = (real32)seg * (2.0f * PI)
+                             / (real32)VRW_SENSOR_GLOW_SEGMENTS;
+                    real32 ca = (real32)cos((double)a) * r;
+                    real32 sa = (real32)sin((double)a) * r;
+                    vector pv;
+
+                    pv.x = centre.x + camRight.x * ca + camUp.x * sa;
+                    pv.y = centre.y + camRight.y * ca + camUp.y * sa;
+                    pv.z = centre.z + camRight.z * ca + camUp.z * sa;
+                    glColor3ub(colRed(thisPing->c), colGreen(thisPing->c),
+                               colBlue(thisPing->c));
+                    glVertex3fv((GLfloat const*)&pv);
+                }
+                glEnd();
+            }
+        }
 
         /* Selection, drawn last so it sits over the fleet. A ring at glyph
            scale rather than at the ship's hull, because the point of the
