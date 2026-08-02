@@ -212,6 +212,31 @@ public class HomeworldActivity extends SDLActivity {
 
     private static final long RELAUNCH_DELAY_MS = 400;
 
+    /** Set when the demo is being run and the player might own the game. */
+    private boolean wantAllFilesAccess = false;
+
+    /**
+     * Ask for All files access only once the game is up and drawing.
+     *
+     * Asking from onCreate hung every genuinely fresh install. The request
+     * opens a system Settings panel, that panel takes focus, and SDL will not
+     * start the game thread until the activity has both a surface and focus -
+     * so the game never ran, never drew, and the headset sat on its loading
+     * environment. Nothing came back even after the permission was granted,
+     * because focus never returned to an app that had never presented a frame.
+     *
+     * From onResume the game is already running and drawing, so losing focus
+     * to the panel is an ordinary, visible, recoverable thing.
+     */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (wantAllFilesAccess) {
+            wantAllFilesAccess = false;
+            requestAllFilesAccessOnce();
+        }
+    }
+
     @Override
     protected void onDestroy() {
         if (multicastLock != null && multicastLock.isHeld()) {
@@ -291,7 +316,10 @@ public class HomeworldActivity extends SDLActivity {
             } else {
                 Log.i(TAG, "no " + FULL_BIG + " anywhere reachable: demo campaign");
                 unpackDemoAssets(files);
-                requestAllFilesAccessOnce();
+                // Deliberately not asking for the permission here - see
+                // onResume. Asking from onCreate hangs the app before it has
+                // drawn a single frame.
+                wantAllFilesAccess = true;
             }
         }
 
