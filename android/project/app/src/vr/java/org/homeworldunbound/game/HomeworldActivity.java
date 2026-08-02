@@ -1,5 +1,7 @@
 package org.homeworldunbound.game;
 
+import android.app.AlarmManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -148,6 +150,7 @@ public class HomeworldActivity extends SDLActivity {
             Log.i(TAG, "campaign changed (was " + (loadedFullGame ? "full" : "demo")
                      + ", now " + (fullGame ? "full" : "demo")
                      + ") - restarting so the right engine is loaded");
+            scheduleRelaunch();
             finishAffinity();
             System.exit(0);
             return;
@@ -157,6 +160,53 @@ public class HomeworldActivity extends SDLActivity {
         acquireMulticastLock();
         super.onCreate(savedInstanceState);
     }
+
+    /**
+     * Come back by ourselves after exiting for a campaign change.
+     *
+     * Without this the restart is correct and looks exactly like the crash it
+     * replaced: the app vanishes before drawing anything, the headset holds
+     * its loading environment, and the player has to launch a second time with
+     * no idea why. Not crashing is worth little if what you see is unchanged.
+     *
+     * An alarm rather than a direct start, because the intent has to survive
+     * this process exiting - which is the entire point of it.
+     */
+    private void scheduleRelaunch() {
+        try {
+            Intent intent =
+                getPackageManager().getLaunchIntentForPackage(getPackageName());
+
+            if (intent == null) {
+                Log.w(TAG, "no launch intent; the next start has to be manual");
+                return;
+            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                          | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+
+            PendingIntent pending = PendingIntent.getActivity(
+                this, 0, intent,
+                PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            AlarmManager alarms =
+                (AlarmManager)getSystemService(Context.ALARM_SERVICE);
+
+            if (alarms == null) {
+                Log.w(TAG, "no AlarmManager; the next start has to be manual");
+                return;
+            }
+            /* Long enough that this process is gone before the new one asks
+               for a library, short enough not to read as a hang. */
+            alarms.set(AlarmManager.RTC,
+                       System.currentTimeMillis() + RELAUNCH_DELAY_MS, pending);
+            Log.i(TAG, "relaunch scheduled in " + RELAUNCH_DELAY_MS + " ms");
+        } catch (Exception e) {
+            // Never let the restart path be the thing that breaks a launch:
+            // failing to schedule costs one manual press, throwing costs more.
+            Log.w(TAG, "could not schedule relaunch: " + e);
+        }
+    }
+
+    private static final long RELAUNCH_DELAY_MS = 400;
 
     @Override
     protected void onDestroy() {
