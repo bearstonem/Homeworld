@@ -34,7 +34,7 @@ size is left alone.
 you have it. Debug-signed, arm64-v8a, Quest only.
 
 ```
-aeb6ca8db694872319512fed8586c163  homeworld-unbound-vr.apk  99M
+71e3062ff0303944e02192b2b3a24280  homeworld-unbound-vr.apk  108M
 ```
 
 Roughly 65 MB of that is the bundled demo assets and 20 MB the two engine
@@ -64,6 +64,7 @@ your library under the same name, one of which has all your data.
   glyphs inside them. You can select, give orders, draw flight paths and zoom
   in on what you picked without ever leaving it, and closing it puts you back
   at whatever you were looking at.
+- **Mission objectives are on the sensor view.** The pings the game uses to point at things — the drones the first mission asks you to destroy, where a battle has started, what a Proximity Sensor has found — were missing from it.
 - **Dragging on the panel never worked.** Press and drag anywhere on the wrist
   panel and the pointer froze where you pressed until you let go. It took out
   band-box selection, the map's own Pan control and the ship view. The cause
