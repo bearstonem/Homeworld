@@ -337,39 +337,23 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
         return FALSE;
     }
 
-    /* Hold the sensor view's camera every frame, not once at the toggle.
-       The focus stack recomputes remembercam from its bounding box every
-       tick - NewSetFocusPoint - so anything that touches focus, including
-       simply selecting ships, drags the distance back to whatever fits that
-       selection. Setting it once looked like the view spontaneously diving
-       into a blob. Clip planes go with it for the same reason. */
-    if (vrw.sensorsOverlay && vrw.camDistanceBefore > 0.0f)
-    {
-        Camera* actual = vrwActualCamera();
-        Camera* remember = vrwRememberCamera();
+    /* The sensor view deliberately does NOT hold the camera here.
 
-        /* vrw.sensorDistance rather than the span, so the player's own zoom
-           survives being re-asserted. Holding the computed span here instead
-           would have quietly undone every stick input.
+       An earlier version wrote distance and lookat every render frame to
+       stop the focus stack pulling the view around. It did stop that, and
+       cost two worse things. CameraChase eases actualcamera toward
+       remembercam on the universe tick, which runs at a different rate from
+       this: writing both every render frame meant the two were never quite
+       agreed and the whole view shimmered. And any camera movement between
+       the previous frame's capture and this frame's render leaves the
+       controller rays - resolved through lookatInv, built from that capture
+       - solving against a camera that no longer exists, so they drift off
+       the hands.
 
-           The lookat is held too. Delegating it to ccFocus meant the focus
-           stack recomputed a distance from the selection's bounding box
-           every tick, which pulled the view back in as fast as the stick
-           could push it out - zooming in appeared to work only because it
-           was pulling the same way. */
-        actual->distance = remember->distance = vrw.sensorDistance;
-        actual->lookatpoint = remember->lookatpoint = vrw.sensorLookat;
-        actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
-        actual->clipPlaneFar = remember->clipPlaneFar = SM_ClipFar;
-        /* Deliberately NOT cameraSetEyePosition here. The controller rays are
-           resolved through the camera matrix captured during the previous
-           frame's render, so moving the eye between that capture and this
-           frame's render leaves the rays solving against a camera that no
-           longer exists - they stop tracking the hands one for one. Setting
-           the fields and letting cameraControl derive the eye on its own
-           schedule keeps the two in step, at the cost of the change landing
-           a tick later, which nobody can see. */
-    }
+       ccCancelFocus on entry plus CAM_USER_MOVED|CAM_USER_ZOOMED is what
+       actually keeps the camera still, which is what the interaction
+       document prescribes. Set it on entry and on zoom, then leave it
+       alone. */
     /* Never sample rndCameraMatrix directly here - see the file header. The
        captured matrix goes stale while a manager holds the main view down,
        which is correct: stale means "the last real main-view camera", and
@@ -3093,6 +3077,18 @@ void vrWorldSensorsZoom(real32 ratio)
         {
             selCentrePointCompute();
             vrw.sensorLookat = selCentrePoint;
+        }
+        /* Applied here, on input, rather than held every frame - see
+           vrWorldFrameBegin for why holding it was worse than the problem
+           it solved. Both cameras together, with the user flags set, or
+           CameraChase eases it straight back. */
+        {
+            Camera* actual = vrwActualCamera();
+            Camera* remember = vrwRememberCamera();
+
+            actual->distance = remember->distance = vrw.sensorDistance;
+            actual->lookatpoint = remember->lookatpoint = vrw.sensorLookat;
+            vrwCameraTouched(CAM_USER_MOVED | CAM_USER_ZOOMED);
         }
         return;
     }
