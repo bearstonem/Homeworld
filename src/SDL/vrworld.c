@@ -361,8 +361,14 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
         actual->lookatpoint = remember->lookatpoint = vrw.sensorLookat;
         actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
         actual->clipPlaneFar = remember->clipPlaneFar = SM_ClipFar;
-        cameraSetEyePosition(actual);
-        cameraSetEyePosition(remember);
+        /* Deliberately NOT cameraSetEyePosition here. The controller rays are
+           resolved through the camera matrix captured during the previous
+           frame's render, so moving the eye between that capture and this
+           frame's render leaves the rays solving against a camera that no
+           longer exists - they stop tracking the hands one for one. Setting
+           the fields and letting cameraControl derive the eye on its own
+           schedule keeps the two in step, at the cost of the change landing
+           a tick later, which nobody can see. */
     }
     /* Never sample rndCameraMatrix directly here - see the file header. The
        captured matrix goes stale while a manager holds the main view down,
