@@ -2932,19 +2932,27 @@ bool32 vrWorldToggleSensors(void)
            is correct in the game and wrong here, where seeing the far side
            of the map is the point. The manager gives its own camera
            SM_ClipNear and SM_ClipFar for exactly this reason; borrow them. */
-        Camera* actual = vrwActualCamera();
-        Camera* remember = vrwRememberCamera();
+        Camera* actual;
+        Camera* remember;
         real32 want = vrWorldSensorsSpan() * VRW_SENSOR_CAM_FACTOR;
+
+        /* Cancel focus BEFORE taking the camera pointers. ccCancelFocus pops
+           the focus stack, and vrwActualCamera/vrwRememberCamera resolve
+           through currentCameraStackEntry - so pointers taken first are
+           left addressing the entry that was just popped, and everything
+           written through them lands on a camera nobody is looking out of.
+           That is what made the view open at whatever close-up the pop had
+           restored instead of at the whole battlespace. */
+        ccCancelFocus(&universe.mainCameraCommand);
+
+        actual = vrwActualCamera();
+        remember = vrwRememberCamera();
 
         vrw.camDistanceBefore = actual->distance;
         vrw.camNearBefore = actual->clipPlaneNear;
         vrw.camFarBefore = actual->clipPlaneFar;
         vrw.sensorDistance = want;
         vrw.sensorLookat = actual->lookatpoint;
-        /* Nothing else may drive the camera while the view owns it. A focus
-           command left running would recompute both the lookat and the
-           distance from its bounding box every tick and win the argument. */
-        ccCancelFocus(&universe.mainCameraCommand);
 
         actual->distance = remember->distance = want;
         actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
