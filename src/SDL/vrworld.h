@@ -209,6 +209,12 @@ void vrWorldSensorsZoom(real32 ratio);
 struct blob;
 struct blob *vrWorldSensorsHoverBlob(void);
 
+/* The sensor representation drawn into the hologram, toggled by
+   VRW_CMD_SENSORS. Distinct from vrWorldSensorsActive(), which is the
+   engine's own full-screen manager - that still exists and still runs for
+   mission briefings, which KAS opens directly. */
+bool32 vrWorldSensorsOverlayActive(void);
+
 /* Cycle the camera focus through the player's fleet (+1 next / -1 prev) */
 void vrWorldFocusCycle(sdword step);
 

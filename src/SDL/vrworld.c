@@ -111,6 +111,10 @@ extern bool32 gameIsRunning;                                //Globals.c
 #define VRW_PATH_REISSUE_FRAC 0.25f /* of the lead, before a fallback re-order */
 #define VRW_PATH_STALL_TIME  20.0f  /* seconds of not moving before giving up */
 
+/* Sensor blob shells in the hologram. Dimmer than the map's, because there
+   they sit on a black screen and here they are drawn over a lit battle. */
+#define VRW_SENSOR_BLOB_COLOR colRGB(90, 120, 220)
+
 typedef struct {
     bool32  valid;
     vector  origin;                 /* game world units */
@@ -128,6 +132,7 @@ typedef struct {
 
 static struct {
     bool32  worldValid;
+    bool32  sensorsOverlay;         /* sensor representation in the hologram */
     real32  scale;                  /* metres -> game units */
     real32  gameCam[16];            /* pure mono main-view camera matrix */
     bool32  gameCamValid;
@@ -787,8 +792,18 @@ bool32 vrWorldCommand(vrworldcommand cmd, sdword arg)
             ccCancelFocus(&universe.mainCameraCommand);
             break;
         case VRW_CMD_SENSORS:
+            /* Not the manager. The map's whole content is already geometry in
+               game-world space, and the world is already a hologram in the
+               room, so the sensor view is a change of representation rather
+               than a screen to open - which is what the design document
+               argues for and what leaves every world verb working, since
+               smSensorsActive is what gates them off.
+
+               The manager still exists and still runs for mission briefings,
+               which KAS opens directly through kasfOpenSensors. */
             vrWorldCloseManagers();
-            smSensorsBegin(NULL, NULL);
+            vrw.sensorsOverlay ^= TRUE;
+            SDL_Log("VR: sensor overlay %s", vrw.sensorsOverlay ? "on" : "off");
             break;
         case VRW_CMD_UNDO:       udLatestThingUndo();            break;
 
@@ -1356,6 +1371,14 @@ bool32 vrWorldSetRay(sdword hand, real32 const origin[3], real32 const dir[3], b
     else
     {
         ray->hover = vrwPick(ray, FALSE, oldHover, &ray->hoverT);
+        /* With the overlay up the ships are still drawn and still the thing
+           orders act on, so ship picking stays exactly as it was. The blob
+           is picked alongside it, for the shell highlight and for region
+           work - it never displaces a ship the player is aiming at. */
+        if (vrw.sensorsOverlay)
+        {
+            vrw.ray[hand].hoverBlob = vrwSensorsPick(ray, NULL, NULL);
+        }
     }
     if (hand == 1 && vrw.debugFrame % VRW_DEBUG_INTERVAL == 1)
     {
@@ -1434,11 +1457,16 @@ bool32 vrWorldHandHasTarget(sdword hand)
         && (vrw.ray[hand].hover != NULL || vrw.ray[hand].hoverBlob != NULL);
 }
 
+bool32 vrWorldSensorsOverlayActive(void)
+{
+    return vrw.sensorsOverlay;
+}
+
 blob* vrWorldSensorsHoverBlob(void)
 {
     sdword hand;
 
-    if (!vrWorldSensorsActive())
+    if (!vrWorldSensorsActive() && !vrw.sensorsOverlay)
     {
         return NULL;
     }
@@ -2952,6 +2980,42 @@ void vrWorldDrawOverlays(void)
     glDisable(GL_LIGHTING);
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_FOG);
+
+    /* Sensor representation, drawn into the world the player is standing in
+       rather than onto a panel. Same blobs the map draws, same visibility
+       test, same primitive - only the camera differs, and here it is the
+       player's own head. The blob the ray is on is drawn at Relic's full
+       density in white, which is what the map has always done for the blob
+       under the movement cursor. */
+    if (vrw.sensorsOverlay)
+    {
+        blob const* hovered = vrWorldSensorsHoverBlob();
+        Node* node;
+        sdword sensorLevel = universe.curPlayerPtr->sensorLevel;
+
+        for (node = universe.collBlobList.head; node != NULL; node = node->next)
+        {
+            blob* thisBlob = (blob*)listGetStructOfNode(node);
+
+            if (!((thisBlob->flags & (BTF_Explored | BTF_ProbeDroid))
+                  || (sensorLevel == 2
+                      && bitTest(thisBlob->flags, BTF_UncloakedEnemies))))
+            {
+                continue;
+            }
+            /* screenRadius is the map's own LOD input and is stale or zero
+               while the map is closed, so the shell is drawn at a fixed
+               tessellation here rather than reusing it. */
+            if (thisBlob == hovered)
+            {
+                smBlobSphereDraw(thisBlob, colWhite, 40, 12);
+            }
+            else
+            {
+                smBlobSphereDraw(thisBlob, VRW_SENSOR_BLOB_COLOR, 60, 10);
+            }
+        }
+    }
 
     for (hand = 0; hand < VRW_HAND_COUNT; hand++)
     {

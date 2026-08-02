@@ -9,6 +9,7 @@
 #ifndef ___SENSORS_H
 #define ___SENSORS_H
 
+#include "Blobs.h"
 #include "FEFlow.h"
 #include "Matrix.h"
 #include "ShipDefs.h"
@@ -232,6 +233,10 @@ extern real32 smUniverseSizeZ;
 extern real32 smClosestDistance;
 
 extern sdword  smFuzzyBlobs;
+
+/* The map's blob shell, drawn wherever the current modelview points - the
+   map's own camera, or an eye pass with the sensor overlay up. */
+void smBlobSphereDraw(blob *thisBlob, color c, sdword ringStep, sdword nSegments);
 
 extern sdword smBlobSpheres;
 extern sdword smBlobSphereRingStep;
