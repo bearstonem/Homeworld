@@ -117,11 +117,43 @@ public class HomeworldActivity extends SDLActivity {
      */
     private WifiManager.MulticastLock multicastLock;
 
+    /**
+     * Which engine this process actually loaded, or null before the first
+     * load. Static because it outlives the activity: Android reuses a warm
+     * process, and System.loadLibrary cannot be undone.
+     */
+    private static Boolean loadedFullGame = null;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // Before super: it is super.onCreate that calls getLibraries() and
         // loads the .so, so the decision has to already be made by then.
         prepareGameData();
+
+        // The demo/full choice is compiled into the engine, so it is fixed for
+        // the life of a process the moment a library is loaded. The data that
+        // decides it is not: a player runs the demo, copies their game into
+        // Downloads, and comes back. Android warm-starts the existing process,
+        // prepareGameData now says full campaign, and the already-loaded
+        // libmainDemo.so goes looking for HomeworldDL.big in Downloads and
+        // dies with "Unable to find required .big file" - leaving the headset
+        // in the compositor with nothing to draw. Launching a second time gets
+        // a fresh process and works, which is what made it look like a
+        // first-launch quirk rather than a crash.
+        //
+        // There is no way to unload a library, so the only correct answer is
+        // not to run in this process. Exit before super.onCreate touches the
+        // wrong one; the next launch starts clean and picks the right engine.
+        if (loadedFullGame != null && loadedFullGame.booleanValue() != fullGame) {
+            Log.i(TAG, "campaign changed (was " + (loadedFullGame ? "full" : "demo")
+                     + ", now " + (fullGame ? "full" : "demo")
+                     + ") - restarting so the right engine is loaded");
+            finishAffinity();
+            System.exit(0);
+            return;
+        }
+        loadedFullGame = Boolean.valueOf(fullGame);
+
         acquireMulticastLock();
         super.onCreate(savedInstanceState);
     }
