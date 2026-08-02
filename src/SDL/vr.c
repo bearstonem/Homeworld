@@ -3049,7 +3049,18 @@ static void vrUpdateInput(XrTime time)
             && (ry > 0.25f || ry < -0.25f)
             && !vrWorldMoveActive())
         {
-            vrWorldCameraZoom(1.0f - ry * 0.02f);
+            /* The sensor view holds the camera distance every frame, so
+               zooming the main camera here would be undone before it was
+               ever drawn. Its own zoom moves the range the view is holding,
+               and pulls in on the selection rather than on the origin. */
+            if (vrWorldSensorsOverlayActive())
+            {
+                vrWorldSensorsZoom(1.0f - ry * 0.02f);
+            }
+            else
+            {
+                vrWorldCameraZoom(1.0f - ry * 0.02f);
+            }
         }
         cycleDir = traversing
                  ? ((rx > 0.7f) ? 1 : (rx < -0.7f) ? -1 : 0) : 0;

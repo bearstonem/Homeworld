@@ -137,6 +137,9 @@ extern bool32 gameIsRunning;                                //Globals.c
 /* Class glyph size as a fraction of the view span, so it holds its apparent
    size however far the camera has been pulled back. */
 #define VRW_SENSOR_GLYPH_FRAC    0.010f
+/* Camera range in the sensor view, as multiples of the span */
+#define VRW_SENSOR_ZOOM_MIN      0.06f
+#define VRW_SENSOR_ZOOM_MAX      3.0f
 
 typedef struct {
     bool32  valid;
@@ -156,6 +159,7 @@ typedef struct {
 static struct {
     bool32  worldValid;
     bool32  sensorsOverlay;         /* sensor representation in the hologram */
+    real32  sensorDistance;         /* the sensor view owns the camera range */
     real32  camDistanceBefore;      /* main camera, restored on the way out */
     real32  camNearBefore;
     real32  camFarBefore;
@@ -342,9 +346,11 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
     {
         Camera* actual = vrwActualCamera();
         Camera* remember = vrwRememberCamera();
-        real32 want = vrWorldSensorsSpan() * VRW_SENSOR_CAM_FACTOR;
 
-        actual->distance = remember->distance = want;
+        /* vrw.sensorDistance rather than the span, so the player's own zoom
+           survives being re-asserted. Holding the computed span here instead
+           would have quietly undone every stick input. */
+        actual->distance = remember->distance = vrw.sensorDistance;
         actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
         actual->clipPlaneFar = remember->clipPlaneFar = SM_ClipFar;
     }
@@ -2933,6 +2939,7 @@ bool32 vrWorldToggleSensors(void)
         vrw.camDistanceBefore = actual->distance;
         vrw.camNearBefore = actual->clipPlaneNear;
         vrw.camFarBefore = actual->clipPlaneFar;
+        vrw.sensorDistance = want;
 
         actual->distance = remember->distance = want;
         actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
@@ -3042,7 +3049,32 @@ void vrWorldSensorsOrbit(real32 deltaYaw, real32 deltaPitch)
 
 void vrWorldSensorsZoom(real32 ratio)
 {
-    if (!vrWorldSensorsActive() || ratio <= 0.0f)
+    if (ratio <= 0.0f)
+    {
+        return;
+    }
+    if (vrw.sensorsOverlay)
+    {
+        real32 span = vrWorldSensorsSpan();
+        real32 want = vrw.sensorDistance * ratio;
+        real32 lo = span * VRW_SENSOR_ZOOM_MIN;
+        real32 hi = span * VRW_SENSOR_ZOOM_MAX;
+
+        vrw.sensorDistance = want < lo ? lo : (want > hi ? hi : want);
+
+        /* Come in on what the player is working with rather than on the
+           middle of the map. Focusing rather than writing the lookat
+           directly is what makes it hold: the focus stack recomputes the
+           lookat from its bounding box every tick, so anything set behind
+           its back is gone by the next one. It sets a distance as well,
+           which the per-frame hold then replaces with ours. */
+        if (ratio < 1.0f && selSelected.numShips > 0)
+        {
+            ccFocus(&universe.mainCameraCommand, (FocusCommand*)&selSelected);
+        }
+        return;
+    }
+    if (!vrWorldSensorsActive())
     {
         return;
     }
