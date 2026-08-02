@@ -125,6 +125,11 @@ extern bool32 gameIsRunning;                                //Globals.c
 /* Camera distance as a multiple of the span. Above 1 so the far edge is
    inside the view rather than exactly on it. */
 #define VRW_SENSOR_CAM_FACTOR    1.8f
+/* The manual's legend, for the ship points */
+#define VRW_SENSOR_OWN_COLOR     colRGB(60, 230, 90)
+#define VRW_SENSOR_ALLY_COLOR    colRGB(230, 220, 70)
+#define VRW_SENSOR_ENEMY_COLOR   colRGB(235, 60, 55)
+#define VRW_SENSOR_SHIP_POINT    4.0f
 
 typedef struct {
     bool32  valid;
@@ -301,6 +306,12 @@ udword vrWorldGameCameraAge(void)
     return vrw.gameCamValid ? vrw.gameCamAge : (udword)-1;
 }
 
+/* Defined below, used by the sensor view's per-frame camera hold above them.
+   Without these the uses would compile as implicit non-static declarations
+   and then clash with the real definitions. */
+static Camera* vrwActualCamera(void);
+static Camera* vrwRememberCamera(void);
+
 bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], real32 scale)
 {
     real32 R[9], t[3];
@@ -312,6 +323,23 @@ bool32 vrWorldFrameBegin(real32 const anchorPos[3], real32 const anchorQuat[4], 
     if (!gameIsRunning || mrCamera == NULL)
     {
         return FALSE;
+    }
+
+    /* Hold the sensor view's camera every frame, not once at the toggle.
+       The focus stack recomputes remembercam from its bounding box every
+       tick - NewSetFocusPoint - so anything that touches focus, including
+       simply selecting ships, drags the distance back to whatever fits that
+       selection. Setting it once looked like the view spontaneously diving
+       into a blob. Clip planes go with it for the same reason. */
+    if (vrw.sensorsOverlay && vrw.camDistanceBefore > 0.0f)
+    {
+        Camera* actual = vrwActualCamera();
+        Camera* remember = vrwRememberCamera();
+        real32 want = vrWorldSensorsSpan() * VRW_SENSOR_CAM_FACTOR;
+
+        actual->distance = remember->distance = want;
+        actual->clipPlaneNear = remember->clipPlaneNear = SM_ClipNear;
+        actual->clipPlaneFar = remember->clipPlaneFar = SM_ClipFar;
     }
     /* Never sample rndCameraMatrix directly here - see the file header. The
        captured matrix goes stale while a manager holds the main view down,
@@ -3207,6 +3235,44 @@ void vrWorldDrawOverlays(void)
             else
             {
                 smBlobSphereDraw(thisBlob, VRW_SENSOR_BLOB_COLOR, 60, 10);
+            }
+
+            /* The fleet. Pulled back this far the ships are sub-pixel as
+               meshes, which is exactly why the map draws each one as a
+               point instead - without them the view has regions and no
+               contents. Colours are the manual's legend: green yours,
+               yellow an ally's, red an enemy's. */
+            if (thisBlob->blobObjects != NULL)
+            {
+                sdword oi;
+
+                for (oi = 0; oi < thisBlob->blobObjects->numSpaceObjs; oi++)
+                {
+                    SpaceObj* obj = thisBlob->blobObjects->SpaceObjPtr[oi];
+                    Ship* ship = (Ship*)obj;
+                    color pc;
+
+                    if (obj->objtype != OBJ_ShipType
+                        || (obj->flags & (SOF_Dead | SOF_Hide)))
+                    {
+                        continue;
+                    }
+                    if (ship->playerowner == universe.curPlayerPtr)
+                    {
+                        pc = bitTest(ship->flags, SOF_Selected)
+                           ? colWhite : VRW_SENSOR_OWN_COLOR;
+                    }
+                    else if (allianceIsShipAlly(ship, universe.curPlayerPtr))
+                    {
+                        pc = VRW_SENSOR_ALLY_COLOR;
+                    }
+                    else
+                    {
+                        pc = VRW_SENSOR_ENEMY_COLOR;
+                    }
+                    primPointSize3(&obj->posinfo.position,
+                                   VRW_SENSOR_SHIP_POINT, pc);
+                }
             }
         }
     }
