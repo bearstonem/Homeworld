@@ -1282,7 +1282,7 @@ renderDerelictAsDot:
                 {
                     vector v = shipTO[index].pos;
                     real32 ix = icon->loc[i].x * worldRadius;
-                    real32 iy = icon->loc[i].y * worldRadius;
+                    real32 iy = icon->loc[i].y * worldRadius * SM_IconAspectUndo;
 
                     v.x += right.x * ix + camUp.x * iy;
                     v.y += right.y * ix + camUp.y * iy;

@@ -180,6 +180,16 @@
    only darken, which left no headroom at all. */
 #define SM_BlobSphereBright         0.35f
 
+/* toVertexAdd bakes a 4:3 correction into every icon's y at load time
+   (TO_VertexScanFactorY against TO_VertexScanFactorX), because the 2D path
+   writes NDC directly and NDC y and x do not cover the same number of pixels.
+   A billboard has no such problem - equal offsets along the camera's right
+   and up project to equal pixel distances, since the projection's own
+   P11/P00 is exactly that ratio - so carrying the correction through would
+   stretch every icon vertically by a third. Undo it. Works out to 0.75, and
+   stays right if either scan factor is ever retuned. */
+#define SM_IconAspectUndo           (-TO_VertexScanFactorX / TO_VertexScanFactorY)
+
 #define SM_FOWBlobUpdateTime        0.75        //how long the FOW sub-blobs last
 
 /*=============================================================================
