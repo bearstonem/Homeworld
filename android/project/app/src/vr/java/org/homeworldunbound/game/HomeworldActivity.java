@@ -196,12 +196,21 @@ public class HomeworldActivity extends SDLActivity {
             }
             /* Long enough that this process is gone before the new one asks
                for a library, short enough not to read as a hang. */
-            /* setExact, not set: set has been inexact since API 19 and is
-               batched with whatever else the system has pending, which turned
+            /* setExact where allowed, because plain set is batched and turned
                a 400ms request into nearly seven seconds - long enough to read
-               as the hang this is supposed to remove. */
-            alarms.setExact(AlarmManager.RTC,
-                            System.currentTimeMillis() + RELAUNCH_DELAY_MS, pending);
+               as the hang this exists to remove. But exact alarms need
+               SCHEDULE_EXACT_ALARM from Android 12, which is not granted by
+               default and which a game has no business demanding, so fall
+               back rather than losing the relaunch entirely. Slow beats
+               absent: the inexact path is proven to work, it is just lazy. */
+            long when = System.currentTimeMillis() + RELAUNCH_DELAY_MS;
+
+            try {
+                alarms.setExact(AlarmManager.RTC, when, pending);
+            } catch (SecurityException noExact) {
+                Log.i(TAG, "no exact alarm permission; relaunch may be delayed");
+                alarms.set(AlarmManager.RTC, when, pending);
+            }
             Log.i(TAG, "relaunch scheduled in " + RELAUNCH_DELAY_MS + " ms");
         } catch (Exception e) {
             // Never let the restart path be the thing that breaks a launch:
