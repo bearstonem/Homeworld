@@ -3055,7 +3055,15 @@ static void vrUpdateInput(XrTime time)
                and pulls in on the selection rather than on the origin. */
             if (vrWorldSensorsOverlayActive())
             {
-                vrWorldSensorsZoom(1.0f - ry * 0.02f);
+                /* Gentler than the main view's rate. The rays are resolved
+                   from the camera captured during the previous frame's
+                   render, so while the camera is moving they lag it by one
+                   frame - and at sensor distances a frame of the main
+                   view's rate is a long way, which is what makes them
+                   visibly drift and then snap back on release. Halving the
+                   rate halves the drift. It does not remove it; see
+                   documentation/vr-sensors-manager-design.md. */
+                vrWorldSensorsZoom(1.0f - ry * 0.01f);
             }
             else
             {

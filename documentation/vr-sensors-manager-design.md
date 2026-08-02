@@ -323,3 +323,62 @@ fetch — the PDFs return as compressed streams and have to go through
   Options (Blob Alpha, Instant SM Transition).
 - Quick reference card: `https://homeworld.neocities.org/download/pdf/referenc.pdf`
   — §4.0 Movement, §6.0 Manager Screens, §10.0 Multiplayer Controls.
+
+## Camera ownership, and four ways it bites
+
+The sensor view is the first thing in the port to take the game camera away
+from the engine for a while, and every one of these cost real time on
+2026-08-02. None is visible from the code.
+
+**The focus stack recomputes distance, not just the lookat.**
+`NewSetFocusPoint` rebuilds `remembercam` from the focus bounding box every
+tick, so a `ccFocus` left running will fight anything else driving the camera
+and win. Using `ccFocus` to aim a zoom made zooming *in* appear to work - it
+pulled the same way - while zooming out did nothing at all. Cancel focus on
+entry and own the lookat outright.
+
+**Do not move the camera between the capture and the render.** Controller rays
+are resolved through `lookatInv`, built from the camera matrix captured during
+the *previous* frame's render (`vrWorldCaptureGameCamera`, from
+`rndMainViewRenderFunction`). Setting `distance` and `lookatpoint` is safe -
+`cameraControl` derives the eye position on its own schedule. Calling
+`cameraSetEyePosition` directly is not: it moves the camera inside that gap and
+every ray in the frame solves against a camera that no longer exists.
+
+**Do not hold the camera every render frame.** `CameraChase` eases
+`actualcamera` toward `remembercam` on the universe tick, which runs at a
+different rate from the render. Writing both every frame leaves them never
+quite agreed and the whole view shimmers. `ccCancelFocus` plus
+`CAM_USER_MOVED|CAM_USER_ZOOMED` is what actually keeps a camera still.
+
+**`ccCancelFocus` pops the stack, so resolve camera pointers after it.**
+`vrwActualCamera` and `vrwRememberCamera` go through
+`currentCameraStackEntry`. Pointers taken before the cancel address the entry
+that was just popped, and everything written through them lands on a camera
+nobody is looking out of - which opened the view at whatever close-up the pop
+had restored.
+
+## Known, not fixed
+
+**Rays drift while the zoom is held.** Same one-frame lag as above: during a
+continuous zoom the camera moves every frame, so the rays trail it by a frame's
+worth of movement and snap back on release. The zoom rate is halved in the
+sensor view to halve the drift, which is a mitigation and not a fix. The fix is
+to re-capture the lookat from the current camera at the top of
+`vrWorldFrameBegin` rather than relying on the previous frame's capture -
+`render.c` builds it with `rgluLookAt` from `eyeposition + scaledOffset`,
+`lookatpoint` and `upvector`, and that `scaledOffset` term is the part to get
+right.
+
+**The view jitters while ships are moving.** Not the camera - the collision
+blobs re-form under the drawing. `bobListCreate` reclusters every tick and a
+ship crossing a cluster boundary changes a blob's centre and radius
+discontinuously, so shells and glow jump rather than slide. The map hides this
+by throttling its own blob work with `smBlobUpdateRate`; the overlay reads the
+live list every frame. Either sample on a slower cadence or smooth each blob's
+centre and radius - the latter needs blob identity to survive a rebuild, which
+has not been checked.
+
+**Class glyphs are drawn for every ship.** The desktop map draws them only for
+Resource Collectors and Capital Ships (`smShipTypeRenderFlags`, `SM_TO`). Worth
+narrowing once there is a real fleet to judge it against.
